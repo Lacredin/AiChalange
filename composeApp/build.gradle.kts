@@ -42,6 +42,11 @@ kotlin {
 compose.desktop {
     application {
         mainClass = "com.example.aiadventchalengetestllmapi.MainKt"
+        jvmArgs += listOf(
+            "-Dfile.encoding=UTF-8",
+            "-Dsun.stdout.encoding=UTF-8",
+            "-Dsun.stderr.encoding=UTF-8"
+        )
 
         nativeDistributions {
             targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb)

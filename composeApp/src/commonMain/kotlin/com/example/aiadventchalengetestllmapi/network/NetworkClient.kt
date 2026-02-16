@@ -5,6 +5,7 @@ import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.plugins.logging.LogLevel
 import io.ktor.client.plugins.logging.Logger
 import io.ktor.client.plugins.logging.Logging
+import io.ktor.http.HttpHeaders
 import io.ktor.serialization.kotlinx.json.json
 import kotlinx.serialization.json.Json
 
@@ -26,7 +27,8 @@ object NetworkClient {
                         println("Ktor: $message")
                     }
                 }
-                level = LogLevel.INFO
+                level = LogLevel.BODY
+                sanitizeHeader { header -> header == HttpHeaders.Authorization }
             }
         }
     }
