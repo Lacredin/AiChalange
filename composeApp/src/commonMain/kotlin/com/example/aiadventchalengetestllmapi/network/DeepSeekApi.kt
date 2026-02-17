@@ -30,7 +30,16 @@ class DeepSeekApi(
 data class DeepSeekChatRequest(
     val model: String,
     val messages: List<DeepSeekMessage>,
-    val temperature: Double? = null
+    val temperature: Double? = null,
+    @SerialName("max_tokens")
+    val maxTokens: Int? = null,
+    @SerialName("top_p")
+    val topP: Double? = null,
+    @SerialName("presence_penalty")
+    val presencePenalty: Double? = null,
+    @SerialName("frequency_penalty")
+    val frequencyPenalty: Double? = null,
+    val stop: List<String>? = null
 )
 
 @Serializable
