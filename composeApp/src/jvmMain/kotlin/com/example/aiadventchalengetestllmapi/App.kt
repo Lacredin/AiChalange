@@ -14,6 +14,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -340,14 +341,16 @@ private fun ChatBubble(message: UiChatMessage) {
                 .padding(12.dp)
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text(
-                    text = message.text,
-                    color = if (message.isUser) {
-                        MaterialTheme.colorScheme.onPrimaryContainer
-                    } else {
-                        deepSeekTextColor
-                    }
-                )
+                SelectionContainer {
+                    Text(
+                        text = message.text,
+                        color = if (message.isUser) {
+                            MaterialTheme.colorScheme.onPrimaryContainer
+                        } else {
+                            deepSeekTextColor
+                        }
+                    )
+                }
                 Text(
                     text = message.paramsInfo,
                     style = MaterialTheme.typography.labelSmall,
