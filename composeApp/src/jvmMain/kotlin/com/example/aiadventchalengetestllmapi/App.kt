@@ -47,31 +47,61 @@ import com.example.aiadventchalengetestllmapi.network.GigaChatApi
 import com.example.aiadventchalengetestllmapi.network.OpenAiApi
 import com.example.aiadventchalengetestllmapi.network.ProxyOpenAiApi
 import kotlinx.coroutines.launch
+import java.util.Locale
 
 private enum class ChatApi(
     val label: String,
     val envVar: String,
-    val defaultModel: String
+    val defaultModel: String,
+    val supportedModels: List<String>
 ) {
     DeepSeek(
         label = "DeepSeek",
         envVar = "DEEPSEEK_API_KEY",
-        defaultModel = "deepseek-chat"
+        defaultModel = "deepseek-chat",
+        supportedModels = listOf(
+            "deepseek-chat",
+            "deepseek-reasoner"
+        )
     ),
     OpenAI(
         label = "OpenAI",
         envVar = "OPENAI_API_KEY",
-        defaultModel = "gpt-4o-mini"
+        defaultModel = "gpt-4o-mini",
+        supportedModels = listOf(
+            "gpt-4o-mini",
+            "gpt-4o",
+            "gpt-4.1-mini",
+            "gpt-4.1",
+            "o3-mini"
+        )
     ),
     GigaChat(
         label = "GigaChat",
         envVar = "GIGACHAT_ACCESS_TOKEN",
-        defaultModel = "GigaChat-2"
+        defaultModel = "GigaChat-2",
+        supportedModels = listOf(
+            "GigaChat-2",
+            "GigaChat-2-Pro",
+            "GigaChat-2-Max"
+        )
     ),
     ProxyOpenAI(
         label = "ProxyAPI (OpenAI)",
         envVar = "PROXYAPI_API_KEY",
-        defaultModel = "openai/gpt-4o-mini"
+        defaultModel = "openai/gpt-4o-mini",
+        supportedModels = listOf(
+            "openai/gpt-5.2",
+            "openai/gpt-4o-mini",
+            "openai/gpt-4o",
+            "openai/gpt-4.1-mini",
+            "openai/gpt-4.1",
+            "openai/o3-mini",
+            "anthropic/claude-sonnet-4-6",
+            "anthropic/claude-sonnet-4-5",
+            "anthropic/claude-opus-4-6",
+            "anthropic/claude-3-7-sonnet-20250219",
+        )
     )
 }
 
@@ -83,6 +113,8 @@ private data class UiChatMessage(
 
 private fun readApiKeyFromEnv(envVar: String): String? =
     System.getenv(envVar)?.trim()?.takeIf { it.isNotEmpty() }
+
+private fun Double.formatSeconds(): String = String.format(Locale.US, "%.2f", this)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -106,6 +138,7 @@ fun App() {
         }
         var selectedApi by remember { mutableStateOf(ChatApi.DeepSeek) }
         var apiSelectorExpanded by remember { mutableStateOf(false) }
+        var modelSelectorExpanded by remember { mutableStateOf(false) }
         var systemPromptInput by remember { mutableStateOf("") }
         var modelInput by remember { mutableStateOf(ChatApi.DeepSeek.defaultModel) }
         var temperatureInput by remember { mutableStateOf("") }
@@ -150,10 +183,15 @@ fun App() {
                 append(stop)
             }
 
-            messages += UiChatMessage(text = trimmed, isUser = true, paramsInfo = paramsInfo)
+            messages += UiChatMessage(
+                text = trimmed,
+                isUser = true,
+                paramsInfo = "$paramsInfo | Время ответа=pending"
+            )
 
             scope.launch {
                 isLoading = true
+                val startedAtNanos = System.nanoTime()
                 val answer = try {
                     val apiKey = apiKeysByApi[selectedApi]
                         .orEmpty()
@@ -206,7 +244,14 @@ fun App() {
                 } catch (e: Exception) {
                     "Request failed: ${e.message ?: "unknown error"}"
                 }
-                messages += UiChatMessage(text = answer, isUser = false, paramsInfo = paramsInfo)
+                val responseTimeSec = (System.nanoTime() - startedAtNanos) / 1_000_000_000.0
+                val paramsInfoWithTiming =
+                    "$paramsInfo | Время ответа=${responseTimeSec.formatSeconds()}"
+                messages += UiChatMessage(
+                    text = answer,
+                    isUser = false,
+                    paramsInfo = paramsInfoWithTiming
+                )
                 isLoading = false
             }
         }
@@ -258,6 +303,7 @@ fun App() {
                                 selectedApi = api
                                 modelInput = api.defaultModel
                                 apiSelectorExpanded = false
+                                modelSelectorExpanded = false
                             }
                         )
                     }
@@ -313,17 +359,49 @@ fun App() {
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    OutlinedTextField(
-                        value = modelInput,
-                        onValueChange = { modelInput = it },
-                        modifier = Modifier
-                            .weight(1.2f)
-                            .height(52.dp),
-                        enabled = !isLoading,
-                        placeholder = { Text("model", style = MaterialTheme.typography.labelSmall) },
-                        singleLine = true,
-                        textStyle = MaterialTheme.typography.labelSmall
-                    )
+                    ExposedDropdownMenuBox(
+                        expanded = modelSelectorExpanded,
+                        onExpandedChange = { expanded ->
+                            if (!isLoading) {
+                                modelSelectorExpanded = expanded
+                            }
+                        },
+                        modifier = Modifier.weight(1.2f)
+                    ) {
+                        OutlinedTextField(
+                            value = modelInput,
+                            onValueChange = {},
+                            modifier = Modifier
+                                .menuAnchor(
+                                    type = ExposedDropdownMenuAnchorType.PrimaryNotEditable,
+                                    enabled = !isLoading
+                                )
+                                .fillMaxWidth()
+                                .height(52.dp),
+                            enabled = !isLoading,
+                            readOnly = true,
+                            placeholder = { Text("model", style = MaterialTheme.typography.labelSmall) },
+                            trailingIcon = {
+                                ExposedDropdownMenuDefaults.TrailingIcon(expanded = modelSelectorExpanded)
+                            },
+                            singleLine = true,
+                            textStyle = MaterialTheme.typography.labelSmall
+                        )
+                        ExposedDropdownMenu(
+                            expanded = modelSelectorExpanded,
+                            onDismissRequest = { modelSelectorExpanded = false }
+                        ) {
+                            selectedApi.supportedModels.forEach { model ->
+                                DropdownMenuItem(
+                                    text = { Text(model) },
+                                    onClick = {
+                                        modelInput = model
+                                        modelSelectorExpanded = false
+                                    }
+                                )
+                            }
+                        }
+                    }
                     OutlinedTextField(
                         value = maxTokensInput,
                         onValueChange = { maxTokensInput = it },
