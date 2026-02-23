@@ -40,7 +40,17 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isAltPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import com.example.aiadventchalengetestllmapi.network.DeepSeekApi
 import com.example.aiadventchalengetestllmapi.network.DeepSeekChatRequest
@@ -162,7 +172,8 @@ private fun AiAgentChat(
 
     val messages = remember { mutableStateListOf<AiAgentMessage>() }
     val listState = rememberLazyListState()
-    var inputText by remember { mutableStateOf("") }
+    val inputFocusRequester = remember { FocusRequester() }
+    var inputText by remember { mutableStateOf(TextFieldValue("")) }
     var selectedApi by remember { mutableStateOf(AiAgentApi.DeepSeek) }
     var apiSelectorExpanded by remember { mutableStateOf(false) }
     var modelSelectorExpanded by remember { mutableStateOf(false) }
@@ -171,7 +182,7 @@ private fun AiAgentChat(
     var isLoading by remember { mutableStateOf(false) }
 
     fun sendMessage() {
-        val trimmed = inputText.trim()
+        val trimmed = inputText.text.trim()
         if (trimmed.isEmpty() || isLoading) return
 
         val model = modelInput.trim().ifEmpty { selectedApi.defaultModel }
@@ -182,6 +193,7 @@ private fun AiAgentChat(
             isUser = true,
             paramsInfo = "$paramsInfo | response_time=pending"
         )
+        inputText = TextFieldValue("")
 
         scope.launch {
             val requestSessionId = chatSessionId
@@ -237,9 +249,15 @@ private fun AiAgentChat(
         if (newChatTrigger > 0) {
             chatSessionId++
             messages.clear()
-            inputText = ""
+            inputText = TextFieldValue("")
             modelSelectorExpanded = false
             apiSelectorExpanded = false
+        }
+    }
+
+    LaunchedEffect(isLoading) {
+        if (!isLoading) {
+            inputFocusRequester.requestFocus()
         }
     }
 
@@ -353,16 +371,36 @@ private fun AiAgentChat(
             OutlinedTextField(
                 value = inputText,
                 onValueChange = { inputText = it },
-                modifier = Modifier.weight(1f),
+                modifier = Modifier
+                    .weight(1f)
+                    .focusRequester(inputFocusRequester)
+                    .onPreviewKeyEvent { keyEvent ->
+                        if (keyEvent.type != KeyEventType.KeyDown || keyEvent.key != Key.Enter) {
+                            return@onPreviewKeyEvent false
+                        }
+
+                        if (keyEvent.isAltPressed) {
+                            val start = inputText.selection.min
+                            val end = inputText.selection.max
+                            inputText = inputText.copy(
+                                text = inputText.text.replaceRange(start, end, "\n"),
+                                selection = TextRange(start + 1)
+                            )
+                            return@onPreviewKeyEvent true
+                        }
+
+                        sendMessage()
+                        true
+                    },
                 enabled = !isLoading,
                 label = { Text("Message") },
                 maxLines = 4
             )
             Button(
                 onClick = ::sendMessage,
-                enabled = inputText.isNotBlank() && !isLoading
+                enabled = inputText.text.isNotBlank() && !isLoading
             ) {
-                Text("Send")
+                Text("Отправить")
             }
         }
     }
