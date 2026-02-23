@@ -27,10 +27,12 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -118,12 +120,17 @@ private fun Double.aiAgentFormatSeconds(): String = String.format(Locale.US, "%.
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AiAgentScreen(onOpenApp: () -> Unit) {
+    var newChatTrigger by remember { mutableIntStateOf(0) }
+
     MaterialTheme {
         Scaffold(
             topBar = {
                 TopAppBar(
                     title = { Text("Ai \u0410\u0433\u0435\u043D\u0442") },
                     actions = {
+                        TextButton(onClick = { newChatTrigger++ }) {
+                            Text("Новый чат")
+                        }
                         IconButton(onClick = onOpenApp) {
                             Text(text = "\u2699")
                         }
@@ -134,7 +141,8 @@ fun AiAgentScreen(onOpenApp: () -> Unit) {
             AiAgentChat(
                 modifier = Modifier
                     .padding(innerPadding)
-                    .fillMaxSize()
+                    .fillMaxSize(),
+                newChatTrigger = newChatTrigger
             )
         }
     }
@@ -142,7 +150,10 @@ fun AiAgentScreen(onOpenApp: () -> Unit) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun AiAgentChat(modifier: Modifier = Modifier) {
+private fun AiAgentChat(
+    modifier: Modifier = Modifier,
+    newChatTrigger: Int
+) {
     val scope = rememberCoroutineScope()
     val deepSeekApi = remember { DeepSeekApi() }
     val openAiApi = remember { OpenAiApi() }
@@ -156,6 +167,7 @@ private fun AiAgentChat(modifier: Modifier = Modifier) {
     var apiSelectorExpanded by remember { mutableStateOf(false) }
     var modelSelectorExpanded by remember { mutableStateOf(false) }
     var modelInput by remember { mutableStateOf(AiAgentApi.DeepSeek.defaultModel) }
+    var chatSessionId by remember { mutableIntStateOf(0) }
     var isLoading by remember { mutableStateOf(false) }
 
     fun sendMessage() {
@@ -172,6 +184,7 @@ private fun AiAgentChat(modifier: Modifier = Modifier) {
         )
 
         scope.launch {
+            val requestSessionId = chatSessionId
             isLoading = true
             val startedAtNanos = System.nanoTime()
             val answer = try {
@@ -201,6 +214,10 @@ private fun AiAgentChat(modifier: Modifier = Modifier) {
             }
 
             val responseTimeSec = (System.nanoTime() - startedAtNanos) / 1_000_000_000.0
+            if (requestSessionId != chatSessionId) {
+                isLoading = false
+                return@launch
+            }
             messages += AiAgentMessage(
                 text = answer,
                 isUser = false,
@@ -213,6 +230,16 @@ private fun AiAgentChat(modifier: Modifier = Modifier) {
     LaunchedEffect(messages.size, isLoading) {
         if (messages.isNotEmpty()) {
             listState.animateScrollToItem(messages.lastIndex)
+        }
+    }
+
+    LaunchedEffect(newChatTrigger) {
+        if (newChatTrigger > 0) {
+            chatSessionId++
+            messages.clear()
+            inputText = ""
+            modelSelectorExpanded = false
+            apiSelectorExpanded = false
         }
     }
 
@@ -259,28 +286,6 @@ private fun AiAgentChat(modifier: Modifier = Modifier) {
             }
         }
 
-        LazyColumn(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth(),
-            state = listState,
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            items(messages) { message ->
-                AiAgentBubble(message = message)
-            }
-            if (isLoading) {
-                item {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.End
-                    ) {
-                        CircularProgressIndicator(modifier = Modifier.padding(8.dp))
-                    }
-                }
-            }
-        }
-
         ExposedDropdownMenuBox(
             expanded = modelSelectorExpanded,
             onExpandedChange = { expanded -> if (!isLoading) modelSelectorExpanded = expanded }
@@ -314,6 +319,28 @@ private fun AiAgentChat(modifier: Modifier = Modifier) {
                             modelSelectorExpanded = false
                         }
                     )
+                }
+            }
+        }
+
+        LazyColumn(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth(),
+            state = listState,
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            items(messages) { message ->
+                AiAgentBubble(message = message)
+            }
+            if (isLoading) {
+                item {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End
+                    ) {
+                        CircularProgressIndicator(modifier = Modifier.padding(8.dp))
+                    }
                 }
             }
         }
