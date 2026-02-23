@@ -17,6 +17,11 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuAnchorType
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -24,22 +29,51 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.example.aiadventchalengetestllmapi.network.DeepSeekApi
 import com.example.aiadventchalengetestllmapi.network.DeepSeekChatRequest
 import com.example.aiadventchalengetestllmapi.network.DeepSeekMessage
+import com.example.aiadventchalengetestllmapi.network.GigaChatApi
+import com.example.aiadventchalengetestllmapi.network.OpenAiApi
+import com.example.aiadventchalengetestllmapi.network.ProxyOpenAiApi
 import kotlinx.coroutines.launch
 
-private const val DEEPSEEK_API_KEY_ENV = "DEEPSEEK_API_KEY"
+private enum class ChatApi(
+    val label: String,
+    val envVar: String,
+    val defaultModel: String
+) {
+    DeepSeek(
+        label = "DeepSeek",
+        envVar = "DEEPSEEK_API_KEY",
+        defaultModel = "deepseek-chat"
+    ),
+    OpenAI(
+        label = "OpenAI",
+        envVar = "OPENAI_API_KEY",
+        defaultModel = "gpt-4o-mini"
+    ),
+    GigaChat(
+        label = "GigaChat",
+        envVar = "GIGACHAT_ACCESS_TOKEN",
+        defaultModel = "GigaChat-2"
+    ),
+    ProxyOpenAI(
+        label = "ProxyAPI (OpenAI)",
+        envVar = "PROXYAPI_API_KEY",
+        defaultModel = "openai/gpt-4o-mini"
+    )
+}
 
 private data class UiChatMessage(
     val text: String,
@@ -47,21 +81,33 @@ private data class UiChatMessage(
     val paramsInfo: String
 )
 
-private fun readDeepSeekApiKeyFromEnv(): String? =
-    System.getenv(DEEPSEEK_API_KEY_ENV)?.trim()?.takeIf { it.isNotEmpty() }
+private fun readApiKeyFromEnv(envVar: String): String? =
+    System.getenv(envVar)?.trim()?.takeIf { it.isNotEmpty() }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 @Preview
 fun App() {
     MaterialTheme {
         val scope = rememberCoroutineScope()
         val deepSeekApi = remember { DeepSeekApi() }
+        val openAiApi = remember { OpenAiApi() }
+        val gigaChatApi = remember { GigaChatApi() }
+        val proxyOpenAiApi = remember { ProxyOpenAiApi() }
         val messages = remember { mutableStateListOf<UiChatMessage>() }
         val listState = rememberLazyListState()
         var inputText by remember { mutableStateOf("") }
-        var apiKeyInput by remember { mutableStateOf(readDeepSeekApiKeyFromEnv().orEmpty()) }
+        val apiKeysByApi = remember {
+            mutableStateMapOf<ChatApi, String>().apply {
+                ChatApi.entries.forEach { api ->
+                    this[api] = readApiKeyFromEnv(api.envVar).orEmpty()
+                }
+            }
+        }
+        var selectedApi by remember { mutableStateOf(ChatApi.DeepSeek) }
+        var apiSelectorExpanded by remember { mutableStateOf(false) }
         var systemPromptInput by remember { mutableStateOf("") }
-        var modelInput by remember { mutableStateOf("deepseek-chat") }
+        var modelInput by remember { mutableStateOf(ChatApi.DeepSeek.defaultModel) }
         var temperatureInput by remember { mutableStateOf("") }
         var topPInput by remember { mutableStateOf("") }
         var maxTokensInput by remember { mutableStateOf("") }
@@ -74,7 +120,7 @@ fun App() {
             val trimmed = inputText.trim()
             if (trimmed.isEmpty() || isLoading) return
 
-            val model = modelInput.trim().ifEmpty { "deepseek-chat" }
+            val model = modelInput.trim().ifEmpty { selectedApi.defaultModel }
             val temperature = temperatureInput.trim().toDoubleOrNull()
             val topP = topPInput.trim().toDoubleOrNull()
             val maxTokens = maxTokensInput.trim().toIntOrNull()
@@ -86,7 +132,9 @@ fun App() {
                 .filter { it.isNotEmpty() }
                 .takeIf { it.isNotEmpty() }
             val paramsInfo = buildString {
-                append("model=")
+                append("api=")
+                append(selectedApi.label)
+                append(" | model=")
                 append(model)
                 append(" | temperature=")
                 append(temperature)
@@ -107,9 +155,12 @@ fun App() {
             scope.launch {
                 isLoading = true
                 val answer = try {
-                    val apiKey = apiKeyInput.trim().ifEmpty { readDeepSeekApiKeyFromEnv().orEmpty() }
+                    val apiKey = apiKeysByApi[selectedApi]
+                        .orEmpty()
+                        .trim()
+                        .ifEmpty { readApiKeyFromEnv(selectedApi.envVar).orEmpty() }
                     if (apiKey.isBlank()) {
-                        error("Missing API key in top field or env var: $DEEPSEEK_API_KEY_ENV")
+                        error("Missing API key in top field or env var: ${selectedApi.envVar}")
                     }
                     val history = buildList {
                         val systemPrompt = systemPromptInput.trim()
@@ -118,24 +169,42 @@ fun App() {
                         }
                         add(DeepSeekMessage(role = "user", content = trimmed))
                     }
-                    val response = deepSeekApi.createChatCompletion(
-                        apiKey = apiKey,
-                        request = DeepSeekChatRequest(
-                            model = model,
-                            messages = history,
-                            temperature = temperature,
-                            maxTokens = maxTokens,
-                            topP = topP,
-                            presencePenalty = presencePenalty,
-                            frequencyPenalty = frequencyPenalty,
-                            stop = stop
-                        )
+                    val request = DeepSeekChatRequest(
+                        model = model,
+                        messages = history,
+                        temperature = temperature,
+                        maxTokens = maxTokens,
+                        topP = topP,
+                        presencePenalty = presencePenalty,
+                        frequencyPenalty = frequencyPenalty,
+                        stop = stop
                     )
+                    val response = when (selectedApi) {
+                        ChatApi.DeepSeek -> deepSeekApi.createChatCompletion(
+                            apiKey = apiKey,
+                            request = request
+                        )
+
+                        ChatApi.OpenAI -> openAiApi.createChatCompletion(
+                            apiKey = apiKey,
+                            request = request
+                        )
+
+                        ChatApi.GigaChat -> gigaChatApi.createChatCompletion(
+                            accessToken = apiKey,
+                            request = request
+                        )
+
+                        ChatApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletion(
+                            apiKey = apiKey,
+                            request = request
+                        )
+                    }
                     response.choices.firstOrNull()?.message?.content?.trim()
                         .orEmpty()
-                        .ifEmpty { "Пустой ответ от DeepSeek." }
+                        .ifEmpty { "Empty response from ${selectedApi.label}." }
                 } catch (e: Exception) {
-                    "Ошибка запроса: ${e.message ?: "неизвестная ошибка"}"
+                    "Request failed: ${e.message ?: "unknown error"}"
                 }
                 messages += UiChatMessage(text = answer, isUser = false, paramsInfo = paramsInfo)
                 isLoading = false
@@ -156,15 +225,55 @@ fun App() {
                 .padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
+            ExposedDropdownMenuBox(
+                expanded = apiSelectorExpanded,
+                onExpandedChange = { expanded ->
+                    if (!isLoading) {
+                        apiSelectorExpanded = expanded
+                    }
+                }
+            ) {
+                OutlinedTextField(
+                    value = selectedApi.label,
+                    onValueChange = {},
+                    modifier = Modifier
+                        .menuAnchor(
+                            type = ExposedDropdownMenuAnchorType.PrimaryNotEditable,
+                            enabled = !isLoading
+                        )
+                        .fillMaxWidth(),
+                    readOnly = true,
+                    label = { Text("Current API") },
+                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = apiSelectorExpanded) },
+                    enabled = !isLoading
+                )
+                ExposedDropdownMenu(
+                    expanded = apiSelectorExpanded,
+                    onDismissRequest = { apiSelectorExpanded = false }
+                ) {
+                    ChatApi.entries.forEach { api ->
+                        DropdownMenuItem(
+                            text = { Text(api.label) },
+                            onClick = {
+                                selectedApi = api
+                                modelInput = api.defaultModel
+                                apiSelectorExpanded = false
+                            }
+                        )
+                    }
+                }
+            }
+
             OutlinedTextField(
-                value = apiKeyInput,
-                onValueChange = { apiKeyInput = it },
+                value = apiKeysByApi[selectedApi].orEmpty(),
+                onValueChange = { apiKeysByApi[selectedApi] = it },
                 modifier = Modifier.fillMaxWidth(),
-                label = { Text(DEEPSEEK_API_KEY_ENV) },
+                label = { Text(selectedApi.envVar) },
                 singleLine = true,
                 visualTransformation = PasswordVisualTransformation(),
                 enabled = !isLoading
             )
+
             OutlinedTextField(
                 value = systemPromptInput,
                 onValueChange = { systemPromptInput = it },
@@ -304,14 +413,14 @@ fun App() {
                     onValueChange = { inputText = it },
                     modifier = Modifier.weight(1f),
                     enabled = !isLoading,
-                    label = { Text("Сообщение") },
+                    label = { Text("Message") },
                     maxLines = 4
                 )
                 Button(
                     onClick = ::sendMessage,
                     enabled = inputText.isNotBlank() && !isLoading
                 ) {
-                    Text("Отправить")
+                    Text("Send")
                 }
             }
         }
@@ -320,8 +429,8 @@ fun App() {
 
 @Composable
 private fun ChatBubble(message: UiChatMessage) {
-    val deepSeekBubbleColor = Color(0xFFE3F0FF)
-    val deepSeekTextColor = Color(0xFF123A6B)
+    val assistantBubbleColor = Color(0xFFE3F0FF)
+    val assistantTextColor = Color(0xFF123A6B)
 
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -334,7 +443,7 @@ private fun ChatBubble(message: UiChatMessage) {
                     color = if (message.isUser) {
                         MaterialTheme.colorScheme.primaryContainer
                     } else {
-                        deepSeekBubbleColor
+                        assistantBubbleColor
                     },
                     shape = RoundedCornerShape(16.dp)
                 )
@@ -347,7 +456,7 @@ private fun ChatBubble(message: UiChatMessage) {
                         color = if (message.isUser) {
                             MaterialTheme.colorScheme.onPrimaryContainer
                         } else {
-                            deepSeekTextColor
+                            assistantTextColor
                         }
                     )
                 }
@@ -357,7 +466,7 @@ private fun ChatBubble(message: UiChatMessage) {
                     color = if (message.isUser) {
                         MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
                     } else {
-                        deepSeekTextColor.copy(alpha = 0.7f)
+                        assistantTextColor.copy(alpha = 0.7f)
                     }
                 )
             }
