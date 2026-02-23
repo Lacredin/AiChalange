@@ -20,6 +20,8 @@ fun RootApp() {
             onOpenApp = { currentScreen = RootScreen.App }
         )
 
-        RootScreen.App -> App()
+        RootScreen.App -> App(
+            onBackClick = { currentScreen = RootScreen.AiAgent }
+        )
     }
 }
