@@ -98,6 +98,15 @@ private data class AiAgentMessage(
     val paramsInfo: String
 )
 
+private fun AiAgentMessage.toRequestMessage(): DeepSeekMessage =
+    DeepSeekMessage(
+        role = if (isUser) "user" else "assistant",
+        content = text
+    )
+
+private fun AiAgentMessage.isApiHistoryMessage(): Boolean =
+    isUser || !text.startsWith("Request failed:", ignoreCase = true)
+
 private fun aiAgentReadApiKey(envVar: String): String {
     val fromBuildSecrets = BuildSecrets.apiKeyFor(envVar).trim()
     if (fromBuildSecrets.isNotEmpty()) return fromBuildSecrets
@@ -173,7 +182,9 @@ private fun AiAgentChat(modifier: Modifier = Modifier) {
 
                 val request = DeepSeekChatRequest(
                     model = model,
-                    messages = listOf(DeepSeekMessage(role = "user", content = trimmed))
+                    messages = messages
+                        .filter { it.isApiHistoryMessage() }
+                        .map { it.toRequestMessage() }
                 )
 
                 val response = when (selectedApi) {
