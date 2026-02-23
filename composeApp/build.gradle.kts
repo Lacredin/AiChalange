@@ -1,4 +1,5 @@
 import org.jetbrains.compose.desktop.application.dsl.TargetFormat
+import java.util.Properties
 
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
@@ -35,7 +36,69 @@ kotlin {
             implementation(libs.kotlinx.coroutinesSwing)
             implementation(libs.ktor.client.cio)
         }
+        jvmMain {
+            kotlin.srcDir(layout.buildDirectory.dir("generated/sources/secrets/kotlin/jvmMain"))
+        }
     }
+}
+
+val generateBuildSecrets by tasks.registering {
+    val outputDir = layout.buildDirectory.dir("generated/sources/secrets/kotlin/jvmMain/com/example/aiadventchalengetestllmapi")
+    val outputFile = outputDir.map { it.file("BuildSecrets.kt") }
+    val secretsFile = rootProject.file("secrets.properties")
+
+    outputs.file(outputFile)
+    if (secretsFile.exists()) {
+        inputs.file(secretsFile)
+    }
+
+    doLast {
+        val secrets = Properties()
+        if (secretsFile.exists()) {
+            secretsFile.inputStream().use { secrets.load(it) }
+        }
+
+        fun escapeForKotlin(value: String): String =
+            value
+                .replace("\\", "\\\\")
+                .replace("\"", "\\\"")
+                .replace("\n", "\\n")
+                .replace("\r", "")
+
+        fun readSecret(key: String): String = secrets.getProperty(key)?.trim().orEmpty()
+
+        val deepSeek = escapeForKotlin(readSecret("DEEPSEEK_API_KEY"))
+        val openAi = escapeForKotlin(readSecret("OPENAI_API_KEY"))
+        val gigaChat = escapeForKotlin(readSecret("GIGACHAT_ACCESS_TOKEN"))
+        val proxyApi = escapeForKotlin(readSecret("PROXYAPI_API_KEY"))
+
+        val content = """
+            package com.example.aiadventchalengetestllmapi
+
+            internal object BuildSecrets {
+                private const val DEEPSEEK_API_KEY: String = "$deepSeek"
+                private const val OPENAI_API_KEY: String = "$openAi"
+                private const val GIGACHAT_ACCESS_TOKEN: String = "$gigaChat"
+                private const val PROXYAPI_API_KEY: String = "$proxyApi"
+
+                fun apiKeyFor(envVar: String): String = when (envVar) {
+                    "DEEPSEEK_API_KEY" -> DEEPSEEK_API_KEY
+                    "OPENAI_API_KEY" -> OPENAI_API_KEY
+                    "GIGACHAT_ACCESS_TOKEN" -> GIGACHAT_ACCESS_TOKEN
+                    "PROXYAPI_API_KEY" -> PROXYAPI_API_KEY
+                    else -> ""
+                }
+            }
+        """.trimIndent()
+
+        val file = outputFile.get().asFile
+        file.parentFile.mkdirs()
+        file.writeText(content)
+    }
+}
+
+tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
+    dependsOn(generateBuildSecrets)
 }
 
 

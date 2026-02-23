@@ -6,6 +6,7 @@ build/
 xcuserdata
 !src/**/build/
 local.properties
+secrets.properties
 .idea
 .DS_Store
 Thumbs.db

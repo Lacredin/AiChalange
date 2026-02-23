@@ -26,18 +26,16 @@ in your IDE’s toolbar or run it directly from the terminal:
 ---
 
 Learn more about [Kotlin Multiplatform](https://www.jetbrains.com/help/kotlin-multiplatform-dev/get-started.html)…
-### DeepSeek API key
+### API keys and secrets
 
-Do not store API keys in source files or commit them to Git.
-Set your key via environment variable before running the app:
+Use a local `secrets.properties` file in the project root.  
+This file is ignored by git and consumed during build to generate `BuildSecrets`.
 
-- Windows (PowerShell)
-  ```powershell
-  $env:DEEPSEEK_API_KEY="your_key_here"
-  .\gradlew.bat :composeApp:run
-  ```
-- macOS/Linux
-  ```bash
-  export DEEPSEEK_API_KEY="your_key_here"
-  ./gradlew :composeApp:run
-  ```
+1. Create `secrets.properties` from `secrets.properties.example`.
+2. Fill required values:
+   - `DEEPSEEK_API_KEY`
+   - `OPENAI_API_KEY`
+   - `GIGACHAT_ACCESS_TOKEN`
+   - `PROXYAPI_API_KEY`
+
+Environment variables with the same names are still supported as fallback.

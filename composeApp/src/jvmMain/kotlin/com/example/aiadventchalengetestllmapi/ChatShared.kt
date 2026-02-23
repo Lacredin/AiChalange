@@ -109,8 +109,13 @@ private data class UiChatMessage(
     val paramsInfo: String
 )
 
-private fun readApiKeyFromEnv(envVar: String): String? =
-    System.getenv(envVar)?.trim()?.takeIf { it.isNotEmpty() }
+private fun readApiKey(envVar: String): String? {
+    val fromBuildSecrets = BuildSecrets.apiKeyFor(envVar).trim()
+    if (fromBuildSecrets.isNotEmpty()) {
+        return fromBuildSecrets
+    }
+    return System.getenv(envVar)?.trim()?.takeIf { it.isNotEmpty() }
+}
 
 private fun Double.formatSeconds(): String = String.format(Locale.US, "%.2f", this)
 
@@ -133,7 +138,7 @@ internal fun ChatContent(
     val apiKeysByApi = remember {
         mutableStateMapOf<ChatApi, String>().apply {
             ChatApi.entries.forEach { api ->
-                this[api] = readApiKeyFromEnv(api.envVar).orEmpty()
+                this[api] = readApiKey(api.envVar).orEmpty()
             }
         }
     }
@@ -202,9 +207,9 @@ internal fun ChatContent(
             val answer = try {
                 val apiKey = if (allowApiKeyInput) {
                     apiKeysByApi[selectedApi].orEmpty().trim()
-                        .ifEmpty { readApiKeyFromEnv(selectedApi.envVar).orEmpty() }
+                        .ifEmpty { readApiKey(selectedApi.envVar).orEmpty() }
                 } else {
-                    readApiKeyFromEnv(selectedApi.envVar).orEmpty()
+                    readApiKey(selectedApi.envVar).orEmpty()
                 }
                 if (apiKey.isBlank()) {
                     error("Missing API key in env var: ${selectedApi.envVar}")
