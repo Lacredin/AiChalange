@@ -24,6 +24,7 @@ fun main() = application {
         onCloseRequest = ::exitApplication,
         title = "aiadventchalengetestllmapi",
     ) {
-        App()
+        RootApp()
     }
 }
+
