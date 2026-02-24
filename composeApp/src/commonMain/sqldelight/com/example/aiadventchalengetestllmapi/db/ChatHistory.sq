@@ -1,0 +1,53 @@
+CREATE TABLE chats (
+    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+
+CREATE TABLE chat_messages (
+    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    chat_id INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+    api TEXT NOT NULL,
+    model TEXT NOT NULL,
+    role TEXT NOT NULL,
+    message TEXT NOT NULL,
+    params_info TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+
+selectChats:
+SELECT *
+FROM chats
+ORDER BY id ASC;
+
+insertChat:
+INSERT INTO chats(
+    title,
+    created_at
+)
+VALUES (?, ?);
+
+selectLastInsertedChatId:
+SELECT last_insert_rowid();
+
+selectMessagesByChat:
+SELECT *
+FROM chat_messages
+WHERE chat_id = ?
+ORDER BY id ASC;
+
+insertMessage:
+INSERT INTO chat_messages(
+    chat_id,
+    api,
+    model,
+    role,
+    message,
+    params_info,
+    created_at
+)
+VALUES (?, ?, ?, ?, ?, ?, ?);
+
+deleteMessagesByChat:
+DELETE FROM chat_messages
+WHERE chat_id = ?;

@@ -1,4 +1,4 @@
-package com.example.aiadventchalengetestllmapi
+﻿package com.example.aiadventchalengetestllmapi
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -52,6 +53,8 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
+import com.example.aiadventchalengetestllmapi.db.DatabaseDriverFactory
+import com.example.aiadventchalengetestllmapi.db.createAppDatabase
 import com.example.aiadventchalengetestllmapi.network.DeepSeekApi
 import com.example.aiadventchalengetestllmapi.network.DeepSeekChatRequest
 import com.example.aiadventchalengetestllmapi.network.DeepSeekMessage
@@ -110,6 +113,11 @@ private data class AiAgentMessage(
     val paramsInfo: String
 )
 
+private data class AiAgentChatItem(
+    val id: Long,
+    val title: String
+)
+
 private fun AiAgentMessage.toRequestMessage(): DeepSeekMessage =
     DeepSeekMessage(
         role = if (isUser) "user" else "assistant",
@@ -136,7 +144,7 @@ fun AiAgentScreen(onOpenApp: () -> Unit) {
         Scaffold(
             topBar = {
                 TopAppBar(
-                    title = { Text("Ai \u0410\u0433\u0435\u043D\u0442") },
+                    title = { Text("Ai Агент") },
                     actions = {
                         TextButton(onClick = { newChatTrigger++ }) {
                             Text("Новый чат")
@@ -169,7 +177,10 @@ private fun AiAgentChat(
     val openAiApi = remember { OpenAiApi() }
     val gigaChatApi = remember { GigaChatApi() }
     val proxyOpenAiApi = remember { ProxyOpenAiApi() }
+    val database = remember { createAppDatabase(DatabaseDriverFactory()) }
+    val queries = remember(database) { database.chatHistoryQueries }
 
+    val chats = remember { mutableStateListOf<AiAgentChatItem>() }
     val messages = remember { mutableStateListOf<AiAgentMessage>() }
     val listState = rememberLazyListState()
     val inputFocusRequester = remember { FocusRequester() }
@@ -178,31 +189,85 @@ private fun AiAgentChat(
     var apiSelectorExpanded by remember { mutableStateOf(false) }
     var modelSelectorExpanded by remember { mutableStateOf(false) }
     var modelInput by remember { mutableStateOf(AiAgentApi.DeepSeek.defaultModel) }
+    var activeChatId by remember { mutableStateOf<Long?>(null) }
     var chatSessionId by remember { mutableIntStateOf(0) }
     var isLoading by remember { mutableStateOf(false) }
 
+    fun loadChatsFromDb(): List<AiAgentChatItem> {
+        return queries.selectChats().executeAsList().map {
+            AiAgentChatItem(id = it.id, title = it.title)
+        }
+    }
+
+    fun loadMessagesForChat(chatId: Long) {
+        messages.clear()
+        messages += queries.selectMessagesByChat(chatId).executeAsList().map {
+            AiAgentMessage(
+                text = it.message,
+                isUser = it.role == "user",
+                paramsInfo = it.params_info
+            )
+        }
+    }
+
+    fun openChat(chatId: Long) {
+        chatSessionId++
+        isLoading = false
+        activeChatId = chatId
+        loadMessagesForChat(chatId)
+        inputText = TextFieldValue("")
+        apiSelectorExpanded = false
+        modelSelectorExpanded = false
+    }
+
+    fun createNewChatAndOpen() {
+        val title = "Чат ${chats.size + 1}"
+        queries.insertChat(
+            title = title,
+            created_at = System.currentTimeMillis()
+        )
+        val updatedChats = loadChatsFromDb()
+        chats.clear()
+        chats += updatedChats
+        val latestChat = updatedChats.lastOrNull() ?: return
+        openChat(latestChat.id)
+    }
+
     fun sendMessage() {
+        val currentChatId = activeChatId ?: return
         val trimmed = inputText.text.trim()
         if (trimmed.isEmpty() || isLoading) return
 
-        val model = modelInput.trim().ifEmpty { selectedApi.defaultModel }
-        val paramsInfo = "api=${selectedApi.label} | model=$model"
+        val requestApi = selectedApi
+        val model = modelInput.trim().ifEmpty { requestApi.defaultModel }
+        val paramsInfoPrefix = "api=${requestApi.label} | model=$model"
+        val userParamsInfo = "$paramsInfoPrefix | response_time=pending"
 
         messages += AiAgentMessage(
             text = trimmed,
             isUser = true,
-            paramsInfo = "$paramsInfo | response_time=pending"
+            paramsInfo = userParamsInfo
+        )
+        queries.insertMessage(
+            chat_id = currentChatId,
+            api = requestApi.label,
+            model = model,
+            role = "user",
+            message = trimmed,
+            params_info = userParamsInfo,
+            created_at = System.currentTimeMillis()
         )
         inputText = TextFieldValue("")
 
         scope.launch {
             val requestSessionId = chatSessionId
+            val requestChatId = currentChatId
             isLoading = true
             val startedAtNanos = System.nanoTime()
             val answer = try {
-                val apiKey = aiAgentReadApiKey(selectedApi.envVar)
+                val apiKey = aiAgentReadApiKey(requestApi.envVar)
                 if (apiKey.isBlank()) {
-                    error("Missing API key in secrets.properties or env var: ${selectedApi.envVar}")
+                    error("Missing API key in secrets.properties or env var: ${requestApi.envVar}")
                 }
 
                 val request = DeepSeekChatRequest(
@@ -212,7 +277,7 @@ private fun AiAgentChat(
                         .map { it.toRequestMessage() }
                 )
 
-                val response = when (selectedApi) {
+                val response = when (requestApi) {
                     AiAgentApi.DeepSeek -> deepSeekApi.createChatCompletion(apiKey = apiKey, request = request)
                     AiAgentApi.OpenAI -> openAiApi.createChatCompletion(apiKey = apiKey, request = request)
                     AiAgentApi.GigaChat -> gigaChatApi.createChatCompletion(accessToken = apiKey, request = request)
@@ -220,22 +285,50 @@ private fun AiAgentChat(
                 }
 
                 response.choices.firstOrNull()?.message?.content?.trim().orEmpty()
-                    .ifEmpty { "Empty response from ${selectedApi.label}." }
+                    .ifEmpty { "Empty response from ${requestApi.label}." }
             } catch (e: Exception) {
                 "Request failed: ${e.message ?: "unknown error"}"
             }
 
             val responseTimeSec = (System.nanoTime() - startedAtNanos) / 1_000_000_000.0
-            if (requestSessionId != chatSessionId) {
+            if (requestSessionId != chatSessionId || requestChatId != activeChatId) {
                 isLoading = false
                 return@launch
             }
+
+            val assistantParamsInfo = "$paramsInfoPrefix | response_time=${responseTimeSec.aiAgentFormatSeconds()}"
             messages += AiAgentMessage(
                 text = answer,
                 isUser = false,
-                paramsInfo = "$paramsInfo | response_time=${responseTimeSec.aiAgentFormatSeconds()}"
+                paramsInfo = assistantParamsInfo
+            )
+            queries.insertMessage(
+                chat_id = requestChatId,
+                api = requestApi.label,
+                model = model,
+                role = "assistant",
+                message = answer,
+                params_info = assistantParamsInfo,
+                created_at = System.currentTimeMillis()
             )
             isLoading = false
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        val storedChats = loadChatsFromDb()
+        chats.clear()
+        chats += storedChats
+        if (chats.isEmpty()) {
+            createNewChatAndOpen()
+        } else {
+            openChat(chats.last().id)
+        }
+    }
+
+    LaunchedEffect(newChatTrigger) {
+        if (newChatTrigger > 0) {
+            createNewChatAndOpen()
         }
     }
 
@@ -245,162 +338,200 @@ private fun AiAgentChat(
         }
     }
 
-    LaunchedEffect(newChatTrigger) {
-        if (newChatTrigger > 0) {
-            chatSessionId++
-            messages.clear()
-            inputText = TextFieldValue("")
-            modelSelectorExpanded = false
-            apiSelectorExpanded = false
-        }
-    }
-
     LaunchedEffect(isLoading) {
         if (!isLoading) {
             inputFocusRequester.requestFocus()
         }
     }
 
-    Column(
+    val activeChatTitle = chats.firstOrNull { it.id == activeChatId }?.title.orEmpty()
+
+    Row(
         modifier = modifier
             .background(MaterialTheme.colorScheme.background)
             .imePadding()
             .padding(12.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        ExposedDropdownMenuBox(
-            expanded = apiSelectorExpanded,
-            onExpandedChange = { expanded -> if (!isLoading) apiSelectorExpanded = expanded }
-        ) {
-            OutlinedTextField(
-                value = selectedApi.label,
-                onValueChange = {},
-                modifier = Modifier
-                    .menuAnchor(
-                        type = ExposedDropdownMenuAnchorType.PrimaryNotEditable,
-                        enabled = !isLoading
-                    )
-                    .fillMaxWidth(),
-                readOnly = true,
-                label = { Text("Current API") },
-                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = apiSelectorExpanded) },
-                enabled = !isLoading
-            )
-            ExposedDropdownMenu(
-                expanded = apiSelectorExpanded,
-                onDismissRequest = { apiSelectorExpanded = false }
-            ) {
-                AiAgentApi.entries.forEach { api ->
-                    DropdownMenuItem(
-                        text = { Text(api.label) },
-                        onClick = {
-                            selectedApi = api
-                            modelInput = api.defaultModel
-                            apiSelectorExpanded = false
-                            modelSelectorExpanded = false
-                        }
-                    )
-                }
-            }
-        }
-
-        ExposedDropdownMenuBox(
-            expanded = modelSelectorExpanded,
-            onExpandedChange = { expanded -> if (!isLoading) modelSelectorExpanded = expanded }
-        ) {
-            OutlinedTextField(
-                value = modelInput,
-                onValueChange = {},
-                modifier = Modifier
-                    .menuAnchor(
-                        type = ExposedDropdownMenuAnchorType.PrimaryNotEditable,
-                        enabled = !isLoading
-                    )
-                    .fillMaxWidth()
-                    .height(52.dp),
-                enabled = !isLoading,
-                readOnly = true,
-                placeholder = { Text("model", style = MaterialTheme.typography.labelSmall) },
-                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = modelSelectorExpanded) },
-                singleLine = true,
-                textStyle = MaterialTheme.typography.labelSmall
-            )
-            ExposedDropdownMenu(
-                expanded = modelSelectorExpanded,
-                onDismissRequest = { modelSelectorExpanded = false }
-            ) {
-                selectedApi.supportedModels.forEach { model ->
-                    DropdownMenuItem(
-                        text = { Text(model) },
-                        onClick = {
-                            modelInput = model
-                            modelSelectorExpanded = false
-                        }
-                    )
-                }
-            }
-        }
-
-        LazyColumn(
+        Column(
             modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth(),
-            state = listState,
+                .width(220.dp)
+                .fillMaxSize()
+                .background(
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                    shape = RoundedCornerShape(12.dp)
+                )
+                .padding(8.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            items(messages) { message ->
-                AiAgentBubble(message = message)
-            }
-            if (isLoading) {
-                item {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.End
+            Text(
+                text = "Чаты",
+                style = MaterialTheme.typography.titleSmall
+            )
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                items(chats, key = { it.id }) { chat ->
+                    val isSelected = chat.id == activeChatId
+                    Button(
+                        onClick = { openChat(chat.id) },
+                        enabled = !isSelected,
+                        modifier = Modifier.fillMaxWidth()
                     ) {
-                        CircularProgressIndicator(modifier = Modifier.padding(8.dp))
+                        Text(chat.title)
                     }
                 }
             }
         }
 
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.Bottom,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxSize(),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            OutlinedTextField(
-                value = inputText,
-                onValueChange = { inputText = it },
+            if (activeChatTitle.isNotBlank()) {
+                Text(
+                    text = activeChatTitle,
+                    style = MaterialTheme.typography.titleMedium
+                )
+            }
+
+            ExposedDropdownMenuBox(
+                expanded = apiSelectorExpanded,
+                onExpandedChange = { expanded -> if (!isLoading) apiSelectorExpanded = expanded }
+            ) {
+                OutlinedTextField(
+                    value = selectedApi.label,
+                    onValueChange = {},
+                    modifier = Modifier
+                        .menuAnchor(
+                            type = ExposedDropdownMenuAnchorType.PrimaryNotEditable,
+                            enabled = !isLoading
+                        )
+                        .fillMaxWidth(),
+                    readOnly = true,
+                    label = { Text("Current API") },
+                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = apiSelectorExpanded) },
+                    enabled = !isLoading
+                )
+                ExposedDropdownMenu(
+                    expanded = apiSelectorExpanded,
+                    onDismissRequest = { apiSelectorExpanded = false }
+                ) {
+                    AiAgentApi.entries.forEach { api ->
+                        DropdownMenuItem(
+                            text = { Text(api.label) },
+                            onClick = {
+                                selectedApi = api
+                                modelInput = api.defaultModel
+                                apiSelectorExpanded = false
+                                modelSelectorExpanded = false
+                            }
+                        )
+                    }
+                }
+            }
+
+            ExposedDropdownMenuBox(
+                expanded = modelSelectorExpanded,
+                onExpandedChange = { expanded -> if (!isLoading) modelSelectorExpanded = expanded }
+            ) {
+                OutlinedTextField(
+                    value = modelInput,
+                    onValueChange = {},
+                    modifier = Modifier
+                        .menuAnchor(
+                            type = ExposedDropdownMenuAnchorType.PrimaryNotEditable,
+                            enabled = !isLoading
+                        )
+                        .fillMaxWidth()
+                        .height(52.dp),
+                    enabled = !isLoading,
+                    readOnly = true,
+                    placeholder = { Text("model", style = MaterialTheme.typography.labelSmall) },
+                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = modelSelectorExpanded) },
+                    singleLine = true,
+                    textStyle = MaterialTheme.typography.labelSmall
+                )
+                ExposedDropdownMenu(
+                    expanded = modelSelectorExpanded,
+                    onDismissRequest = { modelSelectorExpanded = false }
+                ) {
+                    selectedApi.supportedModels.forEach { model ->
+                        DropdownMenuItem(
+                            text = { Text(model) },
+                            onClick = {
+                                modelInput = model
+                                modelSelectorExpanded = false
+                            }
+                        )
+                    }
+                }
+            }
+
+            LazyColumn(
                 modifier = Modifier
                     .weight(1f)
-                    .focusRequester(inputFocusRequester)
-                    .onPreviewKeyEvent { keyEvent ->
-                        if (keyEvent.type != KeyEventType.KeyDown || keyEvent.key != Key.Enter) {
-                            return@onPreviewKeyEvent false
-                        }
-
-                        if (keyEvent.isAltPressed) {
-                            val start = inputText.selection.min
-                            val end = inputText.selection.max
-                            inputText = inputText.copy(
-                                text = inputText.text.replaceRange(start, end, "\n"),
-                                selection = TextRange(start + 1)
-                            )
-                            return@onPreviewKeyEvent true
-                        }
-
-                        sendMessage()
-                        true
-                    },
-                enabled = !isLoading,
-                label = { Text("Message") },
-                maxLines = 4
-            )
-            Button(
-                onClick = ::sendMessage,
-                enabled = inputText.text.isNotBlank() && !isLoading
+                    .fillMaxWidth(),
+                state = listState,
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Text("Отправить")
+                items(messages) { message ->
+                    AiAgentBubble(message = message)
+                }
+                if (isLoading) {
+                    item {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.End
+                        ) {
+                            CircularProgressIndicator(modifier = Modifier.padding(8.dp))
+                        }
+                    }
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.Bottom,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedTextField(
+                    value = inputText,
+                    onValueChange = { inputText = it },
+                    modifier = Modifier
+                        .weight(1f)
+                        .focusRequester(inputFocusRequester)
+                        .onPreviewKeyEvent { keyEvent ->
+                            if (keyEvent.type != KeyEventType.KeyDown || keyEvent.key != Key.Enter) {
+                                return@onPreviewKeyEvent false
+                            }
+
+                            if (keyEvent.isAltPressed) {
+                                val start = inputText.selection.min
+                                val end = inputText.selection.max
+                                inputText = inputText.copy(
+                                    text = inputText.text.replaceRange(start, end, "\n"),
+                                    selection = TextRange(start + 1)
+                                )
+                                return@onPreviewKeyEvent true
+                            }
+
+                            sendMessage()
+                            true
+                        },
+                    enabled = !isLoading,
+                    label = { Text("Message") },
+                    maxLines = 4
+                )
+                Button(
+                    onClick = ::sendMessage,
+                    enabled = inputText.text.isNotBlank() && !isLoading
+                ) {
+                    Text("Отправить")
+                }
             }
         }
     }
