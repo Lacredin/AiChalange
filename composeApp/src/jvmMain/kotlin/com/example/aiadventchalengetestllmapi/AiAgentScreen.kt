@@ -1,6 +1,8 @@
 ﻿package com.example.aiadventchalengetestllmapi
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -357,10 +359,6 @@ private fun AiAgentChat(
             modifier = Modifier
                 .width(220.dp)
                 .fillMaxSize()
-                .background(
-                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
-                    shape = RoundedCornerShape(12.dp)
-                )
                 .padding(8.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
@@ -374,16 +372,49 @@ private fun AiAgentChat(
             ) {
                 items(chats, key = { it.id }) { chat ->
                     val isSelected = chat.id == activeChatId
-                    Button(
-                        onClick = { openChat(chat.id) },
-                        enabled = !isSelected,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text(chat.title)
+                    if (isSelected) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(
+                                    color = MaterialTheme.colorScheme.primaryContainer,
+                                    shape = RoundedCornerShape(12.dp)
+                                )
+                                .padding(horizontal = 12.dp, vertical = 14.dp)
+                        ) {
+                            Text(
+                                text = chat.title,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                        }
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .border(
+                                    width = 1.dp,
+                                    color = MaterialTheme.colorScheme.outline,
+                                    shape = RoundedCornerShape(8.dp)
+                                )
+                                .clickable(enabled = !isLoading) { openChat(chat.id) }
+                                .padding(horizontal = 12.dp, vertical = 14.dp)
+                        ) {
+                            Text(
+                                text = chat.title,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
                     }
                 }
             }
         }
+
+        Box(
+            modifier = Modifier
+                .width(1.dp)
+                .fillMaxSize()
+                .background(Color(0xFFD2D6DC))
+        )
 
         Column(
             modifier = Modifier
