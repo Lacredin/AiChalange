@@ -122,6 +122,13 @@ private data class AiAgentChatItem(
     val title: String
 )
 
+private data class AiAgentCompletionResult(
+    val answer: String,
+    val requestTokens: Int?,
+    val responseTokens: Int?,
+    val totalTokens: Int?
+)
+
 private fun AiAgentMessage.toRequestMessage(): DeepSeekMessage =
     DeepSeekMessage(
         role = if (isUser) "user" else "assistant",
@@ -240,6 +247,46 @@ private fun AiAgentChat(
         openChat(latestChat.id)
     }
 
+    fun clearChatSelection() {
+        chatSessionId++
+        isLoading = false
+        activeChatId = null
+        messages.clear()
+        inputText = TextFieldValue("")
+        apiSelectorExpanded = false
+        modelSelectorExpanded = false
+    }
+
+    fun deleteChat(chatId: Long) {
+        if (isLoading) return
+
+        val wasActive = activeChatId == chatId
+        queries.deleteMessagesByChat(chatId)
+        queries.deleteChatById(chatId)
+
+        val updatedChats = loadChatsFromDb()
+        chats.clear()
+        chats += updatedChats
+
+        if (updatedChats.isEmpty()) {
+            clearChatSelection()
+            return
+        }
+
+        if (wasActive || updatedChats.none { it.id == activeChatId }) {
+            openChat(updatedChats.last().id)
+        }
+    }
+
+    fun deleteAllChats() {
+        if (isLoading) return
+
+        queries.deleteAllMessages()
+        queries.deleteAllChats()
+        chats.clear()
+        clearChatSelection()
+    }
+
     fun sendMessage() {
         val currentChatId = activeChatId ?: return
         val trimmed = inputText.text.trim()
@@ -293,9 +340,19 @@ private fun AiAgentChat(
 
                 val answerText = response.choices.firstOrNull()?.message?.content?.trim().orEmpty()
                     .ifEmpty { "Empty response from ${requestApi.label}." }
-                answerText to response.usage?.totalTokens
+                AiAgentCompletionResult(
+                    answer = answerText,
+                    requestTokens = response.usage?.promptTokens,
+                    responseTokens = response.usage?.completionTokens,
+                    totalTokens = response.usage?.totalTokens
+                )
             } catch (e: Exception) {
-                "Request failed: ${e.message ?: "unknown error"}" to null
+                AiAgentCompletionResult(
+                    answer = "Request failed: ${e.message ?: "unknown error"}",
+                    requestTokens = null,
+                    responseTokens = null,
+                    totalTokens = null
+                )
             }
 
             val responseTimeSec = (System.nanoTime() - startedAtNanos) / 1_000_000_000.0
@@ -304,11 +361,20 @@ private fun AiAgentChat(
                 return@launch
             }
 
-            val (answer, totalTokens) = completionResult
-            val tokenInfoSuffix = totalTokens?.let { " | tokens=$it" }.orEmpty()
+            val totalTokens = completionResult.totalTokens
+                ?: if (completionResult.requestTokens != null && completionResult.responseTokens != null) {
+                    completionResult.requestTokens + completionResult.responseTokens
+                } else {
+                    null
+                }
+            val tokenInfoSuffix = buildString {
+                completionResult.requestTokens?.let { append(" | request_tokens=$it") }
+                completionResult.responseTokens?.let { append(" | response_tokens=$it") }
+                totalTokens?.let { append(" | tokens=$it") }
+            }
             val assistantParamsInfo = "$paramsInfoPrefix | response_time=${responseTimeSec.aiAgentFormatSeconds()}$tokenInfoSuffix"
             messages += AiAgentMessage(
-                text = answer,
+                text = completionResult.answer,
                 isUser = false,
                 paramsInfo = assistantParamsInfo
             )
@@ -317,7 +383,7 @@ private fun AiAgentChat(
                 api = requestApi.label,
                 model = model,
                 role = "assistant",
-                message = answer,
+                message = completionResult.answer,
                 params_info = assistantParamsInfo,
                 created_at = System.currentTimeMillis()
             )
@@ -375,10 +441,22 @@ private fun AiAgentChat(
                 .padding(8.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Text(
-                text = "Чаты",
-                style = MaterialTheme.typography.titleSmall
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Чаты",
+                    style = MaterialTheme.typography.titleSmall
+                )
+                Box(modifier = Modifier.weight(1f))
+                TextButton(
+                    onClick = ::deleteAllChats,
+                    enabled = chats.isNotEmpty() && !isLoading
+                ) {
+                    Text("Удалить всё")
+                }
+            }
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
                 verticalArrangement = Arrangement.spacedBy(6.dp)
@@ -386,22 +464,34 @@ private fun AiAgentChat(
                 items(chats, key = { it.id }) { chat ->
                     val isSelected = chat.id == activeChatId
                     if (isSelected) {
-                        Box(
+                        Row(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .background(
                                     color = MaterialTheme.colorScheme.primaryContainer,
                                     shape = RoundedCornerShape(12.dp)
                                 )
-                                .padding(horizontal = 12.dp, vertical = 14.dp)
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             Text(
                                 text = chat.title,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                modifier = Modifier.weight(1f)
                             )
+                            TextButton(
+                                onClick = { deleteChat(chat.id) },
+                                enabled = !isLoading
+                            ) {
+                                Text(
+                                    text = "X",
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                                )
+                            }
                         }
                     } else {
-                        Box(
+                        Row(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .border(
@@ -409,13 +499,27 @@ private fun AiAgentChat(
                                     color = MaterialTheme.colorScheme.outline,
                                     shape = RoundedCornerShape(8.dp)
                                 )
-                                .clickable(enabled = !isLoading) { openChat(chat.id) }
-                                .padding(horizontal = 12.dp, vertical = 14.dp)
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Text(
-                                text = chat.title,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clickable(enabled = !isLoading) { openChat(chat.id) }
+                                    .padding(vertical = 4.dp)
+                            ) {
+                                Text(
+                                    text = chat.title,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                            TextButton(
+                                onClick = { deleteChat(chat.id) },
+                                enabled = !isLoading
+                            ) {
+                                Text("X")
+                            }
                         }
                     }
                 }

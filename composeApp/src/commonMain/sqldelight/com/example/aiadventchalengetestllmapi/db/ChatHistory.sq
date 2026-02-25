@@ -51,3 +51,13 @@ VALUES (?, ?, ?, ?, ?, ?, ?);
 deleteMessagesByChat:
 DELETE FROM chat_messages
 WHERE chat_id = ?;
+
+deleteChatById:
+DELETE FROM chats
+WHERE id = ?;
+
+deleteAllMessages:
+DELETE FROM chat_messages;
+
+deleteAllChats:
+DELETE FROM chats;
