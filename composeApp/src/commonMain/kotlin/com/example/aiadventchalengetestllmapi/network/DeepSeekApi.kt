@@ -52,7 +52,22 @@ data class DeepSeekMessage(
 data class DeepSeekChatResponse(
     val id: String,
     val model: String,
-    val choices: List<DeepSeekChoice>
+    val choices: List<DeepSeekChoice>,
+    val usage: DeepSeekUsage? = null
+)
+
+@Serializable
+data class DeepSeekUsage(
+    @SerialName("prompt_tokens")
+    val promptTokens: Int? = null,
+    @SerialName("completion_tokens")
+    val completionTokens: Int? = null,
+    @SerialName("total_tokens")
+    val totalTokens: Int? = null,
+    @SerialName("prompt_cache_hit_tokens")
+    val promptCacheHitTokens: Int? = null,
+    @SerialName("prompt_cache_miss_tokens")
+    val promptCacheMissTokens: Int? = null
 )
 
 @Serializable

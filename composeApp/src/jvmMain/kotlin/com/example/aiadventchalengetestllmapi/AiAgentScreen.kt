@@ -66,6 +66,8 @@ import com.example.aiadventchalengetestllmapi.network.ProxyOpenAiApi
 import kotlinx.coroutines.launch
 import java.util.Locale
 
+private val tokensInParamsRegex = Regex("""(?:^|\s|\|)tokens=(\d+)(?:\s|$)""")
+
 private enum class AiAgentApi(
     val label: String,
     val envVar: String,
@@ -136,6 +138,9 @@ private fun aiAgentReadApiKey(envVar: String): String {
 }
 
 private fun Double.aiAgentFormatSeconds(): String = String.format(Locale.US, "%.2f", this)
+
+private fun AiAgentMessage.tokensSpent(): Int =
+    tokensInParamsRegex.find(paramsInfo)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -266,7 +271,7 @@ private fun AiAgentChat(
             val requestChatId = currentChatId
             isLoading = true
             val startedAtNanos = System.nanoTime()
-            val answer = try {
+            val completionResult = try {
                 val apiKey = aiAgentReadApiKey(requestApi.envVar)
                 if (apiKey.isBlank()) {
                     error("Missing API key in secrets.properties or env var: ${requestApi.envVar}")
@@ -286,10 +291,11 @@ private fun AiAgentChat(
                     AiAgentApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletion(apiKey = apiKey, request = request)
                 }
 
-                response.choices.firstOrNull()?.message?.content?.trim().orEmpty()
+                val answerText = response.choices.firstOrNull()?.message?.content?.trim().orEmpty()
                     .ifEmpty { "Empty response from ${requestApi.label}." }
+                answerText to response.usage?.totalTokens
             } catch (e: Exception) {
-                "Request failed: ${e.message ?: "unknown error"}"
+                "Request failed: ${e.message ?: "unknown error"}" to null
             }
 
             val responseTimeSec = (System.nanoTime() - startedAtNanos) / 1_000_000_000.0
@@ -298,7 +304,9 @@ private fun AiAgentChat(
                 return@launch
             }
 
-            val assistantParamsInfo = "$paramsInfoPrefix | response_time=${responseTimeSec.aiAgentFormatSeconds()}"
+            val (answer, totalTokens) = completionResult
+            val tokenInfoSuffix = totalTokens?.let { " | tokens=$it" }.orEmpty()
+            val assistantParamsInfo = "$paramsInfoPrefix | response_time=${responseTimeSec.aiAgentFormatSeconds()}$tokenInfoSuffix"
             messages += AiAgentMessage(
                 text = answer,
                 isUser = false,
@@ -347,6 +355,11 @@ private fun AiAgentChat(
     }
 
     val activeChatTitle = chats.firstOrNull { it.id == activeChatId }?.title.orEmpty()
+    val activeChatTotalTokens = messages
+        .asReversed()
+        .firstOrNull { it.tokensSpent() > 0 }
+        ?.tokensSpent()
+        ?: 0
 
     Row(
         modifier = modifier
@@ -424,7 +437,7 @@ private fun AiAgentChat(
         ) {
             if (activeChatTitle.isNotBlank()) {
                 Text(
-                    text = activeChatTitle,
+                    text = "$activeChatTitle ($activeChatTotalTokens токенов)",
                     style = MaterialTheme.typography.titleMedium
                 )
             }
