@@ -206,6 +206,7 @@ private fun AiAgentChat(
     var activeChatId by remember { mutableStateOf<Long?>(null) }
     var chatSessionId by remember { mutableIntStateOf(0) }
     var isLoading by remember { mutableStateOf(false) }
+    var isFeaturesPanelVisible by remember { mutableStateOf(false) }
 
     fun loadChatsFromDb(): List<AiAgentChatItem> {
         return queries.selectChats().executeAsList().map {
@@ -540,10 +541,23 @@ private fun AiAgentChat(
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             if (activeChatTitle.isNotBlank()) {
-                Text(
-                    text = "$activeChatTitle ($activeChatTotalTokens токенов)",
-                    style = MaterialTheme.typography.titleMedium
-                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = "$activeChatTitle ($activeChatTotalTokens токенов)",
+                        style = MaterialTheme.typography.titleMedium,
+                        modifier = Modifier.weight(1f)
+                    )
+                    IconButton(
+                        onClick = { isFeaturesPanelVisible = !isFeaturesPanelVisible },
+                        enabled = !isLoading
+                    ) {
+                        Text(text = if (isFeaturesPanelVisible) "✓" else "\u2610")
+                    }
+                }
             }
 
             Row(
@@ -690,6 +704,28 @@ private fun AiAgentChat(
                 ) {
                     Text("Отправить")
                 }
+            }
+        }
+
+        if (isFeaturesPanelVisible) {
+            Box(
+                modifier = Modifier
+                    .width(1.dp)
+                    .fillMaxSize()
+                    .background(Color(0xFFD2D6DC))
+            )
+
+            Column(
+                modifier = Modifier
+                    .width(240.dp)
+                    .fillMaxSize()
+                    .padding(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    text = "Доп. функции",
+                    style = MaterialTheme.typography.titleSmall
+                )
             }
         }
     }
