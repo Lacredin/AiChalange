@@ -19,6 +19,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -67,6 +68,10 @@ import kotlinx.coroutines.launch
 import java.util.Locale
 
 private val tokensInParamsRegex = Regex("""(?:^|\s|\|)tokens=(\d+)(?:\s|$)""")
+private val streamInParamsRegex = Regex("""(?:^|\s|\|)stream=(real|raw)(?:\s|$)""")
+private val epochInParamsRegex = Regex("""(?:^|\s|\|)epoch=(\d+)(?:\s|$)""")
+private val streamStripRegex = Regex("""\s*\|\s*stream=(real|raw)""")
+private val epochStripRegex = Regex("""\s*\|\s*epoch=\d+""")
 
 private enum class AiAgentApi(
     val label: String,
@@ -114,8 +119,13 @@ private enum class AiAgentApi(
 private data class AiAgentMessage(
     val text: String,
     val isUser: Boolean,
-    val paramsInfo: String
+    val paramsInfo: String,
+    val stream: AiAgentStream,
+    val epoch: Int,
+    val createdAt: Long
 )
+
+private enum class AiAgentStream { Real, Raw }
 
 private data class AiAgentChatItem(
     val id: Long,
@@ -148,6 +158,30 @@ private fun Double.aiAgentFormatSeconds(): String = String.format(Locale.US, "%.
 
 private fun AiAgentMessage.tokensSpent(): Int =
     tokensInParamsRegex.find(paramsInfo)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
+
+private fun aiAgentStreamFromParams(paramsInfo: String): AiAgentStream? =
+    when (streamInParamsRegex.find(paramsInfo)?.groupValues?.getOrNull(1)) {
+        "real" -> AiAgentStream.Real
+        "raw" -> AiAgentStream.Raw
+        else -> null
+    }
+
+private fun aiAgentEpochFromParams(paramsInfo: String): Int? =
+    epochInParamsRegex.find(paramsInfo)?.groupValues?.getOrNull(1)?.toIntOrNull()
+
+private fun aiAgentStreamSuffix(stream: AiAgentStream, epoch: Int?): String =
+    when (stream) {
+        AiAgentStream.Raw -> " | stream=raw"
+        AiAgentStream.Real -> " | stream=real | epoch=${epoch ?: 0}"
+    }
+
+private fun aiAgentApplyStream(paramsInfo: String, stream: AiAgentStream, epoch: Int?): String =
+    paramsInfo + aiAgentStreamSuffix(stream, epoch)
+
+private fun AiAgentMessage.displayParamsInfo(): String =
+    paramsInfo
+        .replace(streamStripRegex, "")
+        .replace(epochStripRegex, "")
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -195,7 +229,8 @@ private fun AiAgentChat(
     val queries = remember(database) { database.chatHistoryQueries }
 
     val chats = remember { mutableStateListOf<AiAgentChatItem>() }
-    val messages = remember { mutableStateListOf<AiAgentMessage>() }
+    val rawMessages = remember { mutableStateListOf<AiAgentMessage>() }
+    val realMessages = remember { mutableStateListOf<AiAgentMessage>() }
     val listState = rememberLazyListState()
     val inputFocusRequester = remember { FocusRequester() }
     var inputText by remember { mutableStateOf(TextFieldValue("")) }
@@ -207,6 +242,10 @@ private fun AiAgentChat(
     var chatSessionId by remember { mutableIntStateOf(0) }
     var isLoading by remember { mutableStateOf(false) }
     var isFeaturesPanelVisible by remember { mutableStateOf(false) }
+    var isSummarizationEnabled by remember { mutableStateOf(false) }
+    var summarizeAfterTokensInput by remember { mutableStateOf("10000") }
+    var showRawHistory by remember { mutableStateOf(false) }
+    var realEpoch by remember { mutableIntStateOf(0) }
 
     fun loadChatsFromDb(): List<AiAgentChatItem> {
         return queries.selectChats().executeAsList().map {
@@ -215,13 +254,42 @@ private fun AiAgentChat(
     }
 
     fun loadMessagesForChat(chatId: Long) {
-        messages.clear()
-        messages += queries.selectMessagesByChat(chatId).executeAsList().map {
-            AiAgentMessage(
-                text = it.message,
-                isUser = it.role == "user",
-                paramsInfo = it.params_info
+        rawMessages.clear()
+        realMessages.clear()
+        realEpoch = 0
+        queries.selectMessagesByChat(chatId).executeAsList().forEach { row ->
+            val stream = aiAgentStreamFromParams(row.params_info)
+            val epoch = aiAgentEpochFromParams(row.params_info) ?: 0
+            val baseMessage = AiAgentMessage(
+                text = row.message,
+                isUser = row.role == "user",
+                paramsInfo = row.params_info,
+                stream = stream ?: AiAgentStream.Raw,
+                epoch = epoch,
+                createdAt = row.created_at
             )
+
+            when (stream) {
+                AiAgentStream.Raw -> rawMessages += baseMessage
+                AiAgentStream.Real -> {
+                    realMessages += baseMessage
+                    if (epoch > realEpoch) {
+                        realEpoch = epoch
+                    }
+                }
+                null -> {
+                    rawMessages += baseMessage.copy(stream = AiAgentStream.Raw, epoch = 0)
+                    realMessages += baseMessage.copy(stream = AiAgentStream.Real, epoch = 0)
+                }
+            }
+        }
+
+        if (realEpoch > 0) {
+            val latestReal = realMessages.filter { it.epoch == realEpoch }
+            realMessages.clear()
+            realMessages += latestReal
+        } else {
+            realMessages.clear()
         }
     }
 
@@ -233,6 +301,7 @@ private fun AiAgentChat(
         inputText = TextFieldValue("")
         apiSelectorExpanded = false
         modelSelectorExpanded = false
+        showRawHistory = false
     }
 
     fun createNewChatAndOpen() {
@@ -252,10 +321,13 @@ private fun AiAgentChat(
         chatSessionId++
         isLoading = false
         activeChatId = null
-        messages.clear()
+        rawMessages.clear()
+        realMessages.clear()
+        realEpoch = 0
         inputText = TextFieldValue("")
         apiSelectorExpanded = false
         modelSelectorExpanded = false
+        showRawHistory = false
     }
 
     fun deleteChat(chatId: Long) {
@@ -288,6 +360,49 @@ private fun AiAgentChat(
         clearChatSelection()
     }
 
+    fun currentHistoryMessages(): List<AiAgentMessage> =
+        if (realEpoch > 0) realMessages else rawMessages
+
+    fun displayedMessages(): List<AiAgentMessage> =
+        if (isSummarizationEnabled && showRawHistory) rawMessages else currentHistoryMessages()
+
+    fun appendMessageToStream(
+        chatId: Long,
+        stream: AiAgentStream,
+        epoch: Int,
+        text: String,
+        isUser: Boolean,
+        paramsInfoBase: String,
+        apiLabel: String,
+        model: String,
+        createdAt: Long
+    ) {
+        val paramsInfo = aiAgentApplyStream(paramsInfoBase, stream, epoch)
+        val message = AiAgentMessage(
+            text = text,
+            isUser = isUser,
+            paramsInfo = paramsInfo,
+            stream = stream,
+            epoch = epoch,
+            createdAt = createdAt
+        )
+
+        when (stream) {
+            AiAgentStream.Raw -> rawMessages += message
+            AiAgentStream.Real -> realMessages += message
+        }
+
+        queries.insertMessage(
+            chat_id = chatId,
+            api = apiLabel,
+            model = model,
+            role = if (isUser) "user" else "assistant",
+            message = text,
+            params_info = paramsInfo,
+            created_at = createdAt
+        )
+    }
+
     fun sendMessage() {
         val currentChatId = activeChatId ?: return
         val trimmed = inputText.text.trim()
@@ -297,21 +412,32 @@ private fun AiAgentChat(
         val model = modelInput.trim().ifEmpty { requestApi.defaultModel }
         val paramsInfoPrefix = "api=${requestApi.label} | model=$model"
         val userParamsInfo = "$paramsInfoPrefix | response_time=pending"
+        val userCreatedAt = System.currentTimeMillis()
 
-        messages += AiAgentMessage(
+        appendMessageToStream(
+            chatId = currentChatId,
+            stream = AiAgentStream.Raw,
+            epoch = 0,
             text = trimmed,
             isUser = true,
-            paramsInfo = userParamsInfo
-        )
-        queries.insertMessage(
-            chat_id = currentChatId,
-            api = requestApi.label,
+            paramsInfoBase = userParamsInfo,
+            apiLabel = requestApi.label,
             model = model,
-            role = "user",
-            message = trimmed,
-            params_info = userParamsInfo,
-            created_at = System.currentTimeMillis()
+            createdAt = userCreatedAt
         )
+        if (realEpoch > 0) {
+            appendMessageToStream(
+                chatId = currentChatId,
+                stream = AiAgentStream.Real,
+                epoch = realEpoch,
+                text = trimmed,
+                isUser = true,
+                paramsInfoBase = userParamsInfo,
+                apiLabel = requestApi.label,
+                model = model,
+                createdAt = userCreatedAt
+            )
+        }
         inputText = TextFieldValue("")
 
         scope.launch {
@@ -327,7 +453,7 @@ private fun AiAgentChat(
 
                 val request = DeepSeekChatRequest(
                     model = model,
-                    messages = messages
+                    messages = currentHistoryMessages()
                         .filter { it.isApiHistoryMessage() }
                         .map { it.toRequestMessage() }
                 )
@@ -374,20 +500,118 @@ private fun AiAgentChat(
                 totalTokens?.let { append(" | tokens=$it") }
             }
             val assistantParamsInfo = "$paramsInfoPrefix | response_time=${responseTimeSec.aiAgentFormatSeconds()}$tokenInfoSuffix"
-            messages += AiAgentMessage(
+            val assistantCreatedAt = System.currentTimeMillis()
+            appendMessageToStream(
+                chatId = requestChatId,
+                stream = AiAgentStream.Raw,
+                epoch = 0,
                 text = completionResult.answer,
                 isUser = false,
-                paramsInfo = assistantParamsInfo
-            )
-            queries.insertMessage(
-                chat_id = requestChatId,
-                api = requestApi.label,
+                paramsInfoBase = assistantParamsInfo,
+                apiLabel = requestApi.label,
                 model = model,
-                role = "assistant",
-                message = completionResult.answer,
-                params_info = assistantParamsInfo,
-                created_at = System.currentTimeMillis()
+                createdAt = assistantCreatedAt
             )
+            if (realEpoch > 0) {
+                appendMessageToStream(
+                    chatId = requestChatId,
+                    stream = AiAgentStream.Real,
+                    epoch = realEpoch,
+                    text = completionResult.answer,
+                    isUser = false,
+                    paramsInfoBase = assistantParamsInfo,
+                    apiLabel = requestApi.label,
+                    model = model,
+                    createdAt = assistantCreatedAt
+                )
+            }
+
+            if (isSummarizationEnabled) {
+                val tokenThreshold = summarizeAfterTokensInput.toIntOrNull() ?: 10000
+                val tokenTotal = currentHistoryMessages().sumOf { it.tokensSpent() }
+                if (tokenThreshold > 0 && tokenTotal >= tokenThreshold) {
+                    val summarySessionId = chatSessionId
+                    val summaryChatId = activeChatId
+                    val summaryStartedAtNanos = System.nanoTime()
+                    val summaryResult = try {
+                        val apiKey = aiAgentReadApiKey(requestApi.envVar)
+                        if (apiKey.isBlank()) {
+                            error("Missing API key in secrets.properties or env var: ${requestApi.envVar}")
+                        }
+
+                        val transcript = currentHistoryMessages()
+                            .filter { it.isApiHistoryMessage() }
+                            .joinToString("\n") { message ->
+                                val prefix = if (message.isUser) "Пользователь" else "Ассистент"
+                                "$prefix: ${message.text}"
+                            }
+
+                        val summaryRequest = DeepSeekChatRequest(
+                            model = model,
+                            messages = listOf(
+                                DeepSeekMessage(
+                                    role = "system",
+                                    content = "Суммируй контекст беседы кратко. Сохрани факты, договоренности и важные детали."
+                                ),
+                                DeepSeekMessage(
+                                    role = "user",
+                                    content = "Контекст:\n$transcript"
+                                )
+                            )
+                        )
+
+                        val summaryResponse = when (requestApi) {
+                            AiAgentApi.DeepSeek -> deepSeekApi.createChatCompletion(apiKey = apiKey, request = summaryRequest)
+                            AiAgentApi.OpenAI -> openAiApi.createChatCompletion(apiKey = apiKey, request = summaryRequest)
+                            AiAgentApi.GigaChat -> gigaChatApi.createChatCompletion(accessToken = apiKey, request = summaryRequest)
+                            AiAgentApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletion(apiKey = apiKey, request = summaryRequest)
+                        }
+
+                        val summaryText = summaryResponse.choices.firstOrNull()?.message?.content?.trim().orEmpty()
+                            .ifEmpty { "Empty response from ${requestApi.label}." }
+                        AiAgentCompletionResult(
+                            answer = summaryText,
+                            requestTokens = summaryResponse.usage?.promptTokens,
+                            responseTokens = summaryResponse.usage?.completionTokens,
+                            totalTokens = summaryResponse.usage?.totalTokens
+                        )
+                    } catch (e: Exception) {
+                        null
+                    }
+
+                    if (summaryResult != null && summarySessionId == chatSessionId && summaryChatId == activeChatId) {
+                        realEpoch += 1
+                        realMessages.clear()
+
+                        val summaryTokens = summaryResult.totalTokens
+                            ?: if (summaryResult.requestTokens != null && summaryResult.responseTokens != null) {
+                                summaryResult.requestTokens + summaryResult.responseTokens
+                            } else {
+                                null
+                            }
+                        val summaryTokenSuffix = buildString {
+                            summaryResult.requestTokens?.let { append(" | request_tokens=$it") }
+                            summaryResult.responseTokens?.let { append(" | response_tokens=$it") }
+                            summaryTokens?.let { append(" | tokens=$it") }
+                        }
+                        val summaryTimeSec = (System.nanoTime() - summaryStartedAtNanos) / 1_000_000_000.0
+                        val summaryParamsInfo = "$paramsInfoPrefix | response_time=${summaryTimeSec.aiAgentFormatSeconds()}$summaryTokenSuffix"
+                        val summaryCreatedAt = System.currentTimeMillis()
+                        appendMessageToStream(
+                            chatId = requestChatId,
+                            stream = AiAgentStream.Real,
+                            epoch = realEpoch,
+                            text = summaryResult.answer,
+                            isUser = false,
+                            paramsInfoBase = summaryParamsInfo,
+                            apiLabel = requestApi.label,
+                            model = model,
+                            createdAt = summaryCreatedAt
+                        )
+                    }
+                }
+            }
+
             isLoading = false
         }
     }
@@ -409,20 +633,28 @@ private fun AiAgentChat(
         }
     }
 
-    LaunchedEffect(messages.size, isLoading) {
-        if (messages.isNotEmpty()) {
-            listState.animateScrollToItem(messages.lastIndex)
-        }
-    }
-
     LaunchedEffect(isLoading) {
         if (!isLoading) {
             inputFocusRequester.requestFocus()
         }
     }
 
+    LaunchedEffect(isSummarizationEnabled) {
+        if (!isSummarizationEnabled) {
+            showRawHistory = false
+        }
+    }
+
+    val displayMessages = displayedMessages()
+
+    LaunchedEffect(displayMessages.size, isLoading) {
+        if (displayMessages.isNotEmpty()) {
+            listState.animateScrollToItem(displayMessages.lastIndex)
+        }
+    }
+
     val activeChatTitle = chats.firstOrNull { it.id == activeChatId }?.title.orEmpty()
-    val activeChatTotalTokens = messages
+    val activeChatTotalTokens = displayMessages
         .asReversed()
         .firstOrNull { it.tokensSpent() > 0 }
         ?.tokensSpent()
@@ -551,6 +783,14 @@ private fun AiAgentChat(
                         style = MaterialTheme.typography.titleMedium,
                         modifier = Modifier.weight(1f)
                     )
+                    if (isSummarizationEnabled) {
+                        TextButton(
+                            onClick = { showRawHistory = !showRawHistory },
+                            enabled = !isLoading
+                        ) {
+                            Text(if (showRawHistory) "Показать сжатый" else "Показать полный")
+                        }
+                    }
                     IconButton(
                         onClick = { isFeaturesPanelVisible = !isFeaturesPanelVisible },
                         enabled = !isLoading
@@ -650,7 +890,7 @@ private fun AiAgentChat(
                 state = listState,
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                items(messages) { message ->
+                items(displayMessages) { message ->
                     AiAgentBubble(message = message)
                 }
                 if (isLoading) {
@@ -726,6 +966,38 @@ private fun AiAgentChat(
                     text = "Доп. функции",
                     style = MaterialTheme.typography.titleSmall
                 )
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        text = "Суммаризация контекста",
+                        style = MaterialTheme.typography.labelMedium
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Checkbox(
+                            checked = isSummarizationEnabled,
+                            onCheckedChange = { checked -> isSummarizationEnabled = checked },
+                            enabled = !isLoading
+                        )
+                        OutlinedTextField(
+                            value = summarizeAfterTokensInput,
+                            onValueChange = { value ->
+                                if (value.isEmpty() || value.all { it.isDigit() }) {
+                                    summarizeAfterTokensInput = value
+                                }
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(52.dp),
+                            enabled = !isLoading,
+                            placeholder = { Text("tokens", style = MaterialTheme.typography.labelSmall) },
+                            singleLine = true,
+                            textStyle = MaterialTheme.typography.labelSmall
+                        )
+                    }
+                }
             }
         }
     }
@@ -765,7 +1037,7 @@ private fun AiAgentBubble(message: AiAgentMessage) {
                     )
                 }
                 Text(
-                    text = message.paramsInfo,
+                    text = message.displayParamsInfo(),
                     style = MaterialTheme.typography.labelSmall,
                     color = if (message.isUser) {
                         MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
