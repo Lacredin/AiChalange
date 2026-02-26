@@ -528,7 +528,11 @@ private fun AiAgentChat(
 
             if (isSummarizationEnabled) {
                 val tokenThreshold = summarizeAfterTokensInput.toIntOrNull() ?: 10000
-                val tokenTotal = currentHistoryMessages().sumOf { it.tokensSpent() }
+                val tokenTotal = currentHistoryMessages()
+                    .asReversed()
+                    .firstOrNull { it.tokensSpent() > 0 }
+                    ?.tokensSpent()
+                    ?: 0
                 if (tokenThreshold > 0 && tokenTotal >= tokenThreshold) {
                     val summarySessionId = chatSessionId
                     val summaryChatId = activeChatId
