@@ -436,7 +436,7 @@ private fun AiAgentChat(
     ) {
         Column(
             modifier = Modifier
-                .width(220.dp)
+                .width(200.dp)
                 .fillMaxSize()
                 .padding(8.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -546,75 +546,85 @@ private fun AiAgentChat(
                 )
             }
 
-            ExposedDropdownMenuBox(
-                expanded = apiSelectorExpanded,
-                onExpandedChange = { expanded -> if (!isLoading) apiSelectorExpanded = expanded }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                OutlinedTextField(
-                    value = selectedApi.label,
-                    onValueChange = {},
-                    modifier = Modifier
-                        .menuAnchor(
-                            type = ExposedDropdownMenuAnchorType.PrimaryNotEditable,
-                            enabled = !isLoading
-                        )
-                        .fillMaxWidth(),
-                    readOnly = true,
-                    label = { Text("Current API") },
-                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = apiSelectorExpanded) },
-                    enabled = !isLoading
-                )
-                ExposedDropdownMenu(
+                ExposedDropdownMenuBox(
                     expanded = apiSelectorExpanded,
-                    onDismissRequest = { apiSelectorExpanded = false }
+                    onExpandedChange = { expanded -> if (!isLoading) apiSelectorExpanded = expanded },
+                    modifier = Modifier.weight(1f)
                 ) {
-                    AiAgentApi.entries.forEach { api ->
-                        DropdownMenuItem(
-                            text = { Text(api.label) },
-                            onClick = {
-                                selectedApi = api
-                                modelInput = api.defaultModel
-                                apiSelectorExpanded = false
-                                modelSelectorExpanded = false
-                            }
-                        )
+                    OutlinedTextField(
+                        value = selectedApi.label,
+                        onValueChange = {},
+                        modifier = Modifier
+                            .menuAnchor(
+                                type = ExposedDropdownMenuAnchorType.PrimaryNotEditable,
+                                enabled = !isLoading
+                            )
+                            .fillMaxWidth()
+                            .height(52.dp),
+                        readOnly = true,
+                        placeholder = { Text("Current API", style = MaterialTheme.typography.labelSmall) },
+                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = apiSelectorExpanded) },
+                        enabled = !isLoading,
+                        singleLine = true,
+                        textStyle = MaterialTheme.typography.labelSmall
+                    )
+                    ExposedDropdownMenu(
+                        expanded = apiSelectorExpanded,
+                        onDismissRequest = { apiSelectorExpanded = false }
+                    ) {
+                        AiAgentApi.entries.forEach { api ->
+                            DropdownMenuItem(
+                                text = { Text(api.label) },
+                                onClick = {
+                                    selectedApi = api
+                                    modelInput = api.defaultModel
+                                    apiSelectorExpanded = false
+                                    modelSelectorExpanded = false
+                                }
+                            )
+                        }
                     }
                 }
-            }
 
-            ExposedDropdownMenuBox(
-                expanded = modelSelectorExpanded,
-                onExpandedChange = { expanded -> if (!isLoading) modelSelectorExpanded = expanded }
-            ) {
-                OutlinedTextField(
-                    value = modelInput,
-                    onValueChange = {},
-                    modifier = Modifier
-                        .menuAnchor(
-                            type = ExposedDropdownMenuAnchorType.PrimaryNotEditable,
-                            enabled = !isLoading
-                        )
-                        .fillMaxWidth()
-                        .height(52.dp),
-                    enabled = !isLoading,
-                    readOnly = true,
-                    placeholder = { Text("model", style = MaterialTheme.typography.labelSmall) },
-                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = modelSelectorExpanded) },
-                    singleLine = true,
-                    textStyle = MaterialTheme.typography.labelSmall
-                )
-                ExposedDropdownMenu(
+                ExposedDropdownMenuBox(
                     expanded = modelSelectorExpanded,
-                    onDismissRequest = { modelSelectorExpanded = false }
+                    onExpandedChange = { expanded -> if (!isLoading) modelSelectorExpanded = expanded },
+                    modifier = Modifier.weight(1f)
                 ) {
-                    selectedApi.supportedModels.forEach { model ->
-                        DropdownMenuItem(
-                            text = { Text(model) },
-                            onClick = {
-                                modelInput = model
-                                modelSelectorExpanded = false
-                            }
-                        )
+                    OutlinedTextField(
+                        value = modelInput,
+                        onValueChange = {},
+                        modifier = Modifier
+                            .menuAnchor(
+                                type = ExposedDropdownMenuAnchorType.PrimaryNotEditable,
+                                enabled = !isLoading
+                            )
+                            .fillMaxWidth()
+                            .height(52.dp),
+                        enabled = !isLoading,
+                        readOnly = true,
+                        placeholder = { Text("model", style = MaterialTheme.typography.labelSmall) },
+                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = modelSelectorExpanded) },
+                        singleLine = true,
+                        textStyle = MaterialTheme.typography.labelSmall
+                    )
+                    ExposedDropdownMenu(
+                        expanded = modelSelectorExpanded,
+                        onDismissRequest = { modelSelectorExpanded = false }
+                    ) {
+                        selectedApi.supportedModels.forEach { model ->
+                            DropdownMenuItem(
+                                text = { Text(model) },
+                                onClick = {
+                                    modelInput = model
+                                    modelSelectorExpanded = false
+                                }
+                            )
+                        }
                     }
                 }
             }
