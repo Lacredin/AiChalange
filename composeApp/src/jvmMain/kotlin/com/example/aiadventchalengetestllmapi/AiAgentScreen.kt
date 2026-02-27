@@ -37,11 +37,14 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshots.SnapshotStateList
+import androidx.compose.runtime.toMutableStateList
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
@@ -138,6 +141,56 @@ private data class AiAgentCompletionResult(
     val responseTokens: Int?,
     val totalTokens: Int?
 )
+
+private enum class AiAgentContextStrategy {
+    Summarization,
+    SlidingWindow,
+    StickyFacts,
+    Branching
+}
+
+private fun aiAgentTakeLastMessages(messages: List<AiAgentMessage>, lastN: Int): List<AiAgentMessage> {
+    if (lastN <= 0) return emptyList()
+    if (messages.size <= lastN) return messages
+    return messages.takeLast(lastN)
+}
+
+private fun aiAgentUpdateFacts(facts: MutableMap<String, String>, userMessage: String) {
+    val text = userMessage.trim()
+    if (text.isEmpty()) return
+
+    text.lineSequence()
+        .map { it.trim() }
+        .filter { it.isNotEmpty() && it.contains(":") }
+        .forEach { line ->
+            val key = line.substringBefore(":").trim().lowercase(Locale.getDefault())
+            val value = line.substringAfter(":").trim()
+            if (key.isNotEmpty() && value.isNotEmpty()) {
+                facts[key] = value
+            }
+        }
+
+    fun maybeSet(key: String, markers: List<String>) {
+        if (markers.any { text.contains(it, ignoreCase = true) }) {
+            facts[key] = text
+        }
+    }
+
+    maybeSet("цель", listOf("цель", "goal"))
+    maybeSet("ограничения", listOf("огранич", "нельзя", "limit"))
+    maybeSet("предпочтения", listOf("предпочита", "prefer"))
+    maybeSet("договоренности", listOf("договор", "решили", "agree"))
+}
+
+private fun aiAgentFactsSystemMessage(facts: Map<String, String>): DeepSeekMessage? {
+    if (facts.isEmpty()) return null
+    val factsText = buildString {
+        append("Важные факты диалога (ключ-значение):\n")
+        facts.forEach { (key, value) -> append("- $key: $value\n") }
+        append("Следуй этим фактам при ответе, если они относятся к запросу.")
+    }
+    return DeepSeekMessage(role = "system", content = factsText)
+}
 
 private fun AiAgentMessage.toRequestMessage(): DeepSeekMessage =
     DeepSeekMessage(
@@ -244,6 +297,16 @@ private fun AiAgentChat(
     var isFeaturesPanelVisible by remember { mutableStateOf(false) }
     var isSummarizationEnabled by remember { mutableStateOf(false) }
     var summarizeAfterTokensInput by remember { mutableStateOf("10000") }
+    var isSlidingWindowEnabled by remember { mutableStateOf(false) }
+    var slidingWindowSizeInput by remember { mutableStateOf("12") }
+    var isStickyFactsEnabled by remember { mutableStateOf(false) }
+    var stickyFactsWindowSizeInput by remember { mutableStateOf("12") }
+    val stickyFacts = remember { mutableStateMapOf<String, String>() }
+    var isBranchingEnabled by remember { mutableStateOf(false) }
+    val branches = remember { mutableStateMapOf<String, SnapshotStateList<AiAgentMessage>>() }
+    var selectedBranchName by remember { mutableStateOf<String?>(null) }
+    var checkpointSnapshot by remember { mutableStateOf<List<AiAgentMessage>>(emptyList()) }
+    var checkpointIndex by remember { mutableIntStateOf(0) }
     var showRawHistory by remember { mutableStateOf(false) }
     var realEpoch by remember { mutableIntStateOf(0) }
 
@@ -302,6 +365,11 @@ private fun AiAgentChat(
         apiSelectorExpanded = false
         modelSelectorExpanded = false
         showRawHistory = false
+        stickyFacts.clear()
+        branches.clear()
+        selectedBranchName = null
+        checkpointSnapshot = emptyList()
+        checkpointIndex = 0
     }
 
     fun createNewChatAndOpen() {
@@ -328,6 +396,11 @@ private fun AiAgentChat(
         apiSelectorExpanded = false
         modelSelectorExpanded = false
         showRawHistory = false
+        stickyFacts.clear()
+        branches.clear()
+        selectedBranchName = null
+        checkpointSnapshot = emptyList()
+        checkpointIndex = 0
     }
 
     fun deleteChat(chatId: Long) {
@@ -363,8 +436,57 @@ private fun AiAgentChat(
     fun currentHistoryMessages(): List<AiAgentMessage> =
         if (realEpoch > 0) realMessages else rawMessages
 
+    fun activeBranchMessages(): SnapshotStateList<AiAgentMessage>? {
+        if (!isBranchingEnabled) return null
+        val branchName = selectedBranchName ?: return null
+        return branches[branchName]
+    }
+
+    fun historyForContext(): List<AiAgentMessage> = activeBranchMessages() ?: currentHistoryMessages()
+
+    fun contextStrategy(): AiAgentContextStrategy = when {
+        isBranchingEnabled -> AiAgentContextStrategy.Branching
+        isStickyFactsEnabled -> AiAgentContextStrategy.StickyFacts
+        isSlidingWindowEnabled -> AiAgentContextStrategy.SlidingWindow
+        isSummarizationEnabled -> AiAgentContextStrategy.Summarization
+        else -> AiAgentContextStrategy.Summarization
+    }
+
+    fun buildRequestMessages(): List<DeepSeekMessage> {
+        val history = historyForContext().filter { it.isApiHistoryMessage() }
+        return when (contextStrategy()) {
+            AiAgentContextStrategy.StickyFacts -> {
+                val lastN = stickyFactsWindowSizeInput.toIntOrNull() ?: 12
+                val selectedHistory = aiAgentTakeLastMessages(history, lastN)
+                buildList {
+                    aiAgentFactsSystemMessage(stickyFacts)?.let { add(it) }
+                    addAll(selectedHistory.map { it.toRequestMessage() })
+                }
+            }
+            AiAgentContextStrategy.SlidingWindow -> {
+                val lastN = slidingWindowSizeInput.toIntOrNull() ?: 12
+                aiAgentTakeLastMessages(history, lastN).map { it.toRequestMessage() }
+            }
+            else -> history.map { it.toRequestMessage() }
+        }
+    }
+
     fun displayedMessages(): List<AiAgentMessage> =
-        if (isSummarizationEnabled && showRawHistory) rawMessages else currentHistoryMessages()
+        activeBranchMessages() ?: if (isSummarizationEnabled && showRawHistory) rawMessages else currentHistoryMessages()
+
+    fun saveCheckpoint() {
+        checkpointSnapshot = historyForContext().map { it.copy() }
+    }
+
+    fun createTwoBranchesFromCheckpoint() {
+        if (checkpointSnapshot.isEmpty()) return
+        checkpointIndex += 1
+        val branchAName = "Ветка A$checkpointIndex"
+        val branchBName = "Ветка B$checkpointIndex"
+        branches[branchAName] = checkpointSnapshot.map { it.copy() }.toMutableStateList()
+        branches[branchBName] = checkpointSnapshot.map { it.copy() }.toMutableStateList()
+        selectedBranchName = branchAName
+    }
 
     fun appendMessageToStream(
         chatId: Long,
@@ -408,6 +530,10 @@ private fun AiAgentChat(
         val trimmed = inputText.text.trim()
         if (trimmed.isEmpty() || isLoading) return
 
+        if (isStickyFactsEnabled) {
+            aiAgentUpdateFacts(stickyFacts, trimmed)
+        }
+
         val requestApi = selectedApi
         val model = modelInput.trim().ifEmpty { requestApi.defaultModel }
         val paramsInfoPrefix = "api=${requestApi.label} | model=$model"
@@ -438,6 +564,17 @@ private fun AiAgentChat(
                 createdAt = userCreatedAt
             )
         }
+        val activeBranch = activeBranchMessages()
+        if (activeBranch != null) {
+            activeBranch += AiAgentMessage(
+                text = trimmed,
+                isUser = true,
+                paramsInfo = aiAgentApplyStream(userParamsInfo, AiAgentStream.Real, realEpoch),
+                stream = AiAgentStream.Real,
+                epoch = realEpoch,
+                createdAt = userCreatedAt
+            )
+        }
         inputText = TextFieldValue("")
 
         scope.launch {
@@ -453,9 +590,7 @@ private fun AiAgentChat(
 
                 val request = DeepSeekChatRequest(
                     model = model,
-                    messages = currentHistoryMessages()
-                        .filter { it.isApiHistoryMessage() }
-                        .map { it.toRequestMessage() }
+                    messages = buildRequestMessages()
                 )
 
                 val response = when (requestApi) {
@@ -525,10 +660,20 @@ private fun AiAgentChat(
                     createdAt = assistantCreatedAt
                 )
             }
+            if (activeBranch != null) {
+                activeBranch += AiAgentMessage(
+                    text = completionResult.answer,
+                    isUser = false,
+                    paramsInfo = aiAgentApplyStream(assistantParamsInfo, AiAgentStream.Real, realEpoch),
+                    stream = AiAgentStream.Real,
+                    epoch = realEpoch,
+                    createdAt = assistantCreatedAt
+                )
+            }
 
             if (isSummarizationEnabled) {
                 val tokenThreshold = summarizeAfterTokensInput.toIntOrNull() ?: 10000
-                val tokenTotal = currentHistoryMessages()
+                val tokenTotal = historyForContext()
                     .asReversed()
                     .firstOrNull { it.tokensSpent() > 0 }
                     ?.tokensSpent()
@@ -543,7 +688,7 @@ private fun AiAgentChat(
                             error("Missing API key in secrets.properties or env var: ${requestApi.envVar}")
                         }
 
-                        val transcript = currentHistoryMessages()
+                        val transcript = historyForContext()
                             .filter { it.isApiHistoryMessage() }
                             .joinToString("\n") { message ->
                                 val prefix = if (message.isUser) "Пользователь" else "Ассистент"
@@ -1000,6 +1145,125 @@ private fun AiAgentChat(
                             singleLine = true,
                             textStyle = MaterialTheme.typography.labelSmall
                         )
+                    }
+                }
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        text = "Sliding Window (последние N)",
+                        style = MaterialTheme.typography.labelMedium
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Checkbox(
+                            checked = isSlidingWindowEnabled,
+                            onCheckedChange = { checked -> isSlidingWindowEnabled = checked },
+                            enabled = !isLoading
+                        )
+                        OutlinedTextField(
+                            value = slidingWindowSizeInput,
+                            onValueChange = { value ->
+                                if (value.isEmpty() || value.all { it.isDigit() }) {
+                                    slidingWindowSizeInput = value
+                                }
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(52.dp),
+                            enabled = !isLoading,
+                            placeholder = { Text("N", style = MaterialTheme.typography.labelSmall) },
+                            singleLine = true,
+                            textStyle = MaterialTheme.typography.labelSmall
+                        )
+                    }
+                }
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        text = "Sticky Facts (facts + последние N)",
+                        style = MaterialTheme.typography.labelMedium
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Checkbox(
+                            checked = isStickyFactsEnabled,
+                            onCheckedChange = { checked -> isStickyFactsEnabled = checked },
+                            enabled = !isLoading
+                        )
+                        OutlinedTextField(
+                            value = stickyFactsWindowSizeInput,
+                            onValueChange = { value ->
+                                if (value.isEmpty() || value.all { it.isDigit() }) {
+                                    stickyFactsWindowSizeInput = value
+                                }
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(52.dp),
+                            enabled = !isLoading,
+                            placeholder = { Text("N", style = MaterialTheme.typography.labelSmall) },
+                            singleLine = true,
+                            textStyle = MaterialTheme.typography.labelSmall
+                        )
+                    }
+                    TextButton(
+                        onClick = { stickyFacts.clear() },
+                        enabled = stickyFacts.isNotEmpty() && !isLoading
+                    ) {
+                        Text("Очистить facts")
+                    }
+                    if (stickyFacts.isNotEmpty()) {
+                        Text(
+                            text = stickyFacts.entries.joinToString("\n") { (k, v) -> "$k: $v" },
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                    }
+                }
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        text = "Branching (ветки диалога)",
+                        style = MaterialTheme.typography.labelMedium
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Checkbox(
+                            checked = isBranchingEnabled,
+                            onCheckedChange = { checked ->
+                                isBranchingEnabled = checked
+                                if (!checked) {
+                                    selectedBranchName = null
+                                }
+                            },
+                            enabled = !isLoading
+                        )
+                        TextButton(
+                            onClick = ::saveCheckpoint,
+                            enabled = !isLoading
+                        ) {
+                            Text("Checkpoint")
+                        }
+                        TextButton(
+                            onClick = ::createTwoBranchesFromCheckpoint,
+                            enabled = checkpointSnapshot.isNotEmpty() && !isLoading
+                        ) {
+                            Text("2 ветки")
+                        }
+                    }
+                    branches.keys.sorted().forEach { branchName ->
+                        TextButton(
+                            onClick = { selectedBranchName = branchName },
+                            enabled = !isLoading
+                        ) {
+                            val suffix = if (selectedBranchName == branchName) " (активна)" else ""
+                            Text(branchName + suffix)
+                        }
                     }
                 }
             }
