@@ -1142,7 +1142,7 @@ private fun AiAgentChat(
                         val isSelected = chat.id == activeChatId
                         Column(
                             modifier = Modifier.fillMaxWidth(),
-                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                            verticalArrangement = Arrangement.spacedBy(0.dp)
                         ) {
                             if (isSelected) {
                                 Row(
@@ -1161,19 +1161,6 @@ private fun AiAgentChat(
                                         color = MaterialTheme.colorScheme.onPrimaryContainer,
                                         modifier = Modifier.weight(1f)
                                     )
-                                    if (hasBranches) {
-                                        TextButton(
-                                            onClick = {
-                                                branchVisibilityByChat[chat.id] = !areBranchesVisible
-                                            },
-                                            enabled = !isLoading
-                                        ) {
-                                            Text(
-                                                text = if (areBranchesVisible) "▾" else "▸",
-                                                color = MaterialTheme.colorScheme.onPrimaryContainer
-                                            )
-                                        }
-                                    }
                                     TextButton(
                                         onClick = { deleteChat(chat.id) },
                                         enabled = !isLoading
@@ -1208,16 +1195,6 @@ private fun AiAgentChat(
                                             color = MaterialTheme.colorScheme.onSurface
                                         )
                                     }
-                                    if (hasBranches) {
-                                        TextButton(
-                                            onClick = {
-                                                branchVisibilityByChat[chat.id] = !areBranchesVisible
-                                            },
-                                            enabled = !isLoading
-                                        ) {
-                                            Text(if (areBranchesVisible) "▾" else "▸")
-                                        }
-                                    }
                                     TextButton(
                                         onClick = { deleteChat(chat.id) },
                                         enabled = !isLoading
@@ -1227,9 +1204,55 @@ private fun AiAgentChat(
                                 }
                             }
 
+                            if (hasBranches) {
+                                Box(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    contentAlignment = Alignment.CenterEnd
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(10.dp)
+                                            .background(
+                                                color = if (isSelected) {
+                                                    MaterialTheme.colorScheme.primaryContainer
+                                                } else {
+                                                    Color.Transparent
+                                                },
+                                                shape = RoundedCornerShape(bottomStart = 6.dp, bottomEnd = 6.dp)
+                                            )
+                                            .border(
+                                                width = 1.dp,
+                                                color = if (isSelected) {
+                                                    MaterialTheme.colorScheme.primary
+                                                } else {
+                                                    MaterialTheme.colorScheme.outline
+                                                },
+                                                shape = RoundedCornerShape(bottomStart = 6.dp, bottomEnd = 6.dp)
+                                            )
+                                            .clickable(enabled = !isLoading) {
+                                                branchVisibilityByChat[chat.id] = !areBranchesVisible
+                                            },
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = if (areBranchesVisible) "▾" else "▸",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = if (isSelected) {
+                                                MaterialTheme.colorScheme.onPrimaryContainer
+                                            } else {
+                                                MaterialTheme.colorScheme.onSurface
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+
                             if (hasBranches && areBranchesVisible) {
                                 Column(
-                                    modifier = Modifier.fillMaxWidth(),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(top = 4.dp),
                                     verticalArrangement = Arrangement.spacedBy(4.dp),
                                     horizontalAlignment = Alignment.End
                                 ) {
