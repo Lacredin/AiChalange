@@ -57,13 +57,24 @@ actual class DatabaseDriverFactory {
                 "sticky_facts_window_size",
                 "is_branching_enabled",
                 "show_raw_history"
+            ),
+            "chat_branch_messages" to setOf(
+                "id",
+                "chat_id",
+                "branch_number",
+                "role",
+                "message",
+                "params_info",
+                "stream",
+                "epoch",
+                "created_at"
             )
         )
         val actualTables = mutableSetOf<String>()
         val connectionUrl = "jdbc:sqlite:$dbPath"
         DriverManager.getConnection(connectionUrl).use { connection ->
             connection.prepareStatement(
-                "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('chats', 'chat_messages', 'chat_feature_state');"
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('chats', 'chat_messages', 'chat_feature_state', 'chat_branch_messages');"
             ).use { statement ->
                 statement.executeQuery().use { resultSet ->
                     while (resultSet.next()) {

@@ -27,6 +27,18 @@ CREATE TABLE chat_feature_state (
     show_raw_history INTEGER NOT NULL
 );
 
+CREATE TABLE chat_branch_messages (
+    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    chat_id INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+    branch_number INTEGER NOT NULL,
+    role TEXT NOT NULL,
+    message TEXT NOT NULL,
+    params_info TEXT NOT NULL,
+    stream TEXT NOT NULL,
+    epoch INTEGER NOT NULL,
+    created_at INTEGER NOT NULL
+);
+
 selectChats:
 SELECT *
 FROM chats
@@ -52,6 +64,12 @@ selectFeatureStateByChat:
 SELECT *
 FROM chat_feature_state
 WHERE chat_id = ?;
+
+selectBranchMessagesByChat:
+SELECT *
+FROM chat_branch_messages
+WHERE chat_id = ?
+ORDER BY branch_number ASC, id ASC;
 
 insertMessage:
 INSERT INTO chat_messages(
@@ -79,6 +97,19 @@ INSERT OR REPLACE INTO chat_feature_state(
 )
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
 
+insertBranchMessage:
+INSERT INTO chat_branch_messages(
+    chat_id,
+    branch_number,
+    role,
+    message,
+    params_info,
+    stream,
+    epoch,
+    created_at
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+
 deleteMessagesByChat:
 DELETE FROM chat_messages
 WHERE chat_id = ?;
@@ -86,6 +117,18 @@ WHERE chat_id = ?;
 deleteFeatureStateByChat:
 DELETE FROM chat_feature_state
 WHERE chat_id = ?;
+
+deleteBranchMessagesByChat:
+DELETE FROM chat_branch_messages
+WHERE chat_id = ?;
+
+deleteBranchMessagesByChatAndBranch:
+DELETE FROM chat_branch_messages
+WHERE chat_id = ? AND branch_number = ?;
+
+deleteBranchMessagesByChatExceptFirst:
+DELETE FROM chat_branch_messages
+WHERE chat_id = ? AND branch_number != 1;
 
 deleteChatById:
 DELETE FROM chats
@@ -96,6 +139,9 @@ DELETE FROM chat_messages;
 
 deleteAllFeatureState:
 DELETE FROM chat_feature_state;
+
+deleteAllBranchMessages:
+DELETE FROM chat_branch_messages;
 
 deleteAllChats:
 DELETE FROM chats;

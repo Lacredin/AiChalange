@@ -407,14 +407,74 @@ private fun AiAgentChat(
         )
     }
 
+    fun loadBranchesForChat(chatId: Long): SnapshotStateList<AiAgentBranchItem> {
+        val branchMap = linkedMapOf<Int, SnapshotStateList<AiAgentMessage>>()
+        queries.selectBranchMessagesByChat(chatId).executeAsList().forEach { row ->
+            val stream = when (row.stream) {
+                "real" -> AiAgentStream.Real
+                else -> AiAgentStream.Raw
+            }
+            val message = AiAgentMessage(
+                text = row.message,
+                isUser = row.role == "user",
+                paramsInfo = row.params_info,
+                stream = stream,
+                epoch = row.epoch.toInt(),
+                createdAt = row.created_at
+            )
+            val list = branchMap.getOrPut(row.branch_number.toInt()) { mutableStateListOf() }
+            list += message
+        }
+
+        return branchMap.entries
+            .sortedBy { it.key }
+            .map { (number, messages) -> AiAgentBranchItem(number = number, messages = messages) }
+            .toMutableStateList()
+    }
+
+    fun saveBranchSnapshot(chatId: Long, branchNumber: Int, messages: List<AiAgentMessage>) {
+        queries.deleteBranchMessagesByChatAndBranch(chat_id = chatId, branch_number = branchNumber.toLong())
+        messages.forEach { message ->
+            queries.insertBranchMessage(
+                chat_id = chatId,
+                branch_number = branchNumber.toLong(),
+                role = if (message.isUser) "user" else "assistant",
+                message = message.text,
+                params_info = message.paramsInfo,
+                stream = if (message.stream == AiAgentStream.Real) "real" else "raw",
+                epoch = message.epoch.toLong(),
+                created_at = message.createdAt
+            )
+        }
+    }
+
+    fun appendMessageToBranch(chatId: Long, branchNumber: Int, message: AiAgentMessage) {
+        queries.insertBranchMessage(
+            chat_id = chatId,
+            branch_number = branchNumber.toLong(),
+            role = if (message.isUser) "user" else "assistant",
+            message = message.text,
+            params_info = message.paramsInfo,
+            stream = if (message.stream == AiAgentStream.Real) "real" else "raw",
+            epoch = message.epoch.toLong(),
+            created_at = message.createdAt
+        )
+    }
+
     fun snapshotCurrentHistory(): SnapshotStateList<AiAgentMessage> {
         val source = if (realEpoch > 0) realMessages else rawMessages
         return source.map { it.copy() }.toMutableStateList()
     }
 
     fun ensureBaseBranchForChat(chatId: Long, resetFromCurrentHistory: Boolean = false): SnapshotStateList<AiAgentBranchItem> {
-        val existing = branchesByChat[chatId]
-        if (existing == null) {
+        val existing = branchesByChat[chatId] ?: run {
+            val loaded = loadBranchesForChat(chatId)
+            if (loaded.isNotEmpty()) {
+                branchesByChat[chatId] = loaded
+                branchCounterByChat[chatId] = loaded.maxOfOrNull { it.number } ?: 1
+                branchVisibilityByChat.putIfAbsent(chatId, true)
+                return loaded
+            }
             val baseBranch = AiAgentBranchItem(
                 number = 1,
                 messages = snapshotCurrentHistory()
@@ -423,6 +483,7 @@ private fun AiAgentChat(
             branchesByChat[chatId] = created
             branchCounterByChat[chatId] = 1
             branchVisibilityByChat.putIfAbsent(chatId, true)
+            saveBranchSnapshot(chatId = chatId, branchNumber = 1, messages = created.first().messages)
             return created
         }
 
@@ -432,6 +493,7 @@ private fun AiAgentChat(
                 messages = snapshotCurrentHistory()
             )
             branchCounterByChat[chatId] = 1
+            saveBranchSnapshot(chatId = chatId, branchNumber = 1, messages = existing.first().messages)
         }
 
         if (resetFromCurrentHistory) {
@@ -442,6 +504,8 @@ private fun AiAgentChat(
                 existing.removeLast()
             }
             branchCounterByChat[chatId] = 1
+            queries.deleteBranchMessagesByChatExceptFirst(chat_id = chatId)
+            saveBranchSnapshot(chatId = chatId, branchNumber = 1, messages = base.messages)
         }
 
         branchVisibilityByChat.putIfAbsent(chatId, true)
@@ -464,6 +528,7 @@ private fun AiAgentChat(
         branchCounterByChat[chatId] = nextNumber
         branchVisibilityByChat[chatId] = true
         selectedBranchNumber = nextNumber
+        saveBranchSnapshot(chatId = chatId, branchNumber = nextNumber, messages = snapshot)
     }
 
     fun deleteBranch(chatId: Long, branchNumber: Int) {
@@ -473,6 +538,7 @@ private fun AiAgentChat(
         if (branchNumber == firstBranchNumber) return
         val removed = branches.removeAll { it.number == branchNumber }
         if (!removed) return
+        queries.deleteBranchMessagesByChatAndBranch(chat_id = chatId, branch_number = branchNumber.toLong())
         if (activeChatId == chatId && selectedBranchNumber == branchNumber) {
             selectedBranchNumber = branches.firstOrNull()?.number
         }
@@ -490,6 +556,7 @@ private fun AiAgentChat(
         activeChatId = chatId
         loadMessagesForChat(chatId)
         loadFeatureStateForChat(chatId)
+        branchesByChat.remove(chatId)
         val branches = ensureBaseBranchForChat(chatId)
         selectedBranchNumber = branches.firstOrNull()?.number
         inputText = TextFieldValue("")
@@ -537,6 +604,7 @@ private fun AiAgentChat(
         if (isLoading) return
 
         val wasActive = activeChatId == chatId
+        queries.deleteBranchMessagesByChat(chat_id = chatId)
         queries.deleteMessagesByChat(chatId)
         queries.deleteChatById(chatId)
         branchesByChat.remove(chatId)
@@ -562,6 +630,7 @@ private fun AiAgentChat(
         if (isLoading) return
 
         queries.deleteAllMessages()
+        queries.deleteAllBranchMessages()
         queries.deleteAllChats()
         branchesByChat.clear()
         branchVisibilityByChat.clear()
@@ -712,8 +781,9 @@ private fun AiAgentChat(
             )
         }
         val activeBranch = activeBranchMessages()
+        val activeBranchNumber = if (isBranchingEnabled) selectedBranchNumber else null
         if (activeBranch != null) {
-            activeBranch += AiAgentMessage(
+            val branchMessage = AiAgentMessage(
                 text = trimmed,
                 isUser = true,
                 paramsInfo = aiAgentApplyStream(userParamsInfo, AiAgentStream.Real, realEpoch),
@@ -721,6 +791,14 @@ private fun AiAgentChat(
                 epoch = realEpoch,
                 createdAt = userCreatedAt
             )
+            activeBranch += branchMessage
+            if (activeBranchNumber != null) {
+                appendMessageToBranch(
+                    chatId = currentChatId,
+                    branchNumber = activeBranchNumber,
+                    message = branchMessage
+                )
+            }
         }
         inputText = TextFieldValue("")
 
@@ -808,7 +886,7 @@ private fun AiAgentChat(
                 )
             }
             if (activeBranch != null) {
-                activeBranch += AiAgentMessage(
+                val branchMessage = AiAgentMessage(
                     text = completionResult.answer,
                     isUser = false,
                     paramsInfo = aiAgentApplyStream(assistantParamsInfo, AiAgentStream.Real, realEpoch),
@@ -816,6 +894,14 @@ private fun AiAgentChat(
                     epoch = realEpoch,
                     createdAt = assistantCreatedAt
                 )
+                activeBranch += branchMessage
+                if (activeBranchNumber != null) {
+                    appendMessageToBranch(
+                        chatId = requestChatId,
+                        branchNumber = activeBranchNumber,
+                        message = branchMessage
+                    )
+                }
             }
 
             if (isSummarizationEnabled) {
