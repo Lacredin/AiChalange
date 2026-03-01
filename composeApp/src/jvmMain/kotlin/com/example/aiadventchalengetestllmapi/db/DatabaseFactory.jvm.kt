@@ -55,6 +55,7 @@ actual class DatabaseDriverFactory {
                 "sliding_window_size",
                 "is_sticky_facts_enabled",
                 "sticky_facts_window_size",
+                "sticky_facts_system_message",
                 "is_branching_enabled",
                 "show_raw_history"
             ),

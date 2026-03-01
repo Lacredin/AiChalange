@@ -23,6 +23,7 @@ CREATE TABLE chat_feature_state (
     sliding_window_size TEXT NOT NULL,
     is_sticky_facts_enabled INTEGER NOT NULL,
     sticky_facts_window_size TEXT NOT NULL,
+    sticky_facts_system_message TEXT NOT NULL,
     is_branching_enabled INTEGER NOT NULL,
     show_raw_history INTEGER NOT NULL
 );
@@ -92,10 +93,11 @@ INSERT OR REPLACE INTO chat_feature_state(
     sliding_window_size,
     is_sticky_facts_enabled,
     sticky_facts_window_size,
+    sticky_facts_system_message,
     is_branching_enabled,
     show_raw_history
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 
 insertBranchMessage:
 INSERT INTO chat_branch_messages(

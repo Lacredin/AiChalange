@@ -161,6 +161,7 @@ private data class AiAgentFeatureState(
     val slidingWindowSizeInput: String = "12",
     val isStickyFactsEnabled: Boolean = false,
     val stickyFactsWindowSizeInput: String = "12",
+    val stickyFactsSystemMessage: String = "",
     val isBranchingEnabled: Boolean = false,
     val showRawHistory: Boolean = false
 )
@@ -171,41 +172,50 @@ private fun aiAgentTakeLastMessages(messages: List<AiAgentMessage>, lastN: Int):
     return messages.takeLast(lastN)
 }
 
-private fun aiAgentUpdateFacts(facts: MutableMap<String, String>, userMessage: String) {
-    val text = userMessage.trim()
-    if (text.isEmpty()) return
+private const val aiAgentStickyFactsExtractorPrompt = """
+Ты выделяешь только устойчивые важные факты из беседы.
+Верни ответ строго в формате "ключ: значение", по одной паре на строку, без markdown и пояснений.
+Включай только подтвержденные факты из контекста.
+Приоритет ключей: цель, ограничения, предпочтения, решения, договоренности.
+Если данных нет, верни пустую строку.
+"""
 
+private fun aiAgentNormalizeFactsText(text: String): String =
     text.lineSequence()
-        .map { it.trim() }
+        .map { it.trim().trimStart('-', '*', '•') }
         .filter { it.isNotEmpty() && it.contains(":") }
-        .forEach { line ->
+        .map { line ->
             val key = line.substringBefore(":").trim().lowercase(Locale.getDefault())
             val value = line.substringAfter(":").trim()
+            if (key.isNotEmpty() && value.isNotEmpty()) "$key: $value" else ""
+        }
+        .filter { it.isNotEmpty() }
+        .joinToString("\n")
+
+private fun aiAgentFactsMapFromText(text: String): Map<String, String> {
+    val result = linkedMapOf<String, String>()
+    aiAgentNormalizeFactsText(text)
+        .lineSequence()
+        .filter { it.contains(":") }
+        .forEach { line ->
+            val key = line.substringBefore(":").trim()
+            val value = line.substringAfter(":").trim()
             if (key.isNotEmpty() && value.isNotEmpty()) {
-                facts[key] = value
+                result[key] = value
             }
         }
-
-    fun maybeSet(key: String, markers: List<String>) {
-        if (markers.any { text.contains(it, ignoreCase = true) }) {
-            facts[key] = text
-        }
-    }
-
-    maybeSet("цель", listOf("цель", "goal"))
-    maybeSet("ограничения", listOf("огранич", "нельзя", "limit"))
-    maybeSet("предпочтения", listOf("предпочита", "prefer"))
-    maybeSet("договоренности", listOf("договор", "решили", "agree"))
+    return result
 }
 
-private fun aiAgentFactsSystemMessage(facts: Map<String, String>): DeepSeekMessage? {
-    if (facts.isEmpty()) return null
-    val factsText = buildString {
+private fun aiAgentFactsSystemMessage(factsText: String): DeepSeekMessage? {
+    val normalizedFacts = aiAgentNormalizeFactsText(factsText)
+    if (normalizedFacts.isBlank()) return null
+    val systemText = buildString {
         append("Важные факты диалога (ключ-значение):\n")
-        facts.forEach { (key, value) -> append("- $key: $value\n") }
-        append("Следуй этим фактам при ответе, если они относятся к запросу.")
+        append(normalizedFacts)
+        append("\nСледуй этим фактам при ответе, если они относятся к запросу.")
     }
-    return DeepSeekMessage(role = "system", content = factsText)
+    return DeepSeekMessage(role = "system", content = systemText)
 }
 
 private fun AiAgentMessage.toRequestMessage(): DeepSeekMessage =
@@ -297,6 +307,7 @@ private fun AiAgentChat(
     var slidingWindowSizeInput by remember { mutableStateOf("12") }
     var isStickyFactsEnabled by remember { mutableStateOf(false) }
     var stickyFactsWindowSizeInput by remember { mutableStateOf("12") }
+    var stickyFactsSystemMessage by remember { mutableStateOf("") }
     val stickyFacts = remember { mutableStateMapOf<String, String>() }
     var isBranchingEnabled by remember { mutableStateOf(false) }
     val branchesByChat = remember { mutableStateMapOf<Long, SnapshotStateList<AiAgentBranchItem>>() }
@@ -376,6 +387,7 @@ private fun AiAgentChat(
                 slidingWindowSizeInput = row.sliding_window_size,
                 isStickyFactsEnabled = row.is_sticky_facts_enabled != 0L,
                 stickyFactsWindowSizeInput = row.sticky_facts_window_size,
+                stickyFactsSystemMessage = row.sticky_facts_system_message,
                 isBranchingEnabled = row.is_branching_enabled != 0L,
                 showRawHistory = row.show_raw_history != 0L
             )
@@ -387,6 +399,9 @@ private fun AiAgentChat(
         slidingWindowSizeInput = state.slidingWindowSizeInput
         isStickyFactsEnabled = state.isStickyFactsEnabled
         stickyFactsWindowSizeInput = state.stickyFactsWindowSizeInput
+        stickyFactsSystemMessage = aiAgentNormalizeFactsText(state.stickyFactsSystemMessage)
+        stickyFacts.clear()
+        stickyFacts.putAll(aiAgentFactsMapFromText(stickyFactsSystemMessage))
         isBranchingEnabled = state.isBranchingEnabled
         branchingEnabledByChat[chatId] = state.isBranchingEnabled
         showRawHistory = state.showRawHistory
@@ -402,6 +417,7 @@ private fun AiAgentChat(
             sliding_window_size = slidingWindowSizeInput,
             is_sticky_facts_enabled = if (isStickyFactsEnabled) 1 else 0,
             sticky_facts_window_size = stickyFactsWindowSizeInput,
+            sticky_facts_system_message = if (isStickyFactsEnabled) stickyFactsSystemMessage else "",
             is_branching_enabled = if (isBranchingEnabled) 1 else 0,
             show_raw_history = if (showRawHistory) 1 else 0
         )
@@ -562,7 +578,6 @@ private fun AiAgentChat(
         inputText = TextFieldValue("")
         apiSelectorExpanded = false
         modelSelectorExpanded = false
-        stickyFacts.clear()
     }
 
     fun createNewChatAndOpen() {
@@ -591,6 +606,7 @@ private fun AiAgentChat(
         slidingWindowSizeInput = "12"
         isStickyFactsEnabled = false
         stickyFactsWindowSizeInput = "12"
+        stickyFactsSystemMessage = ""
         isBranchingEnabled = false
         selectedBranchNumber = null
         inputText = TextFieldValue("")
@@ -678,14 +694,19 @@ private fun AiAgentChat(
         }
     }
 
+    fun stickyFactsContextMessages(): List<AiAgentMessage> {
+        val lastN = stickyFactsWindowSizeInput.toIntOrNull() ?: 12
+        val history = historyForContext().filter { it.isApiHistoryMessage() }
+        return aiAgentTakeLastMessages(history, lastN)
+    }
+
     fun buildRequestMessages(): List<DeepSeekMessage> {
         val history = historyForContext().filter { it.isApiHistoryMessage() }
         return when (contextStrategy()) {
             AiAgentContextStrategy.StickyFacts -> {
-                val lastN = stickyFactsWindowSizeInput.toIntOrNull() ?: 12
-                val selectedHistory = aiAgentTakeLastMessages(history, lastN)
+                val selectedHistory = stickyFactsContextMessages()
                 buildList {
-                    aiAgentFactsSystemMessage(stickyFacts)?.let { add(it) }
+                    aiAgentFactsSystemMessage(stickyFactsSystemMessage)?.let { add(it) }
                     addAll(selectedHistory.map { it.toRequestMessage() })
                 }
             }
@@ -745,10 +766,6 @@ private fun AiAgentChat(
         val currentChatId = activeChatId ?: return
         val trimmed = inputText.text.trim()
         if (trimmed.isEmpty() || isLoading) return
-
-        if (isStickyFactsEnabled) {
-            aiAgentUpdateFacts(stickyFacts, trimmed)
-        }
 
         val requestApi = selectedApi
         val model = modelInput.trim().ifEmpty { requestApi.defaultModel }
@@ -904,6 +921,50 @@ private fun AiAgentChat(
                 }
             }
 
+            if (isStickyFactsEnabled) {
+                val stickyContextMessages = stickyFactsContextMessages()
+                if (stickyContextMessages.isNotEmpty()) {
+                    val stickyTranscript = stickyContextMessages.joinToString("\n") { message ->
+                        val prefix = if (message.isUser) "Пользователь" else "Ассистент"
+                        "$prefix: ${message.text}"
+                    }
+
+                    val stickyRequest = DeepSeekChatRequest(
+                        model = model,
+                        messages = listOf(
+                            DeepSeekMessage(
+                                role = "system",
+                                content = aiAgentStickyFactsExtractorPrompt.trimIndent()
+                            ),
+                            DeepSeekMessage(
+                                role = "user",
+                                content = "Контекст последних сообщений:\n$stickyTranscript"
+                            )
+                        ),
+                        temperature = 0.1
+                    )
+
+                    val stickyApiKey = aiAgentReadApiKey(requestApi.envVar)
+                    if (stickyApiKey.isNotBlank()) {
+                        val stickyFactsText = runCatching {
+                            val stickyResponse = when (requestApi) {
+                                AiAgentApi.DeepSeek -> deepSeekApi.createChatCompletion(apiKey = stickyApiKey, request = stickyRequest)
+                                AiAgentApi.OpenAI -> openAiApi.createChatCompletion(apiKey = stickyApiKey, request = stickyRequest)
+                                AiAgentApi.GigaChat -> gigaChatApi.createChatCompletion(accessToken = stickyApiKey, request = stickyRequest)
+                                AiAgentApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletion(apiKey = stickyApiKey, request = stickyRequest)
+                            }
+                            stickyResponse.choices.firstOrNull()?.message?.content.orEmpty()
+                        }.getOrNull()
+
+                        if (requestSessionId == chatSessionId && requestChatId == activeChatId) {
+                            stickyFactsSystemMessage = aiAgentNormalizeFactsText(stickyFactsText.orEmpty())
+                            stickyFacts.clear()
+                            stickyFacts.putAll(aiAgentFactsMapFromText(stickyFactsSystemMessage))
+                        }
+                    }
+                }
+            }
+
             if (isSummarizationEnabled) {
                 val tokenThreshold = summarizeAfterTokensInput.toIntOrNull() ?: 10000
                 val tokenTotal = historyForContext()
@@ -1021,6 +1082,13 @@ private fun AiAgentChat(
         }
     }
 
+    LaunchedEffect(isStickyFactsEnabled) {
+        if (!isStickyFactsEnabled) {
+            stickyFactsSystemMessage = ""
+            stickyFacts.clear()
+        }
+    }
+
     LaunchedEffect(isBranchingEnabled, activeChatId) {
         val chatId = activeChatId ?: return@LaunchedEffect
         branchingEnabledByChat[chatId] = isBranchingEnabled
@@ -1042,6 +1110,7 @@ private fun AiAgentChat(
         slidingWindowSizeInput,
         isStickyFactsEnabled,
         stickyFactsWindowSizeInput,
+        stickyFactsSystemMessage,
         isBranchingEnabled,
         showRawHistory
     ) {
@@ -1430,6 +1499,11 @@ private fun AiAgentChat(
                 state = listState,
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
+                if (isStickyFactsEnabled && stickyFactsSystemMessage.isNotBlank()) {
+                    item {
+                        AiAgentStickyFactsBanner(stickyFactsSystemMessage)
+                    }
+                }
                 items(displayMessages) { message ->
                     AiAgentBubble(message = message)
                 }
@@ -1602,8 +1676,11 @@ private fun AiAgentChat(
                         )
                     }
                     TextButton(
-                        onClick = { stickyFacts.clear() },
-                        enabled = stickyFacts.isNotEmpty() && !isLoading
+                        onClick = {
+                            stickyFactsSystemMessage = ""
+                            stickyFacts.clear()
+                        },
+                        enabled = stickyFactsSystemMessage.isNotBlank() && !isLoading
                     ) {
                         Text("Очистить facts")
                     }
@@ -1635,6 +1712,38 @@ private fun AiAgentChat(
         }
     }
 }
+}
+
+@Composable
+private fun AiAgentStickyFactsBanner(systemFacts: String) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(
+                color = Color(0xFFF1F5F9),
+                shape = RoundedCornerShape(12.dp)
+            )
+            .border(
+                width = 1.dp,
+                color = Color(0xFF94A3B8),
+                shape = RoundedCornerShape(12.dp)
+            )
+            .padding(12.dp)
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(
+                text = "System • Sticky Facts",
+                style = MaterialTheme.typography.labelSmall,
+                color = Color(0xFF334155)
+            )
+            SelectionContainer {
+                Text(
+                    text = systemFacts,
+                    color = Color(0xFF0F172A)
+                )
+            }
+        }
+    }
 }
 
 @Composable
