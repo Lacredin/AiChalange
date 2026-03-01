@@ -931,16 +931,19 @@ private fun AiAgentChat(
 
                     val stickyRequest = DeepSeekChatRequest(
                         model = model,
-                        messages = listOf(
-                            DeepSeekMessage(
-                                role = "system",
-                                content = aiAgentStickyFactsExtractorPrompt.trimIndent()
-                            ),
-                            DeepSeekMessage(
-                                role = "user",
-                                content = "Контекст последних сообщений:\n$stickyTranscript"
+                        messages = buildList {
+                            aiAgentFactsSystemMessage(stickyFactsSystemMessage)?.let { add(it) }
+                            add(
+                                DeepSeekMessage(
+                                    role = "user",
+                                    content = buildString {
+                                        appendLine(aiAgentStickyFactsExtractorPrompt.trimIndent())
+                                        append("Контекст последних сообщений:\n")
+                                        append(stickyTranscript)
+                                    }
+                                )
                             )
-                        ),
+                        },
                         temperature = 0.1
                     )
 
