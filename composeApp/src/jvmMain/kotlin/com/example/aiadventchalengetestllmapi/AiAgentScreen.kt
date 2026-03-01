@@ -135,6 +135,11 @@ private data class AiAgentChatItem(
     val title: String
 )
 
+private data class AiAgentBranchItem(
+    val number: Int,
+    val messages: SnapshotStateList<AiAgentMessage>
+)
+
 private data class AiAgentCompletionResult(
     val answer: String,
     val requestTokens: Int?,
@@ -294,17 +299,29 @@ private fun AiAgentChat(
     var stickyFactsWindowSizeInput by remember { mutableStateOf("12") }
     val stickyFacts = remember { mutableStateMapOf<String, String>() }
     var isBranchingEnabled by remember { mutableStateOf(false) }
-    val branches = remember { mutableStateMapOf<String, SnapshotStateList<AiAgentMessage>>() }
-    var selectedBranchName by remember { mutableStateOf<String?>(null) }
-    var checkpointSnapshot by remember { mutableStateOf<List<AiAgentMessage>>(emptyList()) }
-    var checkpointIndex by remember { mutableIntStateOf(0) }
+    val branchesByChat = remember { mutableStateMapOf<Long, SnapshotStateList<AiAgentBranchItem>>() }
+    val branchVisibilityByChat = remember { mutableStateMapOf<Long, Boolean>() }
+    val branchCounterByChat = remember { mutableStateMapOf<Long, Int>() }
+    val branchingEnabledByChat = remember { mutableStateMapOf<Long, Boolean>() }
+    var selectedBranchNumber by remember { mutableStateOf<Int?>(null) }
     var showRawHistory by remember { mutableStateOf(false) }
     var realEpoch by remember { mutableIntStateOf(0) }
 
     fun loadChatsFromDb(): List<AiAgentChatItem> {
-        return queries.selectChats().executeAsList().map {
+        val result = queries.selectChats().executeAsList().map {
             AiAgentChatItem(id = it.id, title = it.title)
         }
+        val existingIds = result.map { it.id }.toSet()
+        branchingEnabledByChat.keys.toList()
+            .filterNot { it in existingIds }
+            .forEach { branchingEnabledByChat.remove(it) }
+        result.forEach { chat ->
+            val isEnabled = queries.selectFeatureStateByChat(chat.id)
+                .executeAsOneOrNull()
+                ?.is_branching_enabled == 1L
+            branchingEnabledByChat[chat.id] = isEnabled
+        }
+        return result
     }
 
     fun loadMessagesForChat(chatId: Long) {
@@ -371,6 +388,7 @@ private fun AiAgentChat(
         isStickyFactsEnabled = state.isStickyFactsEnabled
         stickyFactsWindowSizeInput = state.stickyFactsWindowSizeInput
         isBranchingEnabled = state.isBranchingEnabled
+        branchingEnabledByChat[chatId] = state.isBranchingEnabled
         showRawHistory = state.showRawHistory
     }
 
@@ -389,20 +407,95 @@ private fun AiAgentChat(
         )
     }
 
+    fun snapshotCurrentHistory(): SnapshotStateList<AiAgentMessage> {
+        val source = if (realEpoch > 0) realMessages else rawMessages
+        return source.map { it.copy() }.toMutableStateList()
+    }
+
+    fun ensureBaseBranchForChat(chatId: Long, resetFromCurrentHistory: Boolean = false): SnapshotStateList<AiAgentBranchItem> {
+        val existing = branchesByChat[chatId]
+        if (existing == null) {
+            val baseBranch = AiAgentBranchItem(
+                number = 1,
+                messages = snapshotCurrentHistory()
+            )
+            val created = mutableStateListOf(baseBranch)
+            branchesByChat[chatId] = created
+            branchCounterByChat[chatId] = 1
+            branchVisibilityByChat.putIfAbsent(chatId, true)
+            return created
+        }
+
+        if (existing.isEmpty()) {
+            existing += AiAgentBranchItem(
+                number = 1,
+                messages = snapshotCurrentHistory()
+            )
+            branchCounterByChat[chatId] = 1
+        }
+
+        if (resetFromCurrentHistory) {
+            val base = existing.firstOrNull() ?: return existing
+            base.messages.clear()
+            base.messages += snapshotCurrentHistory()
+            while (existing.size > 1) {
+                existing.removeLast()
+            }
+            branchCounterByChat[chatId] = 1
+        }
+
+        branchVisibilityByChat.putIfAbsent(chatId, true)
+        return existing
+    }
+
+    fun createBranchForActiveChat() {
+        val chatId = activeChatId ?: return
+        val branches = ensureBaseBranchForChat(chatId)
+        val nextNumber = (branchCounterByChat[chatId] ?: branches.maxOfOrNull { it.number } ?: 1) + 1
+        val activeBranchMessages = if (isBranchingEnabled) {
+            branches.firstOrNull { it.number == selectedBranchNumber }?.messages
+        } else {
+            null
+        }
+        val snapshot = (activeBranchMessages ?: (if (realEpoch > 0) realMessages else rawMessages))
+            .map { it.copy() }
+            .toMutableStateList()
+        branches += AiAgentBranchItem(number = nextNumber, messages = snapshot)
+        branchCounterByChat[chatId] = nextNumber
+        branchVisibilityByChat[chatId] = true
+        selectedBranchNumber = nextNumber
+    }
+
+    fun deleteBranch(chatId: Long, branchNumber: Int) {
+        val branches = branchesByChat[chatId] ?: return
+        if (branches.size <= 1) return
+        val firstBranchNumber = branches.firstOrNull()?.number
+        if (branchNumber == firstBranchNumber) return
+        val removed = branches.removeAll { it.number == branchNumber }
+        if (!removed) return
+        if (activeChatId == chatId && selectedBranchNumber == branchNumber) {
+            selectedBranchNumber = branches.firstOrNull()?.number
+        }
+    }
+
+    fun keepOnlyFirstBranchForActiveChat() {
+        val chatId = activeChatId ?: return
+        val branches = ensureBaseBranchForChat(chatId, resetFromCurrentHistory = true)
+        selectedBranchNumber = branches.firstOrNull()?.number
+    }
+
     fun openChat(chatId: Long) {
         chatSessionId++
         isLoading = false
         activeChatId = chatId
         loadMessagesForChat(chatId)
         loadFeatureStateForChat(chatId)
+        val branches = ensureBaseBranchForChat(chatId)
+        selectedBranchNumber = branches.firstOrNull()?.number
         inputText = TextFieldValue("")
         apiSelectorExpanded = false
         modelSelectorExpanded = false
         stickyFacts.clear()
-        branches.clear()
-        selectedBranchName = null
-        checkpointSnapshot = emptyList()
-        checkpointIndex = 0
     }
 
     fun createNewChatAndOpen() {
@@ -432,15 +525,12 @@ private fun AiAgentChat(
         isStickyFactsEnabled = false
         stickyFactsWindowSizeInput = "12"
         isBranchingEnabled = false
+        selectedBranchNumber = null
         inputText = TextFieldValue("")
         apiSelectorExpanded = false
         modelSelectorExpanded = false
         showRawHistory = false
         stickyFacts.clear()
-        branches.clear()
-        selectedBranchName = null
-        checkpointSnapshot = emptyList()
-        checkpointIndex = 0
     }
 
     fun deleteChat(chatId: Long) {
@@ -449,6 +539,10 @@ private fun AiAgentChat(
         val wasActive = activeChatId == chatId
         queries.deleteMessagesByChat(chatId)
         queries.deleteChatById(chatId)
+        branchesByChat.remove(chatId)
+        branchVisibilityByChat.remove(chatId)
+        branchCounterByChat.remove(chatId)
+        branchingEnabledByChat.remove(chatId)
 
         val updatedChats = loadChatsFromDb()
         chats.clear()
@@ -469,6 +563,10 @@ private fun AiAgentChat(
 
         queries.deleteAllMessages()
         queries.deleteAllChats()
+        branchesByChat.clear()
+        branchVisibilityByChat.clear()
+        branchCounterByChat.clear()
+        branchingEnabledByChat.clear()
         chats.clear()
         clearChatSelection()
     }
@@ -478,8 +576,9 @@ private fun AiAgentChat(
 
     fun activeBranchMessages(): SnapshotStateList<AiAgentMessage>? {
         if (!isBranchingEnabled) return null
-        val branchName = selectedBranchName ?: return null
-        return branches[branchName]
+        val chatId = activeChatId ?: return null
+        val branchNumber = selectedBranchNumber ?: return null
+        return branchesByChat[chatId]?.firstOrNull { it.number == branchNumber }?.messages
     }
 
     fun historyForContext(): List<AiAgentMessage> = activeBranchMessages() ?: currentHistoryMessages()
@@ -534,20 +633,6 @@ private fun AiAgentChat(
         if (branchMessages != null) return branchMessages
         if (showRawHistory && isCompressedViewAvailable()) return rawMessages
         return if (isCompressedViewAvailable()) compressedMessagesForDisplay() else currentHistoryMessages()
-    }
-
-    fun saveCheckpoint() {
-        checkpointSnapshot = historyForContext().map { it.copy() }
-    }
-
-    fun createTwoBranchesFromCheckpoint() {
-        if (checkpointSnapshot.isEmpty()) return
-        checkpointIndex += 1
-        val branchAName = "Ветка A$checkpointIndex"
-        val branchBName = "Ветка B$checkpointIndex"
-        branches[branchAName] = checkpointSnapshot.map { it.copy() }.toMutableStateList()
-        branches[branchBName] = checkpointSnapshot.map { it.copy() }.toMutableStateList()
-        selectedBranchName = branchAName
     }
 
     fun appendMessageToStream(
@@ -850,6 +935,19 @@ private fun AiAgentChat(
         }
     }
 
+    LaunchedEffect(isBranchingEnabled, activeChatId) {
+        val chatId = activeChatId ?: return@LaunchedEffect
+        branchingEnabledByChat[chatId] = isBranchingEnabled
+        if (isBranchingEnabled) {
+            val branches = ensureBaseBranchForChat(chatId)
+            if (selectedBranchNumber == null || branches.none { it.number == selectedBranchNumber }) {
+                selectedBranchNumber = branches.firstOrNull()?.number
+            }
+        } else {
+            keepOnlyFirstBranchForActiveChat()
+        }
+    }
+
     LaunchedEffect(
         activeChatId,
         isSummarizationEnabled,
@@ -952,63 +1050,162 @@ private fun AiAgentChat(
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     items(chats, key = { it.id }) { chat ->
+                        val chatBranches = branchesByChat[chat.id]
+                        val hasBranches = (branchingEnabledByChat[chat.id] == true) && !chatBranches.isNullOrEmpty()
+                        val areBranchesVisible = branchVisibilityByChat[chat.id] ?: true
                         val isSelected = chat.id == activeChatId
-                        if (isSelected) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .background(
-                                        color = MaterialTheme.colorScheme.primaryContainer,
-                                        shape = RoundedCornerShape(12.dp)
-                                    )
-                                    .padding(horizontal = 12.dp, vertical = 10.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Text(
-                                    text = chat.title,
-                                    color = MaterialTheme.colorScheme.onPrimaryContainer,
-                                    modifier = Modifier.weight(1f)
-                                )
-                                TextButton(
-                                    onClick = { deleteChat(chat.id) },
-                                    enabled = !isLoading
-                                ) {
-                                    Text(
-                                        text = "X",
-                                        color = MaterialTheme.colorScheme.onPrimaryContainer
-                                    )
-                                }
-                            }
-                        } else {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .border(
-                                        width = 1.dp,
-                                        color = MaterialTheme.colorScheme.outline,
-                                        shape = RoundedCornerShape(8.dp)
-                                    )
-                                    .padding(horizontal = 12.dp, vertical = 10.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Box(
+                        Column(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            if (isSelected) {
+                                Row(
                                     modifier = Modifier
-                                        .weight(1f)
-                                        .clickable(enabled = !isLoading) { openChat(chat.id) }
-                                        .padding(vertical = 4.dp)
+                                        .fillMaxWidth()
+                                        .background(
+                                            color = MaterialTheme.colorScheme.primaryContainer,
+                                            shape = RoundedCornerShape(12.dp)
+                                        )
+                                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
                                     Text(
                                         text = chat.title,
-                                        color = MaterialTheme.colorScheme.onSurface
+                                        color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                        modifier = Modifier.weight(1f)
                                     )
+                                    if (hasBranches) {
+                                        TextButton(
+                                            onClick = {
+                                                branchVisibilityByChat[chat.id] = !areBranchesVisible
+                                            },
+                                            enabled = !isLoading
+                                        ) {
+                                            Text(
+                                                text = if (areBranchesVisible) "▾" else "▸",
+                                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                                            )
+                                        }
+                                    }
+                                    TextButton(
+                                        onClick = { deleteChat(chat.id) },
+                                        enabled = !isLoading
+                                    ) {
+                                        Text(
+                                            text = "X",
+                                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                                        )
+                                    }
                                 }
-                                TextButton(
-                                    onClick = { deleteChat(chat.id) },
-                                    enabled = !isLoading
+                            } else {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .border(
+                                            width = 1.dp,
+                                            color = MaterialTheme.colorScheme.outline,
+                                            shape = RoundedCornerShape(8.dp)
+                                        )
+                                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
-                                    Text("X")
+                                    Box(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .clickable(enabled = !isLoading) { openChat(chat.id) }
+                                            .padding(vertical = 4.dp)
+                                    ) {
+                                        Text(
+                                            text = chat.title,
+                                            color = MaterialTheme.colorScheme.onSurface
+                                        )
+                                    }
+                                    if (hasBranches) {
+                                        TextButton(
+                                            onClick = {
+                                                branchVisibilityByChat[chat.id] = !areBranchesVisible
+                                            },
+                                            enabled = !isLoading
+                                        ) {
+                                            Text(if (areBranchesVisible) "▾" else "▸")
+                                        }
+                                    }
+                                    TextButton(
+                                        onClick = { deleteChat(chat.id) },
+                                        enabled = !isLoading
+                                    ) {
+                                        Text("X")
+                                    }
+                                }
+                            }
+
+                            if (hasBranches && areBranchesVisible) {
+                                Column(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                                    horizontalAlignment = Alignment.End
+                                ) {
+                                    chatBranches.forEach { branch ->
+                                        val isActiveBranch = isBranchingEnabled &&
+                                            chat.id == activeChatId &&
+                                            selectedBranchNumber == branch.number
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth(0.85f)
+                                                .then(
+                                                    if (isActiveBranch) {
+                                                        Modifier.background(
+                                                            color = MaterialTheme.colorScheme.primaryContainer,
+                                                            shape = RoundedCornerShape(8.dp)
+                                                        )
+                                                    } else {
+                                                        Modifier.border(
+                                                            width = 1.dp,
+                                                            color = MaterialTheme.colorScheme.outline,
+                                                            shape = RoundedCornerShape(8.dp)
+                                                        )
+                                                    }
+                                                )
+                                                .padding(horizontal = 8.dp, vertical = 6.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                        ) {
+                                            TextButton(
+                                                onClick = {
+                                                    if (activeChatId != chat.id) {
+                                                        openChat(chat.id)
+                                                    }
+                                                    selectedBranchNumber = branch.number
+                                                },
+                                                enabled = !isLoading,
+                                                modifier = Modifier.weight(1f)
+                                            ) {
+                                                Text(
+                                                    text = "ветка (${branch.number})",
+                                                    color = if (isActiveBranch) {
+                                                        MaterialTheme.colorScheme.onPrimaryContainer
+                                                    } else {
+                                                        MaterialTheme.colorScheme.onSurface
+                                                    }
+                                                )
+                                            }
+                                            TextButton(
+                                                onClick = { deleteBranch(chat.id, branch.number) },
+                                                enabled = !isLoading && branch.number != 1
+                                            ) {
+                                                Text(
+                                                    text = "X",
+                                                    color = if (isActiveBranch) {
+                                                        MaterialTheme.colorScheme.onPrimaryContainer
+                                                    } else {
+                                                        MaterialTheme.colorScheme.onSurface
+                                                    }
+                                                )
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1072,7 +1269,6 @@ private fun AiAgentChat(
                         }
                     }
                 }
-
                 ExposedDropdownMenuBox(
                     expanded = modelSelectorExpanded,
                     onExpandedChange = { expanded -> if (!isLoading) modelSelectorExpanded = expanded },
@@ -1109,6 +1305,12 @@ private fun AiAgentChat(
                             )
                         }
                     }
+                }
+                Button(
+                    onClick = ::createBranchForActiveChat,
+                    enabled = !isLoading && activeChatId != null && isBranchingEnabled
+                ) {
+                    Text("+ ветка")
                 }
             }
 
@@ -1315,35 +1517,9 @@ private fun AiAgentChat(
                     ) {
                         Checkbox(
                             checked = isBranchingEnabled,
-                            onCheckedChange = { checked ->
-                                isBranchingEnabled = checked
-                                if (!checked) {
-                                    selectedBranchName = null
-                                }
-                            },
+                            onCheckedChange = { checked -> isBranchingEnabled = checked },
                             enabled = !isLoading
                         )
-                        TextButton(
-                            onClick = ::saveCheckpoint,
-                            enabled = !isLoading
-                        ) {
-                            Text("Checkpoint")
-                        }
-                        TextButton(
-                            onClick = ::createTwoBranchesFromCheckpoint,
-                            enabled = checkpointSnapshot.isNotEmpty() && !isLoading
-                        ) {
-                            Text("2 ветки")
-                        }
-                    }
-                    branches.keys.sorted().forEach { branchName ->
-                        TextButton(
-                            onClick = { selectedBranchName = branchName },
-                            enabled = !isLoading
-                        ) {
-                            val suffix = if (selectedBranchName == branchName) " (активна)" else ""
-                            Text(branchName + suffix)
-                        }
                     }
                 }
             }
