@@ -155,6 +155,8 @@ private enum class AiAgentContextStrategy {
 }
 
 private data class AiAgentFeatureState(
+    val isSystemPromptEnabled: Boolean = false,
+    val systemPromptText: String = "",
     val isSummarizationEnabled: Boolean = false,
     val summarizeAfterTokensInput: String = "10000",
     val isSlidingWindowEnabled: Boolean = false,
@@ -216,6 +218,27 @@ private fun aiAgentFactsSystemMessage(factsText: String): DeepSeekMessage? {
         append("\nСледуй этим фактам при ответе, если они относятся к запросу.")
     }
     return DeepSeekMessage(role = "system", content = systemText)
+}
+
+private fun aiAgentSystemPromptMessage(systemPromptText: String): DeepSeekMessage? {
+    val text = systemPromptText.trim()
+    if (text.isEmpty()) return null
+    return DeepSeekMessage(role = "system", content = text)
+}
+
+private fun aiAgentMergeSystemPrompts(
+    baseSystemPrompt: String,
+    stickyFactsSystemMessage: String
+): DeepSeekMessage? {
+    val base = baseSystemPrompt.trim()
+    val sticky = aiAgentFactsSystemMessage(stickyFactsSystemMessage)?.content.orEmpty().trim()
+    val content = buildString {
+        if (base.isNotEmpty()) append(base)
+        if (base.isNotEmpty() && sticky.isNotEmpty()) append("\n\n")
+        if (sticky.isNotEmpty()) append(sticky)
+    }
+    if (content.isBlank()) return null
+    return DeepSeekMessage(role = "system", content = content)
 }
 
 private fun AiAgentMessage.toRequestMessage(): DeepSeekMessage =
@@ -301,6 +324,8 @@ private fun AiAgentChat(
     var chatSessionId by remember { mutableIntStateOf(0) }
     var isLoading by remember { mutableStateOf(false) }
     var isFeaturesPanelVisible by remember { mutableStateOf(false) }
+    var isSystemPromptEnabled by remember { mutableStateOf(false) }
+    var systemPromptText by remember { mutableStateOf("") }
     var isSummarizationEnabled by remember { mutableStateOf(false) }
     var summarizeAfterTokensInput by remember { mutableStateOf("10000") }
     var isSlidingWindowEnabled by remember { mutableStateOf(false) }
@@ -381,6 +406,8 @@ private fun AiAgentChat(
             AiAgentFeatureState()
         } else {
             AiAgentFeatureState(
+                isSystemPromptEnabled = row.is_system_prompt_enabled != 0L,
+                systemPromptText = row.system_prompt_text,
                 isSummarizationEnabled = row.is_summarization_enabled != 0L,
                 summarizeAfterTokensInput = row.summarize_after_tokens,
                 isSlidingWindowEnabled = row.is_sliding_window_enabled != 0L,
@@ -393,6 +420,8 @@ private fun AiAgentChat(
             )
         }
 
+        isSystemPromptEnabled = state.isSystemPromptEnabled
+        systemPromptText = state.systemPromptText
         isSummarizationEnabled = state.isSummarizationEnabled
         summarizeAfterTokensInput = state.summarizeAfterTokensInput
         isSlidingWindowEnabled = state.isSlidingWindowEnabled
@@ -411,6 +440,8 @@ private fun AiAgentChat(
         val chatId = activeChatId ?: return
         queries.upsertFeatureState(
             chat_id = chatId,
+            is_system_prompt_enabled = if (isSystemPromptEnabled) 1 else 0,
+            system_prompt_text = systemPromptText,
             is_summarization_enabled = if (isSummarizationEnabled) 1 else 0,
             summarize_after_tokens = summarizeAfterTokensInput,
             is_sliding_window_enabled = if (isSlidingWindowEnabled) 1 else 0,
@@ -600,6 +631,8 @@ private fun AiAgentChat(
         rawMessages.clear()
         realMessages.clear()
         realEpoch = 0
+        isSystemPromptEnabled = false
+        systemPromptText = ""
         isSummarizationEnabled = false
         summarizeAfterTokensInput = "10000"
         isSlidingWindowEnabled = false
@@ -702,19 +735,29 @@ private fun AiAgentChat(
 
     fun buildRequestMessages(): List<DeepSeekMessage> {
         val history = historyForContext().filter { it.isApiHistoryMessage() }
+        val baseSystemPrompt = if (isSystemPromptEnabled) systemPromptText else ""
         return when (contextStrategy()) {
             AiAgentContextStrategy.StickyFacts -> {
                 val selectedHistory = stickyFactsContextMessages()
                 buildList {
-                    aiAgentFactsSystemMessage(stickyFactsSystemMessage)?.let { add(it) }
+                    aiAgentMergeSystemPrompts(
+                        baseSystemPrompt = baseSystemPrompt,
+                        stickyFactsSystemMessage = stickyFactsSystemMessage
+                    )?.let { add(it) }
                     addAll(selectedHistory.map { it.toRequestMessage() })
                 }
             }
             AiAgentContextStrategy.SlidingWindow -> {
                 val lastN = slidingWindowSizeInput.toIntOrNull() ?: 12
-                aiAgentTakeLastMessages(history, lastN).map { it.toRequestMessage() }
+                buildList {
+                    aiAgentSystemPromptMessage(baseSystemPrompt)?.let { add(it) }
+                    addAll(aiAgentTakeLastMessages(history, lastN).map { it.toRequestMessage() })
+                }
             }
-            else -> history.map { it.toRequestMessage() }
+            else -> buildList {
+                aiAgentSystemPromptMessage(baseSystemPrompt)?.let { add(it) }
+                addAll(history.map { it.toRequestMessage() })
+            }
         }
     }
 
@@ -994,16 +1037,23 @@ private fun AiAgentChat(
 
                         val summaryRequest = DeepSeekChatRequest(
                             model = model,
-                            messages = listOf(
-                                DeepSeekMessage(
-                                    role = "system",
-                                    content = "Суммируй контекст беседы кратко. Сохрани факты, договоренности и важные детали."
-                                ),
-                                DeepSeekMessage(
-                                    role = "user",
-                                    content = "Контекст:\n$transcript"
+                            messages = buildList {
+                                if (isSystemPromptEnabled) {
+                                    aiAgentSystemPromptMessage(systemPromptText)?.let { add(it) }
+                                }
+                                add(
+                                    DeepSeekMessage(
+                                        role = "system",
+                                        content = "Суммируй контекст беседы кратко. Сохрани факты, договоренности и важные детали."
+                                    )
                                 )
-                            )
+                                add(
+                                    DeepSeekMessage(
+                                        role = "user",
+                                        content = "Контекст:\n$transcript"
+                                    )
+                                )
+                            }
                         )
 
                         val summaryResponse = when (requestApi) {
@@ -1107,6 +1157,8 @@ private fun AiAgentChat(
 
     LaunchedEffect(
         activeChatId,
+        isSystemPromptEnabled,
+        systemPromptText,
         isSummarizationEnabled,
         summarizeAfterTokensInput,
         isSlidingWindowEnabled,
@@ -1502,9 +1554,13 @@ private fun AiAgentChat(
                 state = listState,
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                if (isStickyFactsEnabled && stickyFactsSystemMessage.isNotBlank()) {
+                val stickyFactsBannerText = aiAgentMergeSystemPrompts(
+                    baseSystemPrompt = if (isSystemPromptEnabled) systemPromptText else "",
+                    stickyFactsSystemMessage = stickyFactsSystemMessage
+                )?.content.orEmpty()
+                if (isStickyFactsEnabled && stickyFactsBannerText.isNotBlank()) {
                     item {
-                        AiAgentStickyFactsBanner(stickyFactsSystemMessage)
+                        AiAgentStickyFactsBanner(stickyFactsBannerText)
                     }
                 }
                 items(displayMessages) { message ->
@@ -1583,6 +1639,37 @@ private fun AiAgentChat(
                     text = "Доп. функции",
                     style = MaterialTheme.typography.titleSmall
                 )
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        text = "Системный промт",
+                        style = MaterialTheme.typography.labelMedium
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Checkbox(
+                            checked = isSystemPromptEnabled,
+                            onCheckedChange = { checked -> isSystemPromptEnabled = checked },
+                            enabled = !isLoading
+                        )
+                        Text(
+                            text = if (isSystemPromptEnabled) "Вкл" else "Выкл",
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                    }
+                    OutlinedTextField(
+                        value = systemPromptText,
+                        onValueChange = { value -> systemPromptText = value },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(96.dp),
+                        enabled = !isLoading,
+                        placeholder = { Text("Введите системный промт", style = MaterialTheme.typography.labelSmall) },
+                        textStyle = MaterialTheme.typography.labelSmall
+                    )
+                }
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(
                         text = "Суммаризация контекста",

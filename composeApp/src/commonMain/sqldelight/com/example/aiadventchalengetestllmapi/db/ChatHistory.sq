@@ -17,6 +17,8 @@ CREATE TABLE chat_messages (
 
 CREATE TABLE chat_feature_state (
     chat_id INTEGER NOT NULL PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE,
+    is_system_prompt_enabled INTEGER NOT NULL,
+    system_prompt_text TEXT NOT NULL,
     is_summarization_enabled INTEGER NOT NULL,
     summarize_after_tokens TEXT NOT NULL,
     is_sliding_window_enabled INTEGER NOT NULL,
@@ -87,6 +89,8 @@ VALUES (?, ?, ?, ?, ?, ?, ?);
 upsertFeatureState:
 INSERT OR REPLACE INTO chat_feature_state(
     chat_id,
+    is_system_prompt_enabled,
+    system_prompt_text,
     is_summarization_enabled,
     summarize_after_tokens,
     is_sliding_window_enabled,
@@ -97,7 +101,7 @@ INSERT OR REPLACE INTO chat_feature_state(
     is_branching_enabled,
     show_raw_history
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 
 insertBranchMessage:
 INSERT INTO chat_branch_messages(

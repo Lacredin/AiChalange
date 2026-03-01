@@ -49,6 +49,8 @@ actual class DatabaseDriverFactory {
             "chat_messages" to setOf("id", "chat_id", "api", "model", "role", "message", "params_info", "created_at"),
             "chat_feature_state" to setOf(
                 "chat_id",
+                "is_system_prompt_enabled",
+                "system_prompt_text",
                 "is_summarization_enabled",
                 "summarize_after_tokens",
                 "is_sliding_window_enabled",
