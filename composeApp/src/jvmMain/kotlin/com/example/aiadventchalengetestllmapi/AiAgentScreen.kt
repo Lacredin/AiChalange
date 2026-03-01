@@ -149,6 +149,17 @@ private enum class AiAgentContextStrategy {
     Branching
 }
 
+private data class AiAgentFeatureState(
+    val isSummarizationEnabled: Boolean = false,
+    val summarizeAfterTokensInput: String = "10000",
+    val isSlidingWindowEnabled: Boolean = false,
+    val slidingWindowSizeInput: String = "12",
+    val isStickyFactsEnabled: Boolean = false,
+    val stickyFactsWindowSizeInput: String = "12",
+    val isBranchingEnabled: Boolean = false,
+    val showRawHistory: Boolean = false
+)
+
 private fun aiAgentTakeLastMessages(messages: List<AiAgentMessage>, lastN: Int): List<AiAgentMessage> {
     if (lastN <= 0) return emptyList()
     if (messages.size <= lastN) return messages
@@ -356,15 +367,57 @@ private fun AiAgentChat(
         }
     }
 
+    fun loadFeatureStateForChat(chatId: Long) {
+        val row = queries.selectFeatureStateByChat(chatId).executeAsOneOrNull()
+        val state = if (row == null) {
+            AiAgentFeatureState()
+        } else {
+            AiAgentFeatureState(
+                isSummarizationEnabled = row.is_summarization_enabled != 0L,
+                summarizeAfterTokensInput = row.summarize_after_tokens,
+                isSlidingWindowEnabled = row.is_sliding_window_enabled != 0L,
+                slidingWindowSizeInput = row.sliding_window_size,
+                isStickyFactsEnabled = row.is_sticky_facts_enabled != 0L,
+                stickyFactsWindowSizeInput = row.sticky_facts_window_size,
+                isBranchingEnabled = row.is_branching_enabled != 0L,
+                showRawHistory = row.show_raw_history != 0L
+            )
+        }
+
+        isSummarizationEnabled = state.isSummarizationEnabled
+        summarizeAfterTokensInput = state.summarizeAfterTokensInput
+        isSlidingWindowEnabled = state.isSlidingWindowEnabled
+        slidingWindowSizeInput = state.slidingWindowSizeInput
+        isStickyFactsEnabled = state.isStickyFactsEnabled
+        stickyFactsWindowSizeInput = state.stickyFactsWindowSizeInput
+        isBranchingEnabled = state.isBranchingEnabled
+        showRawHistory = state.showRawHistory
+    }
+
+    fun saveActiveChatFeatureState() {
+        val chatId = activeChatId ?: return
+        queries.upsertFeatureState(
+            chat_id = chatId,
+            is_summarization_enabled = if (isSummarizationEnabled) 1 else 0,
+            summarize_after_tokens = summarizeAfterTokensInput,
+            is_sliding_window_enabled = if (isSlidingWindowEnabled) 1 else 0,
+            sliding_window_size = slidingWindowSizeInput,
+            is_sticky_facts_enabled = if (isStickyFactsEnabled) 1 else 0,
+            sticky_facts_window_size = stickyFactsWindowSizeInput,
+            is_branching_enabled = if (isBranchingEnabled) 1 else 0,
+            show_raw_history = if (showRawHistory) 1 else 0
+        )
+    }
+
     fun openChat(chatId: Long) {
         chatSessionId++
         isLoading = false
         activeChatId = chatId
         loadMessagesForChat(chatId)
+        loadFeatureStateForChat(chatId)
         inputText = TextFieldValue("")
         apiSelectorExpanded = false
         modelSelectorExpanded = false
-        showRawHistory = false
         stickyFacts.clear()
         branches.clear()
         selectedBranchName = null
@@ -392,6 +445,13 @@ private fun AiAgentChat(
         rawMessages.clear()
         realMessages.clear()
         realEpoch = 0
+        isSummarizationEnabled = false
+        summarizeAfterTokensInput = "10000"
+        isSlidingWindowEnabled = false
+        slidingWindowSizeInput = "12"
+        isStickyFactsEnabled = false
+        stickyFactsWindowSizeInput = "12"
+        isBranchingEnabled = false
         inputText = TextFieldValue("")
         apiSelectorExpanded = false
         modelSelectorExpanded = false
@@ -452,6 +512,24 @@ private fun AiAgentChat(
         else -> AiAgentContextStrategy.Summarization
     }
 
+    fun isCompressedViewAvailable(): Boolean =
+        !isBranchingEnabled && (isSummarizationEnabled || isSlidingWindowEnabled || isStickyFactsEnabled)
+
+    fun compressedMessagesForDisplay(): List<AiAgentMessage> {
+        val history = currentHistoryMessages()
+        return when (contextStrategy()) {
+            AiAgentContextStrategy.StickyFacts -> {
+                val lastN = stickyFactsWindowSizeInput.toIntOrNull() ?: 12
+                aiAgentTakeLastMessages(history, lastN)
+            }
+            AiAgentContextStrategy.SlidingWindow -> {
+                val lastN = slidingWindowSizeInput.toIntOrNull() ?: 12
+                aiAgentTakeLastMessages(history, lastN)
+            }
+            else -> history
+        }
+    }
+
     fun buildRequestMessages(): List<DeepSeekMessage> {
         val history = historyForContext().filter { it.isApiHistoryMessage() }
         return when (contextStrategy()) {
@@ -471,8 +549,12 @@ private fun AiAgentChat(
         }
     }
 
-    fun displayedMessages(): List<AiAgentMessage> =
-        activeBranchMessages() ?: if (isSummarizationEnabled && showRawHistory) rawMessages else currentHistoryMessages()
+    fun displayedMessages(): List<AiAgentMessage> {
+        val branchMessages = activeBranchMessages()
+        if (branchMessages != null) return branchMessages
+        if (showRawHistory && isCompressedViewAvailable()) return rawMessages
+        return if (isCompressedViewAvailable()) compressedMessagesForDisplay() else currentHistoryMessages()
+    }
 
     fun saveCheckpoint() {
         checkpointSnapshot = historyForContext().map { it.copy() }
@@ -788,10 +870,24 @@ private fun AiAgentChat(
         }
     }
 
-    LaunchedEffect(isSummarizationEnabled) {
-        if (!isSummarizationEnabled) {
+    LaunchedEffect(isSummarizationEnabled, isSlidingWindowEnabled, isStickyFactsEnabled, isBranchingEnabled) {
+        if (!isCompressedViewAvailable()) {
             showRawHistory = false
         }
+    }
+
+    LaunchedEffect(
+        activeChatId,
+        isSummarizationEnabled,
+        summarizeAfterTokensInput,
+        isSlidingWindowEnabled,
+        slidingWindowSizeInput,
+        isStickyFactsEnabled,
+        stickyFactsWindowSizeInput,
+        isBranchingEnabled,
+        showRawHistory
+    ) {
+        saveActiveChatFeatureState()
     }
 
     val displayMessages = displayedMessages()
@@ -932,7 +1028,7 @@ private fun AiAgentChat(
                         style = MaterialTheme.typography.titleMedium,
                         modifier = Modifier.weight(1f)
                     )
-                    if (isSummarizationEnabled) {
+                    if (isCompressedViewAvailable()) {
                         TextButton(
                             onClick = { showRawHistory = !showRawHistory },
                             enabled = !isLoading

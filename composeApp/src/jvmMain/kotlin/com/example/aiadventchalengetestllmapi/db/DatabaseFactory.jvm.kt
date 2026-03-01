@@ -46,13 +46,24 @@ actual class DatabaseDriverFactory {
     private fun hasCompatibleSchema(dbPath: Path): Boolean {
         val expectedColumns = mapOf(
             "chats" to setOf("id", "title", "created_at"),
-            "chat_messages" to setOf("id", "chat_id", "api", "model", "role", "message", "params_info", "created_at")
+            "chat_messages" to setOf("id", "chat_id", "api", "model", "role", "message", "params_info", "created_at"),
+            "chat_feature_state" to setOf(
+                "chat_id",
+                "is_summarization_enabled",
+                "summarize_after_tokens",
+                "is_sliding_window_enabled",
+                "sliding_window_size",
+                "is_sticky_facts_enabled",
+                "sticky_facts_window_size",
+                "is_branching_enabled",
+                "show_raw_history"
+            )
         )
         val actualTables = mutableSetOf<String>()
         val connectionUrl = "jdbc:sqlite:$dbPath"
         DriverManager.getConnection(connectionUrl).use { connection ->
             connection.prepareStatement(
-                "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('chats', 'chat_messages');"
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('chats', 'chat_messages', 'chat_feature_state');"
             ).use { statement ->
                 statement.executeQuery().use { resultSet ->
                     while (resultSet.next()) {
