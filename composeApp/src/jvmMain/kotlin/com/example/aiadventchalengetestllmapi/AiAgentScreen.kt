@@ -250,31 +250,11 @@ private fun AiAgentMessage.displayParamsInfo(): String =
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AiAgentScreen(onOpenApp: () -> Unit) {
-    var newChatTrigger by remember { mutableIntStateOf(0) }
-
     MaterialTheme {
-        Scaffold(
-            topBar = {
-                TopAppBar(
-                    title = { Text("Ai Агент") },
-                    actions = {
-                        TextButton(onClick = { newChatTrigger++ }) {
-                            Text("Новый чат")
-                        }
-                        IconButton(onClick = onOpenApp) {
-                            Text(text = "\u2699")
-                        }
-                    }
-                )
-            }
-        ) { innerPadding ->
-            AiAgentChat(
-                modifier = Modifier
-                    .padding(innerPadding)
-                    .fillMaxSize(),
-                newChatTrigger = newChatTrigger
-            )
-        }
+        AiAgentChat(
+            modifier = Modifier.fillMaxSize(),
+            onOpenApp = onOpenApp
+        )
     }
 }
 
@@ -282,7 +262,7 @@ fun AiAgentScreen(onOpenApp: () -> Unit) {
 @Composable
 private fun AiAgentChat(
     modifier: Modifier = Modifier,
-    newChatTrigger: Int
+    onOpenApp: () -> Unit
 ) {
     val scope = rememberCoroutineScope()
     val deepSeekApi = remember { DeepSeekApi() }
@@ -858,12 +838,6 @@ private fun AiAgentChat(
         }
     }
 
-    LaunchedEffect(newChatTrigger) {
-        if (newChatTrigger > 0) {
-            createNewChatAndOpen()
-        }
-    }
-
     LaunchedEffect(isLoading) {
         if (!isLoading) {
             inputFocusRequester.requestFocus()
@@ -905,129 +879,19 @@ private fun AiAgentChat(
         ?.tokensSpent()
         ?: 0
 
-    Row(
-        modifier = modifier
-            .background(MaterialTheme.colorScheme.background)
-            .imePadding()
-            .padding(12.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        Column(
-            modifier = Modifier
-                .width(200.dp)
-                .fillMaxSize()
-                .padding(8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "Чаты",
-                    style = MaterialTheme.typography.titleSmall
-                )
-                Box(modifier = Modifier.weight(1f))
-                TextButton(
-                    onClick = ::deleteAllChats,
-                    enabled = chats.isNotEmpty() && !isLoading
-                ) {
-                    Text("Удалить всё")
-                }
-            }
-            LazyColumn(
-                modifier = Modifier.fillMaxSize(),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                items(chats, key = { it.id }) { chat ->
-                    val isSelected = chat.id == activeChatId
-                    if (isSelected) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(
-                                    color = MaterialTheme.colorScheme.primaryContainer,
-                                    shape = RoundedCornerShape(12.dp)
-                                )
-                                .padding(horizontal = 12.dp, vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Text(
-                                text = chat.title,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer,
-                                modifier = Modifier.weight(1f)
-                            )
-                            TextButton(
-                                onClick = { deleteChat(chat.id) },
-                                enabled = !isLoading
-                            ) {
-                                Text(
-                                    text = "X",
-                                    color = MaterialTheme.colorScheme.onPrimaryContainer
-                                )
-                            }
-                        }
-                    } else {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .border(
-                                    width = 1.dp,
-                                    color = MaterialTheme.colorScheme.outline,
-                                    shape = RoundedCornerShape(8.dp)
-                                )
-                                .padding(horizontal = 12.dp, vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .clickable(enabled = !isLoading) { openChat(chat.id) }
-                                    .padding(vertical = 4.dp)
-                            ) {
-                                Text(
-                                    text = chat.title,
-                                    color = MaterialTheme.colorScheme.onSurface
-                                )
-                            }
-                            TextButton(
-                                onClick = { deleteChat(chat.id) },
-                                enabled = !isLoading
-                            ) {
-                                Text("X")
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        Box(
-            modifier = Modifier
-                .width(1.dp)
-                .fillMaxSize()
-                .background(Color(0xFFD2D6DC))
-        )
-
-        Column(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxSize(),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            if (activeChatTitle.isNotBlank()) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = {
                     Text(
-                        text = "$activeChatTitle ($activeChatTotalTokens токенов)",
-                        style = MaterialTheme.typography.titleMedium,
-                        modifier = Modifier.weight(1f)
+                        if (activeChatTitle.isNotBlank()) {
+                            "Ai Агент | $activeChatTitle ($activeChatTotalTokens токенов)"
+                        } else {
+                            "Ai Агент"
+                        }
                     )
+                },
+                actions = {
                     if (isCompressedViewAvailable()) {
                         TextButton(
                             onClick = { showRawHistory = !showRawHistory },
@@ -1042,9 +906,129 @@ private fun AiAgentChat(
                     ) {
                         Text(text = if (isFeaturesPanelVisible) "✓" else "\u2610")
                     }
+                    TextButton(onClick = ::createNewChatAndOpen, enabled = !isLoading) {
+                        Text("Новый чат")
+                    }
+                    IconButton(onClick = onOpenApp) {
+                        Text(text = "\u2699")
+                    }
+                }
+            )
+        }
+    ) { innerPadding ->
+        Row(
+            modifier = modifier
+                .padding(innerPadding)
+                .background(MaterialTheme.colorScheme.background)
+                .imePadding()
+                .padding(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Column(
+                modifier = Modifier
+                    .width(200.dp)
+                    .fillMaxSize()
+                    .padding(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Чаты",
+                        style = MaterialTheme.typography.titleSmall
+                    )
+                    Box(modifier = Modifier.weight(1f))
+                    TextButton(
+                        onClick = ::deleteAllChats,
+                        enabled = chats.isNotEmpty() && !isLoading
+                    ) {
+                        Text("Удалить всё")
+                    }
+                }
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    items(chats, key = { it.id }) { chat ->
+                        val isSelected = chat.id == activeChatId
+                        if (isSelected) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(
+                                        color = MaterialTheme.colorScheme.primaryContainer,
+                                        shape = RoundedCornerShape(12.dp)
+                                    )
+                                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text(
+                                    text = chat.title,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                TextButton(
+                                    onClick = { deleteChat(chat.id) },
+                                    enabled = !isLoading
+                                ) {
+                                    Text(
+                                        text = "X",
+                                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                                    )
+                                }
+                            }
+                        } else {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .border(
+                                        width = 1.dp,
+                                        color = MaterialTheme.colorScheme.outline,
+                                        shape = RoundedCornerShape(8.dp)
+                                    )
+                                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clickable(enabled = !isLoading) { openChat(chat.id) }
+                                        .padding(vertical = 4.dp)
+                                ) {
+                                    Text(
+                                        text = chat.title,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                }
+                                TextButton(
+                                    onClick = { deleteChat(chat.id) },
+                                    enabled = !isLoading
+                                ) {
+                                    Text("X")
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
+            Box(
+                modifier = Modifier
+                    .width(1.dp)
+                    .fillMaxSize()
+                    .background(Color(0xFFD2D6DC))
+            )
+
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxSize(),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -1365,6 +1349,7 @@ private fun AiAgentChat(
             }
         }
     }
+}
 }
 
 @Composable
