@@ -62,8 +62,8 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import com.example.aiadventchalengetestllmapi.BuildSecrets
 import com.example.aiadventchalengetestllmapi.RootScreen
-import com.example.aiadventchalengetestllmapi.db.DatabaseDriverFactory
-import com.example.aiadventchalengetestllmapi.db.createAppDatabase
+import com.example.aiadventchalengetestllmapi.aiweek3db.AiWeek3DatabaseDriverFactory
+import com.example.aiadventchalengetestllmapi.aiweek3db.createAiWeek3Database
 import com.example.aiadventchalengetestllmapi.network.DeepSeekApi
 import com.example.aiadventchalengetestllmapi.network.DeepSeekChatRequest
 import com.example.aiadventchalengetestllmapi.network.DeepSeekMessage
@@ -315,7 +315,7 @@ private fun AiWeek3Chat(
     val openAiApi = remember { OpenAiApi() }
     val gigaChatApi = remember { GigaChatApi() }
     val proxyOpenAiApi = remember { ProxyOpenAiApi() }
-    val database = remember { createAppDatabase(DatabaseDriverFactory("ai_week3.db")) }
+    val database = remember { createAiWeek3Database(AiWeek3DatabaseDriverFactory()) }
     val queries = remember(database) { database.chatHistoryQueries }
 
     val chats = remember { mutableStateListOf<AiAgentChatItem>() }

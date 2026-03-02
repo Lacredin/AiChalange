@@ -1,0 +1,153 @@
+CREATE TABLE chats (
+    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+
+CREATE TABLE chat_messages (
+    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    chat_id INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+    api TEXT NOT NULL,
+    model TEXT NOT NULL,
+    role TEXT NOT NULL,
+    message TEXT NOT NULL,
+    params_info TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+
+CREATE TABLE chat_feature_state (
+    chat_id INTEGER NOT NULL PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE,
+    is_system_prompt_enabled INTEGER NOT NULL,
+    system_prompt_text TEXT NOT NULL,
+    is_summarization_enabled INTEGER NOT NULL,
+    summarize_after_tokens TEXT NOT NULL,
+    is_sliding_window_enabled INTEGER NOT NULL,
+    sliding_window_size TEXT NOT NULL,
+    is_sticky_facts_enabled INTEGER NOT NULL,
+    sticky_facts_window_size TEXT NOT NULL,
+    sticky_facts_system_message TEXT NOT NULL,
+    is_branching_enabled INTEGER NOT NULL,
+    show_raw_history INTEGER NOT NULL
+);
+
+CREATE TABLE chat_branch_messages (
+    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    chat_id INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+    branch_number INTEGER NOT NULL,
+    role TEXT NOT NULL,
+    message TEXT NOT NULL,
+    params_info TEXT NOT NULL,
+    stream TEXT NOT NULL,
+    epoch INTEGER NOT NULL,
+    created_at INTEGER NOT NULL
+);
+
+selectChats:
+SELECT *
+FROM chats
+ORDER BY id ASC;
+
+insertChat:
+INSERT INTO chats(
+    title,
+    created_at
+)
+VALUES (?, ?);
+
+selectLastInsertedChatId:
+SELECT last_insert_rowid();
+
+selectMessagesByChat:
+SELECT *
+FROM chat_messages
+WHERE chat_id = ?
+ORDER BY id ASC;
+
+selectFeatureStateByChat:
+SELECT *
+FROM chat_feature_state
+WHERE chat_id = ?;
+
+selectBranchMessagesByChat:
+SELECT *
+FROM chat_branch_messages
+WHERE chat_id = ?
+ORDER BY branch_number ASC, id ASC;
+
+insertMessage:
+INSERT INTO chat_messages(
+    chat_id,
+    api,
+    model,
+    role,
+    message,
+    params_info,
+    created_at
+)
+VALUES (?, ?, ?, ?, ?, ?, ?);
+
+upsertFeatureState:
+INSERT OR REPLACE INTO chat_feature_state(
+    chat_id,
+    is_system_prompt_enabled,
+    system_prompt_text,
+    is_summarization_enabled,
+    summarize_after_tokens,
+    is_sliding_window_enabled,
+    sliding_window_size,
+    is_sticky_facts_enabled,
+    sticky_facts_window_size,
+    sticky_facts_system_message,
+    is_branching_enabled,
+    show_raw_history
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+
+insertBranchMessage:
+INSERT INTO chat_branch_messages(
+    chat_id,
+    branch_number,
+    role,
+    message,
+    params_info,
+    stream,
+    epoch,
+    created_at
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+
+deleteMessagesByChat:
+DELETE FROM chat_messages
+WHERE chat_id = ?;
+
+deleteFeatureStateByChat:
+DELETE FROM chat_feature_state
+WHERE chat_id = ?;
+
+deleteBranchMessagesByChat:
+DELETE FROM chat_branch_messages
+WHERE chat_id = ?;
+
+deleteBranchMessagesByChatAndBranch:
+DELETE FROM chat_branch_messages
+WHERE chat_id = ? AND branch_number = ?;
+
+deleteBranchMessagesByChatExceptFirst:
+DELETE FROM chat_branch_messages
+WHERE chat_id = ? AND branch_number != 1;
+
+deleteChatById:
+DELETE FROM chats
+WHERE id = ?;
+
+deleteAllMessages:
+DELETE FROM chat_messages;
+
+deleteAllFeatureState:
+DELETE FROM chat_feature_state;
+
+deleteAllBranchMessages:
+DELETE FROM chat_branch_messages;
+
+deleteAllChats:
+DELETE FROM chats;
