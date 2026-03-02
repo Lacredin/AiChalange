@@ -315,7 +315,7 @@ private fun AiWeek3Chat(
     val openAiApi = remember { OpenAiApi() }
     val gigaChatApi = remember { GigaChatApi() }
     val proxyOpenAiApi = remember { ProxyOpenAiApi() }
-    val database = remember { createAppDatabase(DatabaseDriverFactory()) }
+    val database = remember { createAppDatabase(DatabaseDriverFactory("ai_week3.db")) }
     val queries = remember(database) { database.chatHistoryQueries }
 
     val chats = remember { mutableStateListOf<AiAgentChatItem>() }

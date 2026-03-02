@@ -7,7 +7,9 @@ import java.nio.file.Path
 import java.nio.file.Paths
 import java.sql.DriverManager
 
-actual class DatabaseDriverFactory {
+actual class DatabaseDriverFactory actual constructor(
+    private val dbFileName: String
+) {
     actual fun createDriver(): SqlDriver {
         val dbPath = defaultDatabasePath()
         recreateDatabaseIfSchemaMismatch(dbPath)
@@ -30,7 +32,7 @@ actual class DatabaseDriverFactory {
 
     private fun defaultDatabasePath(): Path {
         val userHome = System.getProperty("user.home").orEmpty()
-        return Paths.get(userHome, ".aiadventchalengetestllmapi", "app.db").also {
+        return Paths.get(userHome, ".aiadventchalengetestllmapi", dbFileName).also {
             it.parent?.toFile()?.mkdirs()
         }
     }
