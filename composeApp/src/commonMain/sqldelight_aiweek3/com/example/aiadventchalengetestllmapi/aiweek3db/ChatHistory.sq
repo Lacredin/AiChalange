@@ -42,6 +42,15 @@ CREATE TABLE chat_branch_messages (
     created_at INTEGER NOT NULL
 );
 
+CREATE TABLE memory_entries (
+    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    memory_type TEXT NOT NULL,
+    entry_key TEXT NOT NULL,
+    entry_value TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
 selectChats:
 SELECT *
 FROM chats
@@ -151,3 +160,19 @@ DELETE FROM chat_branch_messages;
 
 deleteAllChats:
 DELETE FROM chats;
+
+selectAllMemoryEntries:
+SELECT * FROM memory_entries ORDER BY memory_type ASC, id ASC;
+
+insertMemoryEntry:
+INSERT INTO memory_entries(memory_type, entry_key, entry_value, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?);
+
+updateMemoryEntry:
+UPDATE memory_entries SET entry_value = ?, updated_at = ? WHERE id = ?;
+
+deleteMemoryEntry:
+DELETE FROM memory_entries WHERE id = ?;
+
+deleteAllMemoryEntries:
+DELETE FROM memory_entries;

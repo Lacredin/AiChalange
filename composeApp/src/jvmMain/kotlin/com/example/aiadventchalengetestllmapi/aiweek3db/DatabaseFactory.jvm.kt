@@ -71,13 +71,14 @@ actual class AiWeek3DatabaseDriverFactory {
                 "stream",
                 "epoch",
                 "created_at"
-            )
+            ),
+            "memory_entries" to setOf("id", "memory_type", "entry_key", "entry_value", "created_at", "updated_at")
         )
         val actualTables = mutableSetOf<String>()
         val connectionUrl = "jdbc:sqlite:$dbPath"
         DriverManager.getConnection(connectionUrl).use { connection ->
             connection.prepareStatement(
-                "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('chats', 'chat_messages', 'chat_feature_state', 'chat_branch_messages');"
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('chats', 'chat_messages', 'chat_feature_state', 'chat_branch_messages', 'memory_entries');"
             ).use { statement ->
                 statement.executeQuery().use { resultSet ->
                     while (resultSet.next()) {

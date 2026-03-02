@@ -131,6 +131,19 @@ private data class AiAgentMessage(
     val createdAt: Long
 )
 
+private enum class LongTermMemoryType(val label: String) {
+    Profile("profile"), Decision("decision"), Knowledge("knowledge")
+}
+
+private data class LongTermMemoryEntry(
+    val id: Long,
+    val memoryType: LongTermMemoryType,
+    val key: String,
+    val value: String,
+    val createdAt: Long,
+    val updatedAt: Long
+)
+
 private enum class AiAgentStream { Real, Raw }
 
 private data class AiAgentChatItem(
@@ -227,6 +240,25 @@ private fun aiAgentSystemPromptMessage(systemPromptText: String): DeepSeekMessag
     val text = systemPromptText.trim()
     if (text.isEmpty()) return null
     return DeepSeekMessage(role = "system", content = text)
+}
+
+private fun aiAgentLongTermMemoryMessage(entries: List<LongTermMemoryEntry>): DeepSeekMessage? {
+    if (entries.isEmpty()) return null
+    val grouped = entries.groupBy { it.memoryType }
+    val content = buildString {
+//        appendLine("=== Долговременная память ===")
+        grouped[LongTermMemoryType.Profile]?.let {
+            appendLine("\n[Профиль]"); it.forEach { e -> appendLine("${e.key}: ${e.value}") }
+        }
+        grouped[LongTermMemoryType.Decision]?.let {
+            appendLine("\n[Решения]"); it.forEach { e -> appendLine("${e.key}: ${e.value}") }
+        }
+        grouped[LongTermMemoryType.Knowledge]?.let {
+            appendLine("\n[Знания]"); it.forEach { e -> appendLine("${e.key}: ${e.value}") }
+        }
+        append("\nУчитывай эту информацию во всех ответах.")
+    }
+    return DeepSeekMessage(role = "system", content = content.trim())
 }
 
 private fun aiAgentMergeSystemPrompts(
@@ -352,6 +384,16 @@ private fun AiWeek3Chat(
     var showRawHistory by remember { mutableStateOf(false) }
     var realEpoch by remember { mutableIntStateOf(0) }
 
+    // Tier 3: Долговременная память
+    val longTermMemory = remember { mutableStateListOf<LongTermMemoryEntry>() }
+    var isLongTermMemoryEnabled by remember { mutableStateOf(true) }
+    var isMemoryPanelExpanded by remember { mutableStateOf(true) }
+    var memoryEditingId by remember { mutableStateOf<Long?>(null) }
+    var memoryTypeInput by remember { mutableStateOf(LongTermMemoryType.Knowledge) }
+    var memoryKeyInput by remember { mutableStateOf("") }
+    var memoryValueInput by remember { mutableStateOf("") }
+    var isMemoryFormVisible by remember { mutableStateOf(false) }
+
     fun loadChatsFromDb(): List<AiAgentChatItem> {
         val result = queries.selectChats().executeAsList().map {
             AiAgentChatItem(id = it.id, title = it.title)
@@ -443,6 +485,46 @@ private fun AiWeek3Chat(
         isBranchingEnabled = state.isBranchingEnabled
         branchingEnabledByChat[chatId] = state.isBranchingEnabled
         showRawHistory = state.showRawHistory
+    }
+
+    fun loadLongTermMemory() {
+        val entries = queries.selectAllMemoryEntries().executeAsList().map { row ->
+            LongTermMemoryEntry(
+                id = row.id,
+                memoryType = LongTermMemoryType.entries.firstOrNull { it.label == row.memory_type }
+                    ?: LongTermMemoryType.Knowledge,
+                key = row.entry_key, value = row.entry_value,
+                createdAt = row.created_at, updatedAt = row.updated_at
+            )
+        }
+        longTermMemory.clear()
+        longTermMemory += entries
+    }
+
+    fun insertLongTermEntry(type: LongTermMemoryType, key: String, value: String) {
+        val now = System.currentTimeMillis()
+        queries.insertMemoryEntry(type.label, key.trim(), value.trim(), now, now)
+        loadLongTermMemory()
+    }
+
+    fun updateLongTermEntry(id: Long, value: String) {
+        queries.updateMemoryEntry(value.trim(), System.currentTimeMillis(), id)
+        loadLongTermMemory()
+    }
+
+    fun deleteLongTermEntry(id: Long) {
+        queries.deleteMemoryEntry(id)
+        loadLongTermMemory()
+    }
+
+    fun saveAssistantMessageToLongTermMemory(text: String) {
+        memoryEditingId = null
+        memoryTypeInput = LongTermMemoryType.Knowledge
+        memoryKeyInput = ""
+        memoryValueInput = text.take(500)
+        isMemoryFormVisible = true
+        isFeaturesPanelVisible = true
+        isMemoryPanelExpanded = true
     }
 
     fun saveActiveChatFeatureState() {
@@ -749,6 +831,9 @@ private fun AiWeek3Chat(
             AiAgentContextStrategy.StickyFacts -> {
                 val selectedHistory = stickyFactsContextMessages()
                 buildList {
+                    if (isLongTermMemoryEnabled) {
+                        aiAgentLongTermMemoryMessage(longTermMemory)?.let { add(it) }
+                    }
                     aiAgentMergeSystemPrompts(
                         baseSystemPrompt = baseSystemPrompt,
                         stickyFactsSystemMessage = stickyFactsSystemMessage
@@ -759,11 +844,17 @@ private fun AiWeek3Chat(
             AiAgentContextStrategy.SlidingWindow -> {
                 val lastN = slidingWindowSizeInput.toIntOrNull() ?: 12
                 buildList {
+                    if (isLongTermMemoryEnabled) {
+                        aiAgentLongTermMemoryMessage(longTermMemory)?.let { add(it) }
+                    }
                     aiAgentSystemPromptMessage(baseSystemPrompt)?.let { add(it) }
                     addAll(aiAgentTakeLastMessages(history, lastN).map { it.toRequestMessage() })
                 }
             }
             else -> buildList {
+                if (isLongTermMemoryEnabled) {
+                    aiAgentLongTermMemoryMessage(longTermMemory)?.let { add(it) }
+                }
                 aiAgentSystemPromptMessage(baseSystemPrompt)?.let { add(it) }
                 addAll(history.map { it.toRequestMessage() })
             }
@@ -1122,6 +1213,7 @@ private fun AiWeek3Chat(
     }
 
     LaunchedEffect(Unit) {
+        loadLongTermMemory()
         val storedChats = loadChatsFromDb()
         chats.clear()
         chats += storedChats
@@ -1604,6 +1696,35 @@ private fun AiWeek3Chat(
                 state = listState,
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
+                item {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = "Краткосрочная: ${currentHistoryMessages().size} сообщ.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                        )
+                        Text("|", style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f))
+                        Text(
+                            text = "Рабочая: ${stickyFacts.size} фактов",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (isStickyFactsEnabled) MaterialTheme.colorScheme.primary
+                                    else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                        )
+                        Text("|", style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f))
+                        Text(
+                            text = "Долговременная: ${longTermMemory.size} зап.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (longTermMemory.isNotEmpty() && isLongTermMemoryEnabled)
+                                        MaterialTheme.colorScheme.primary
+                                    else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                        )
+                    }
+                }
                 val stickyFactsBannerText = aiAgentMergeSystemPrompts(
                     baseSystemPrompt = if (isSystemPromptEnabled) systemPromptText else "",
                     stickyFactsSystemMessage = stickyFactsSystemMessage
@@ -1614,7 +1735,10 @@ private fun AiWeek3Chat(
                     }
                 }
                 items(displayMessages) { message ->
-                    AiAgentBubble(message = message)
+                    AiAgentBubble(
+                        message = message,
+                        onSaveToMemory = if (!message.isUser) { { text -> saveAssistantMessageToLongTermMemory(text) } } else null
+                    )
                 }
                 if (isLoading) {
                     item {
@@ -1690,8 +1814,89 @@ private fun AiWeek3Chat(
                     style = MaterialTheme.typography.titleSmall
                 )
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().clickable(enabled = !isLoading) {
+                            isMemoryPanelExpanded = !isMemoryPanelExpanded
+                        },
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = "Долговременная память",
+                            style = MaterialTheme.typography.labelMedium,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Text(if (isMemoryPanelExpanded) "▾" else "▸", style = MaterialTheme.typography.labelSmall)
+                    }
+                    if (isMemoryPanelExpanded) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Checkbox(checked = isLongTermMemoryEnabled, onCheckedChange = { isLongTermMemoryEnabled = it }, enabled = !isLoading)
+                            Text(if (isLongTermMemoryEnabled) "Вкл (инжект в запрос)" else "Выкл", style = MaterialTheme.typography.labelSmall)
+                        }
+                        longTermMemory.forEach { entry ->
+                            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text("[${entry.memoryType.label}] ${entry.key}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                                    Text(entry.value, style = MaterialTheme.typography.labelSmall)
+                                }
+                                TextButton(onClick = { memoryEditingId = entry.id; memoryTypeInput = entry.memoryType; memoryKeyInput = entry.key; memoryValueInput = entry.value; isMemoryFormVisible = true }, enabled = !isLoading) { Text("✎") }
+                                TextButton(onClick = { scope.launch { deleteLongTermEntry(entry.id) } }, enabled = !isLoading) { Text("X") }
+                            }
+                        }
+                        if (longTermMemory.isEmpty()) {
+                            Text("Записей нет", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            TextButton(onClick = { memoryEditingId = null; memoryTypeInput = LongTermMemoryType.Knowledge; memoryKeyInput = ""; memoryValueInput = ""; isMemoryFormVisible = !isMemoryFormVisible }, enabled = !isLoading) {
+                                Text(if (isMemoryFormVisible && memoryEditingId == null) "Отмена" else "+ Добавить")
+                            }
+                            TextButton(onClick = { scope.launch { queries.deleteAllMemoryEntries(); longTermMemory.clear() } }, enabled = longTermMemory.isNotEmpty() && !isLoading) {
+                                Text("Очистить")
+                            }
+                        }
+                        if (isMemoryFormVisible) {
+                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    LongTermMemoryType.entries.forEach { type ->
+                                        TextButton(onClick = { memoryTypeInput = type }, enabled = !isLoading) {
+                                            Text(type.label, style = MaterialTheme.typography.labelSmall,
+                                                color = if (memoryTypeInput == type) MaterialTheme.colorScheme.primary
+                                                        else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+                                        }
+                                    }
+                                }
+                                OutlinedTextField(value = memoryKeyInput, onValueChange = { memoryKeyInput = it },
+                                    modifier = Modifier.fillMaxWidth().height(52.dp), enabled = !isLoading,
+                                    placeholder = { Text("Ключ (имя, стек, цель...)", style = MaterialTheme.typography.labelSmall) },
+                                    singleLine = true, textStyle = MaterialTheme.typography.labelSmall)
+                                OutlinedTextField(value = memoryValueInput, onValueChange = { memoryValueInput = it },
+                                    modifier = Modifier.fillMaxWidth().height(80.dp), enabled = !isLoading,
+                                    placeholder = { Text("Значение", style = MaterialTheme.typography.labelSmall) },
+                                    textStyle = MaterialTheme.typography.labelSmall, maxLines = 3)
+                                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    Button(
+                                        onClick = {
+                                            if (memoryKeyInput.isNotBlank() && memoryValueInput.isNotBlank()) {
+                                                scope.launch {
+                                                    val editId = memoryEditingId
+                                                    if (editId != null) updateLongTermEntry(editId, memoryValueInput)
+                                                    else insertLongTermEntry(memoryTypeInput, memoryKeyInput, memoryValueInput)
+                                                    isMemoryFormVisible = false; memoryEditingId = null
+                                                    memoryKeyInput = ""; memoryValueInput = ""
+                                                }
+                                            }
+                                        },
+                                        enabled = memoryKeyInput.isNotBlank() && memoryValueInput.isNotBlank() && !isLoading
+                                    ) { Text(if (memoryEditingId != null) "Сохранить" else "Добавить") }
+                                    TextButton(onClick = { isMemoryFormVisible = false; memoryEditingId = null; memoryKeyInput = ""; memoryValueInput = "" }, enabled = !isLoading) { Text("Отмена") }
+                                }
+                            }
+                        }
+                    }
+                }
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(
-                        text = "Системный промт",
+                        text = "Системный промт (краткосрочная)",
                         style = MaterialTheme.typography.labelMedium
                     )
                     Row(
@@ -1786,7 +1991,7 @@ private fun AiWeek3Chat(
                 }
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(
-                        text = "Sticky Facts (facts + последние N)",
+                        text = "Рабочая память — Sticky Facts",
                         style = MaterialTheme.typography.labelMedium
                     )
                     Row(
@@ -1872,7 +2077,7 @@ private fun AiAgentStickyFactsBanner(systemFacts: String) {
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text(
-                text = "System • Sticky Facts",
+                text = "Рабочая память • Sticky Facts",
                 style = MaterialTheme.typography.labelSmall,
                 color = Color(0xFF334155)
             )
@@ -1887,7 +2092,10 @@ private fun AiAgentStickyFactsBanner(systemFacts: String) {
 }
 
 @Composable
-private fun AiAgentBubble(message: AiAgentMessage) {
+private fun AiAgentBubble(
+    message: AiAgentMessage,
+    onSaveToMemory: ((String) -> Unit)? = null
+) {
     val assistantBubbleColor = Color(0xFFE3F0FF)
     val assistantTextColor = Color(0xFF123A6B)
 
@@ -1928,6 +2136,15 @@ private fun AiAgentBubble(message: AiAgentMessage) {
                         assistantTextColor.copy(alpha = 0.7f)
                     }
                 )
+                if (!message.isUser && onSaveToMemory != null) {
+                    TextButton(
+                        onClick = { onSaveToMemory(message.text) },
+                        modifier = Modifier.align(Alignment.End)
+                    ) {
+                        Text("Сохранить в память", style = MaterialTheme.typography.labelSmall,
+                            color = assistantTextColor.copy(alpha = 0.7f))
+                    }
+                }
             }
         }
     }
