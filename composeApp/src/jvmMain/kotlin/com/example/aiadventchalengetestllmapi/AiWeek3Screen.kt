@@ -1,4 +1,4 @@
-﻿package com.example.aiadventchalengetestllmapi
+﻿package com.example.aiadventchalengetestllmapi.aiweek3
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -60,6 +60,8 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
+import com.example.aiadventchalengetestllmapi.BuildSecrets
+import com.example.aiadventchalengetestllmapi.RootScreen
 import com.example.aiadventchalengetestllmapi.db.DatabaseDriverFactory
 import com.example.aiadventchalengetestllmapi.db.createAppDatabase
 import com.example.aiadventchalengetestllmapi.network.DeepSeekApi
@@ -288,12 +290,12 @@ private fun AiAgentMessage.displayParamsInfo(): String =
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AiAgentScreen(
+fun AiWeek3Screen(
     currentScreen: RootScreen,
     onSelectScreen: (RootScreen) -> Unit
 ) {
     MaterialTheme {
-        AiAgentChat(
+        AiWeek3Chat(
             modifier = Modifier.fillMaxSize(),
             currentScreen = currentScreen,
             onSelectScreen = onSelectScreen
@@ -303,7 +305,7 @@ fun AiAgentScreen(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun AiAgentChat(
+private fun AiWeek3Chat(
     modifier: Modifier = Modifier,
     currentScreen: RootScreen,
     onSelectScreen: (RootScreen) -> Unit
@@ -1208,7 +1210,7 @@ private fun AiAgentChat(
                             } else {
                                 ""
                             }
-                            Text("Ai Агент$titleSuffix")
+                            Text("Ai неделя 3$titleSuffix")
                         }
                         DropdownMenu(
                             expanded = screensMenuExpanded,
@@ -1217,7 +1219,7 @@ private fun AiAgentChat(
                             DropdownMenuItem(
                                 text = {
                                     Text(
-                                        if (currentScreen == RootScreen.AiWeek3) "Ai неделя 3 ✓" else "Ai неделя 3"
+                                        if (currentScreen == RootScreen.AiWeek3) "Ai неделя 3 ?" else "Ai неделя 3"
                                     )
                                 },
                                 onClick = {
@@ -1228,7 +1230,7 @@ private fun AiAgentChat(
                             DropdownMenuItem(
                                 text = {
                                     Text(
-                                        if (currentScreen == RootScreen.AiAgent) "AiAgent ✓" else "AiAgent"
+                                        if (currentScreen == RootScreen.AiAgent) "AiAgent ?" else "AiAgent"
                                     )
                                 },
                                 onClick = {
@@ -1239,7 +1241,7 @@ private fun AiAgentChat(
                             DropdownMenuItem(
                                 text = {
                                     Text(
-                                        if (currentScreen == RootScreen.App) "App ✓" else "App"
+                                        if (currentScreen == RootScreen.App) "App ?" else "App"
                                     )
                                 },
                                 onClick = {
@@ -1263,7 +1265,7 @@ private fun AiAgentChat(
                         onClick = { isFeaturesPanelVisible = !isFeaturesPanelVisible },
                         enabled = !isLoading
                     ) {
-                        Text(text = if (isFeaturesPanelVisible) "✓" else "\u2610")
+                        Text(text = if (isFeaturesPanelVisible) "?" else "\u2610")
                     }
                     TextButton(onClick = ::createNewChatAndOpen, enabled = !isLoading) {
                         Text("Новый чат")
@@ -1408,7 +1410,7 @@ private fun AiAgentChat(
                                         contentAlignment = Alignment.Center
                                     ) {
                                         Text(
-                                            text = if (areBranchesVisible) "▾" else "▸",
+                                            text = if (areBranchesVisible) "?" else "?",
                                             style = MaterialTheme.typography.labelSmall,
                                             color = if (isSelected) {
                                                 MaterialTheme.colorScheme.onPrimaryContainer
@@ -1930,3 +1932,5 @@ private fun AiAgentBubble(message: AiAgentMessage) {
         }
     }
 }
+
+
