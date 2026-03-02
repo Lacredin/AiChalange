@@ -16,6 +16,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.Button
@@ -131,13 +133,8 @@ private data class AiAgentMessage(
     val createdAt: Long
 )
 
-private enum class LongTermMemoryType(val label: String) {
-    Profile("profile"), Decision("decision"), Knowledge("knowledge")
-}
-
 private data class LongTermMemoryEntry(
     val id: Long,
-    val memoryType: LongTermMemoryType,
     val key: String,
     val value: String,
     val createdAt: Long,
@@ -244,18 +241,8 @@ private fun aiAgentSystemPromptMessage(systemPromptText: String): DeepSeekMessag
 
 private fun aiAgentLongTermMemoryMessage(entries: List<LongTermMemoryEntry>): DeepSeekMessage? {
     if (entries.isEmpty()) return null
-    val grouped = entries.groupBy { it.memoryType }
     val content = buildString {
-//        appendLine("=== Долговременная память ===")
-        grouped[LongTermMemoryType.Profile]?.let {
-            appendLine("\n[Профиль]"); it.forEach { e -> appendLine("${e.key}: ${e.value}") }
-        }
-        grouped[LongTermMemoryType.Decision]?.let {
-            appendLine("\n[Решения]"); it.forEach { e -> appendLine("${e.key}: ${e.value}") }
-        }
-        grouped[LongTermMemoryType.Knowledge]?.let {
-            appendLine("\n[Знания]"); it.forEach { e -> appendLine("${e.key}: ${e.value}") }
-        }
+        entries.forEach { e -> appendLine("${e.key}: ${e.value}") }
         append("\nУчитывай эту информацию во всех ответах.")
     }
     return DeepSeekMessage(role = "system", content = content.trim())
@@ -389,7 +376,6 @@ private fun AiWeek3Chat(
     var isLongTermMemoryEnabled by remember { mutableStateOf(true) }
     var isMemoryPanelExpanded by remember { mutableStateOf(true) }
     var memoryEditingId by remember { mutableStateOf<Long?>(null) }
-    var memoryTypeInput by remember { mutableStateOf(LongTermMemoryType.Knowledge) }
     var memoryKeyInput by remember { mutableStateOf("") }
     var memoryValueInput by remember { mutableStateOf("") }
     var isMemoryFormVisible by remember { mutableStateOf(false) }
@@ -491,8 +477,6 @@ private fun AiWeek3Chat(
         val entries = queries.selectAllMemoryEntries().executeAsList().map { row ->
             LongTermMemoryEntry(
                 id = row.id,
-                memoryType = LongTermMemoryType.entries.firstOrNull { it.label == row.memory_type }
-                    ?: LongTermMemoryType.Knowledge,
                 key = row.entry_key, value = row.entry_value,
                 createdAt = row.created_at, updatedAt = row.updated_at
             )
@@ -501,9 +485,9 @@ private fun AiWeek3Chat(
         longTermMemory += entries
     }
 
-    fun insertLongTermEntry(type: LongTermMemoryType, key: String, value: String) {
+    fun insertLongTermEntry(key: String, value: String) {
         val now = System.currentTimeMillis()
-        queries.insertMemoryEntry(type.label, key.trim(), value.trim(), now, now)
+        queries.insertMemoryEntry(key.trim(), value.trim(), now, now)
         loadLongTermMemory()
     }
 
@@ -519,7 +503,6 @@ private fun AiWeek3Chat(
 
     fun saveAssistantMessageToLongTermMemory(text: String) {
         memoryEditingId = null
-        memoryTypeInput = LongTermMemoryType.Knowledge
         memoryKeyInput = ""
         memoryValueInput = text.take(500)
         isMemoryFormVisible = true
@@ -827,18 +810,33 @@ private fun AiWeek3Chat(
     fun buildRequestMessages(): List<DeepSeekMessage> {
         val history = historyForContext().filter { it.isApiHistoryMessage() }
         val baseSystemPrompt = if (isSystemPromptEnabled) systemPromptText else ""
+
+        // Объединяет системный промт + sticky facts (рабочая память) + опциональный доп. контент
+        fun buildSystemMessage(extraContent: String = ""): DeepSeekMessage? {
+            val longTermMemory =  if (isLongTermMemoryEnabled) {
+                aiAgentLongTermMemoryMessage(longTermMemory)?.content.orEmpty()
+            } else ""
+            val sticky = if (isStickyFactsEnabled) {
+                aiAgentFactsSystemMessage(stickyFactsSystemMessage)?.content.orEmpty()
+            } else ""
+            val parts = listOfNotNull(
+                longTermMemory.trim().takeIf { it.isNotEmpty() },
+                baseSystemPrompt.trim().takeIf { it.isNotEmpty() },
+                sticky.trim().takeIf { it.isNotEmpty() },
+                extraContent.trim().takeIf { it.isNotEmpty() }
+            )
+            if (parts.isEmpty()) return null
+            return DeepSeekMessage(role = "system", content = parts.joinToString("\n\n"))
+        }
+
         return when (contextStrategy()) {
             AiAgentContextStrategy.StickyFacts -> {
-                val selectedHistory = stickyFactsContextMessages()
                 buildList {
                     if (isLongTermMemoryEnabled) {
                         aiAgentLongTermMemoryMessage(longTermMemory)?.let { add(it) }
                     }
-                    aiAgentMergeSystemPrompts(
-                        baseSystemPrompt = baseSystemPrompt,
-                        stickyFactsSystemMessage = stickyFactsSystemMessage
-                    )?.let { add(it) }
-                    addAll(selectedHistory.map { it.toRequestMessage() })
+                    buildSystemMessage()?.let { add(it) }
+                    addAll(stickyFactsContextMessages().map { it.toRequestMessage() })
                 }
             }
             AiAgentContextStrategy.SlidingWindow -> {
@@ -847,16 +845,28 @@ private fun AiWeek3Chat(
                     if (isLongTermMemoryEnabled) {
                         aiAgentLongTermMemoryMessage(longTermMemory)?.let { add(it) }
                     }
-                    aiAgentSystemPromptMessage(baseSystemPrompt)?.let { add(it) }
+                    buildSystemMessage()?.let { add(it) }
                     addAll(aiAgentTakeLastMessages(history, lastN).map { it.toRequestMessage() })
                 }
             }
-            else -> buildList {
-                if (isLongTermMemoryEnabled) {
-                    aiAgentLongTermMemoryMessage(longTermMemory)?.let { add(it) }
+            else -> {
+                // Суммаризация — рабочая память: результат идёт в системный промт
+                val summaryText = if (realEpoch > 0 && !isBranchingEnabled) {
+                    history.firstOrNull { !it.isUser }?.text.orEmpty()
+                } else ""
+                val summaryExtra = if (summaryText.isNotEmpty()) {
+                    "Краткое содержание предыдущего диалога:\n$summaryText"
+                } else ""
+                buildList {
+//                    if (isLongTermMemoryEnabled) {
+//                        aiAgentLongTermMemoryMessage(longTermMemory)?.let { add(it) }
+//                    }
+                    buildSystemMessage(summaryExtra)?.let { add(it) }
+                    val historyToSend = if (summaryText.isNotEmpty()) {
+                        history.dropWhile { !it.isUser }
+                    } else history
+                    addAll(historyToSend.map { it.toRequestMessage() })
                 }
-                aiAgentSystemPromptMessage(baseSystemPrompt)?.let { add(it) }
-                addAll(history.map { it.toRequestMessage() })
             }
         }
     }
@@ -1708,10 +1718,17 @@ private fun AiWeek3Chat(
                         )
                         Text("|", style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f))
+                        val workingMemoryLabel = when {
+                            isStickyFactsEnabled && stickyFacts.isNotEmpty() -> "${stickyFacts.size} фактов"
+                            isSummarizationEnabled && realEpoch > 0 -> "сводка"
+                            else -> "—"
+                        }
+                        val isWorkingMemoryActive = (isStickyFactsEnabled && stickyFacts.isNotEmpty()) ||
+                            (isSummarizationEnabled && realEpoch > 0)
                         Text(
-                            text = "Рабочая: ${stickyFacts.size} фактов",
+                            text = "Рабочая: $workingMemoryLabel",
                             style = MaterialTheme.typography.labelSmall,
-                            color = if (isStickyFactsEnabled) MaterialTheme.colorScheme.primary
+                            color = if (isWorkingMemoryActive) MaterialTheme.colorScheme.primary
                                     else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
                         )
                         Text("|", style = MaterialTheme.typography.labelSmall,
@@ -1806,6 +1823,7 @@ private fun AiWeek3Chat(
                 modifier = Modifier
                     .width(240.dp)
                     .fillMaxSize()
+                    .verticalScroll(rememberScrollState())
                     .padding(8.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
@@ -1836,10 +1854,10 @@ private fun AiWeek3Chat(
                         longTermMemory.forEach { entry ->
                             Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                                 Column(modifier = Modifier.weight(1f)) {
-                                    Text("[${entry.memoryType.label}] ${entry.key}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                                    Text(entry.key, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
                                     Text(entry.value, style = MaterialTheme.typography.labelSmall)
                                 }
-                                TextButton(onClick = { memoryEditingId = entry.id; memoryTypeInput = entry.memoryType; memoryKeyInput = entry.key; memoryValueInput = entry.value; isMemoryFormVisible = true }, enabled = !isLoading) { Text("✎") }
+                                TextButton(onClick = { memoryEditingId = entry.id; memoryKeyInput = entry.key; memoryValueInput = entry.value; isMemoryFormVisible = true }, enabled = !isLoading) { Text("✎") }
                                 TextButton(onClick = { scope.launch { deleteLongTermEntry(entry.id) } }, enabled = !isLoading) { Text("X") }
                             }
                         }
@@ -1847,7 +1865,7 @@ private fun AiWeek3Chat(
                             Text("Записей нет", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
                         }
                         Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                            TextButton(onClick = { memoryEditingId = null; memoryTypeInput = LongTermMemoryType.Knowledge; memoryKeyInput = ""; memoryValueInput = ""; isMemoryFormVisible = !isMemoryFormVisible }, enabled = !isLoading) {
+                            TextButton(onClick = { memoryEditingId = null; memoryKeyInput = ""; memoryValueInput = ""; isMemoryFormVisible = !isMemoryFormVisible }, enabled = !isLoading) {
                                 Text(if (isMemoryFormVisible && memoryEditingId == null) "Отмена" else "+ Добавить")
                             }
                             TextButton(onClick = { scope.launch { queries.deleteAllMemoryEntries(); longTermMemory.clear() } }, enabled = longTermMemory.isNotEmpty() && !isLoading) {
@@ -1856,15 +1874,6 @@ private fun AiWeek3Chat(
                         }
                         if (isMemoryFormVisible) {
                             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                    LongTermMemoryType.entries.forEach { type ->
-                                        TextButton(onClick = { memoryTypeInput = type }, enabled = !isLoading) {
-                                            Text(type.label, style = MaterialTheme.typography.labelSmall,
-                                                color = if (memoryTypeInput == type) MaterialTheme.colorScheme.primary
-                                                        else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
-                                        }
-                                    }
-                                }
                                 OutlinedTextField(value = memoryKeyInput, onValueChange = { memoryKeyInput = it },
                                     modifier = Modifier.fillMaxWidth().height(52.dp), enabled = !isLoading,
                                     placeholder = { Text("Ключ (имя, стек, цель...)", style = MaterialTheme.typography.labelSmall) },
@@ -1880,7 +1889,7 @@ private fun AiWeek3Chat(
                                                 scope.launch {
                                                     val editId = memoryEditingId
                                                     if (editId != null) updateLongTermEntry(editId, memoryValueInput)
-                                                    else insertLongTermEntry(memoryTypeInput, memoryKeyInput, memoryValueInput)
+                                                    else insertLongTermEntry(memoryKeyInput, memoryValueInput)
                                                     isMemoryFormVisible = false; memoryEditingId = null
                                                     memoryKeyInput = ""; memoryValueInput = ""
                                                 }
@@ -1927,7 +1936,7 @@ private fun AiWeek3Chat(
                 }
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(
-                        text = "Суммаризация контекста",
+                        text = "Рабочая память — Суммаризация",
                         style = MaterialTheme.typography.labelMedium
                     )
                     Row(

@@ -72,7 +72,7 @@ actual class AiWeek3DatabaseDriverFactory {
                 "epoch",
                 "created_at"
             ),
-            "memory_entries" to setOf("id", "memory_type", "entry_key", "entry_value", "created_at", "updated_at")
+            "memory_entries" to setOf("id", "entry_key", "entry_value", "created_at", "updated_at")
         )
         val actualTables = mutableSetOf<String>()
         val connectionUrl = "jdbc:sqlite:$dbPath"
