@@ -6,7 +6,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 
-private enum class RootScreen {
+enum class RootScreen {
     AiAgent,
     App
 }
@@ -17,7 +17,8 @@ fun RootApp() {
 
     when (currentScreen) {
         RootScreen.AiAgent -> AiAgentScreen(
-            onOpenApp = { currentScreen = RootScreen.App }
+            currentScreen = currentScreen,
+            onSelectScreen = { selectedScreen -> currentScreen = selectedScreen }
         )
 
         RootScreen.App -> App(

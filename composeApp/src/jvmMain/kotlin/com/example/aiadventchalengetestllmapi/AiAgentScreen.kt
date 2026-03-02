@@ -21,6 +21,7 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuAnchorType
@@ -287,11 +288,15 @@ private fun AiAgentMessage.displayParamsInfo(): String =
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AiAgentScreen(onOpenApp: () -> Unit) {
+fun AiAgentScreen(
+    currentScreen: RootScreen,
+    onSelectScreen: (RootScreen) -> Unit
+) {
     MaterialTheme {
         AiAgentChat(
             modifier = Modifier.fillMaxSize(),
-            onOpenApp = onOpenApp
+            currentScreen = currentScreen,
+            onSelectScreen = onSelectScreen
         )
     }
 }
@@ -300,7 +305,8 @@ fun AiAgentScreen(onOpenApp: () -> Unit) {
 @Composable
 private fun AiAgentChat(
     modifier: Modifier = Modifier,
-    onOpenApp: () -> Unit
+    currentScreen: RootScreen,
+    onSelectScreen: (RootScreen) -> Unit
 ) {
     val scope = rememberCoroutineScope()
     val deepSeekApi = remember { DeepSeekApi() }
@@ -316,6 +322,7 @@ private fun AiAgentChat(
     val listState = rememberLazyListState()
     val inputFocusRequester = remember { FocusRequester() }
     var inputText by remember { mutableStateOf(TextFieldValue("")) }
+    var screensMenuExpanded by remember { mutableStateOf(false) }
     var selectedApi by remember { mutableStateOf(AiAgentApi.DeepSeek) }
     var apiSelectorExpanded by remember { mutableStateOf(false) }
     var modelSelectorExpanded by remember { mutableStateOf(false) }
@@ -1191,13 +1198,46 @@ private fun AiAgentChat(
         topBar = {
             TopAppBar(
                 title = {
-                    Text(
-                        if (activeChatTitle.isNotBlank()) {
-                            "Ai Агент | $activeChatTitle ($activeChatTotalTokens токенов)"
-                        } else {
-                            "Ai Агент"
+                    Box {
+                        TextButton(
+                            onClick = { screensMenuExpanded = true },
+                            enabled = !isLoading
+                        ) {
+                            val titleSuffix = if (activeChatTitle.isNotBlank()) {
+                                " | $activeChatTitle ($activeChatTotalTokens токенов)"
+                            } else {
+                                ""
+                            }
+                            Text("Ai Агент$titleSuffix")
                         }
-                    )
+                        DropdownMenu(
+                            expanded = screensMenuExpanded,
+                            onDismissRequest = { screensMenuExpanded = false }
+                        ) {
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        if (currentScreen == RootScreen.AiAgent) "AiAgent ✓" else "AiAgent"
+                                    )
+                                },
+                                onClick = {
+                                    screensMenuExpanded = false
+                                    onSelectScreen(RootScreen.AiAgent)
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        if (currentScreen == RootScreen.App) "App ✓" else "App"
+                                    )
+                                },
+                                onClick = {
+                                    screensMenuExpanded = false
+                                    onSelectScreen(RootScreen.App)
+                                }
+                            )
+                        }
+                    }
                 },
                 actions = {
                     if (isCompressedViewAvailable()) {
@@ -1216,9 +1256,6 @@ private fun AiAgentChat(
                     }
                     TextButton(onClick = ::createNewChatAndOpen, enabled = !isLoading) {
                         Text("Новый чат")
-                    }
-                    IconButton(onClick = onOpenApp) {
-                        Text(text = "\u2699")
                     }
                 }
             )
