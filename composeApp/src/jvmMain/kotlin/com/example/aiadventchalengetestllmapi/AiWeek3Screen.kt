@@ -36,6 +36,8 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -315,13 +317,74 @@ private fun AiAgentMessage.displayParamsInfo(): String =
         .replace(streamStripRegex, "")
         .replace(epochStripRegex, "")
 
+/**
+ * Тема экрана AiWeek3. Меняйте цвета здесь, чтобы изменить оформление всего экрана.
+ */
+internal object AiWeek3ScreenTheme {
+    // Основная палитра красных оттенков
+    val primary = Color(0xFFB71C1C)            // Red 900 — основной акцент
+    val onPrimary = Color(0xFFFFFFFF)
+    val primaryContainer = Color(0xFFFFCDD2)   // Red 100 — фон пузырьков пользователя
+    val onPrimaryContainer = Color(0xFF5C0000) // Тёмно-красный — текст пользователя
+
+    val secondary = Color(0xFFD32F2F)          // Red 700
+    val onSecondary = Color(0xFFFFFFFF)
+    val secondaryContainer = Color(0xFFFFEBEE) // Red 50
+    val onSecondaryContainer = Color(0xFF7F0000)
+
+    val background = Color(0xFFFFF8F8)         // Тёплый белый с красным оттенком
+    val onBackground = Color(0xFF1A0000)
+    val surface = Color(0xFFFFFFFF)
+    val onSurface = Color(0xFF1A0000)
+    val surfaceVariant = Color(0xFFFFEAEA)
+    val onSurfaceVariant = Color(0xFF5C0000)
+    val outline = Color(0xFFEF9A9A)            // Red 200
+
+    // Пузырьки ответов ассистента
+    val assistantBubble = Color(0xFFFFF0F0)    // Очень светлый розово-красный
+    val onAssistantBubble = Color(0xFF3E0000)  // Тёмно-бордовый
+
+    // Баннер Sticky Facts
+    val stickyFactsBg = Color(0xFFFFEBEE)      // Red 50
+    val stickyFactsBorder = Color(0xFFEF9A9A)  // Red 200
+    val stickyFactsTitle = Color(0xFF7F0000)   // Тёмно-красный заголовок
+    val stickyFactsText = Color(0xFF1A0000)    // Почти чёрный с красным оттенком
+
+    // Разделительные линии между панелями
+    val divider = Color(0xFFFFCDD2)            // Red 100
+
+    // TopAppBar
+    val topBarContainer = Color(0xFFFFEBEE)    // Red 50 — светлая красная шапка
+    val topBarContent = Color(0xFF7F0000)      // Тёмно-красный текст/иконки
+
+    fun colorScheme() = lightColorScheme(
+        primary = primary,
+        onPrimary = onPrimary,
+        primaryContainer = primaryContainer,
+        onPrimaryContainer = onPrimaryContainer,
+        secondary = secondary,
+        onSecondary = onSecondary,
+        secondaryContainer = secondaryContainer,
+        onSecondaryContainer = onSecondaryContainer,
+        background = background,
+        onBackground = onBackground,
+        surface = surface,
+        onSurface = onSurface,
+        surfaceVariant = surfaceVariant,
+        onSurfaceVariant = onSurfaceVariant,
+        outline = outline,
+        error = Color(0xFFBA1A1A),
+        onError = Color(0xFFFFFFFF)
+    )
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AiWeek3Screen(
     currentScreen: RootScreen,
     onSelectScreen: (RootScreen) -> Unit
 ) {
-    MaterialTheme {
+    MaterialTheme(colorScheme = AiWeek3ScreenTheme.colorScheme()) {
         AiWeek3Chat(
             modifier = Modifier.fillMaxSize(),
             currentScreen = currentScreen,
@@ -1559,7 +1622,12 @@ private fun AiWeek3Chat(
                     TextButton(onClick = ::createNewChatAndOpen, enabled = !isLoading) {
                         Text("Новый чат")
                     }
-                }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = AiWeek3ScreenTheme.topBarContainer,
+                    titleContentColor = AiWeek3ScreenTheme.topBarContent,
+                    actionIconContentColor = AiWeek3ScreenTheme.topBarContent
+                )
             )
         }
     ) { innerPadding ->
@@ -1789,7 +1857,7 @@ private fun AiWeek3Chat(
                 modifier = Modifier
                     .width(1.dp)
                     .fillMaxSize()
-                    .background(Color(0xFFD2D6DC))
+                    .background(AiWeek3ScreenTheme.divider)
             )
 
             Column(
@@ -2131,7 +2199,7 @@ private fun AiWeek3Chat(
                 modifier = Modifier
                     .width(1.dp)
                     .fillMaxSize()
-                    .background(Color(0xFFD2D6DC))
+                    .background(AiWeek3ScreenTheme.divider)
             )
 
             Column(
@@ -2397,12 +2465,12 @@ private fun AiAgentStickyFactsBanner(systemFacts: String) {
         modifier = Modifier
             .fillMaxWidth()
             .background(
-                color = Color(0xFFF1F5F9),
+                color = AiWeek3ScreenTheme.stickyFactsBg,
                 shape = RoundedCornerShape(12.dp)
             )
             .border(
                 width = 1.dp,
-                color = Color(0xFF94A3B8),
+                color = AiWeek3ScreenTheme.stickyFactsBorder,
                 shape = RoundedCornerShape(12.dp)
             )
             .padding(12.dp)
@@ -2411,12 +2479,12 @@ private fun AiAgentStickyFactsBanner(systemFacts: String) {
             Text(
                 text = "Рабочая память • Sticky Facts",
                 style = MaterialTheme.typography.labelSmall,
-                color = Color(0xFF334155)
+                color = AiWeek3ScreenTheme.stickyFactsTitle
             )
             SelectionContainer {
                 Text(
                     text = systemFacts,
-                    color = Color(0xFF0F172A)
+                    color = AiWeek3ScreenTheme.stickyFactsText
                 )
             }
         }
@@ -2428,8 +2496,8 @@ private fun AiAgentBubble(
     message: AiAgentMessage,
     onSaveToMemory: ((String) -> Unit)? = null
 ) {
-    val assistantBubbleColor = Color(0xFFE3F0FF)
-    val assistantTextColor = Color(0xFF123A6B)
+    val assistantBubbleColor = AiWeek3ScreenTheme.assistantBubble
+    val assistantTextColor = AiWeek3ScreenTheme.onAssistantBubble
 
     Row(
         modifier = Modifier.fillMaxWidth(),
