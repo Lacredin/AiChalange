@@ -45,10 +45,11 @@ actual class AiWeek3DatabaseDriverFactory {
 
     private fun hasCompatibleSchema(dbPath: Path): Boolean {
         val expectedColumns = mapOf(
-            "chats" to setOf("id", "title", "created_at"),
+            "chats" to setOf("id", "title", "created_at", "selected_profile_id"),
             "chat_messages" to setOf("id", "chat_id", "api", "model", "role", "message", "params_info", "created_at"),
-            "chat_feature_state" to setOf(
-                "chat_id",
+            "chat_profiles" to setOf(
+                "id",
+                "name",
                 "is_system_prompt_enabled",
                 "system_prompt_text",
                 "is_summarization_enabled",
@@ -78,7 +79,7 @@ actual class AiWeek3DatabaseDriverFactory {
         val connectionUrl = "jdbc:sqlite:$dbPath"
         DriverManager.getConnection(connectionUrl).use { connection ->
             connection.prepareStatement(
-                "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('chats', 'chat_messages', 'chat_feature_state', 'chat_branch_messages', 'memory_entries');"
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('chats', 'chat_messages', 'chat_profiles', 'chat_branch_messages', 'memory_entries');"
             ).use { statement ->
                 statement.executeQuery().use { resultSet ->
                     while (resultSet.next()) {

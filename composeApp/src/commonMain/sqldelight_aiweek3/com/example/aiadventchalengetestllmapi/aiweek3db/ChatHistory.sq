@@ -1,7 +1,8 @@
 CREATE TABLE chats (
     id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
     title TEXT NOT NULL,
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    selected_profile_id INTEGER REFERENCES chat_profiles(id) ON DELETE SET NULL
 );
 
 CREATE TABLE chat_messages (
@@ -15,8 +16,9 @@ CREATE TABLE chat_messages (
     created_at INTEGER NOT NULL
 );
 
-CREATE TABLE chat_feature_state (
-    chat_id INTEGER NOT NULL PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE,
+CREATE TABLE chat_profiles (
+    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
     is_system_prompt_enabled INTEGER NOT NULL,
     system_prompt_text TEXT NOT NULL,
     is_summarization_enabled INTEGER NOT NULL,
@@ -58,9 +60,15 @@ ORDER BY id ASC;
 insertChat:
 INSERT INTO chats(
     title,
-    created_at
+    created_at,
+    selected_profile_id
 )
-VALUES (?, ?);
+VALUES (?, ?, ?);
+
+selectChatById:
+SELECT *
+FROM chats
+WHERE id = ?;
 
 selectLastInsertedChatId:
 SELECT last_insert_rowid();
@@ -73,8 +81,12 @@ ORDER BY id ASC;
 
 selectFeatureStateByChat:
 SELECT *
-FROM chat_feature_state
-WHERE chat_id = ?;
+FROM chat_profiles
+WHERE id = (
+    SELECT selected_profile_id
+    FROM chats
+    WHERE id = ?
+);
 
 selectBranchMessagesByChat:
 SELECT *
@@ -95,8 +107,31 @@ INSERT INTO chat_messages(
 VALUES (?, ?, ?, ?, ?, ?, ?);
 
 upsertFeatureState:
-INSERT OR REPLACE INTO chat_feature_state(
-    chat_id,
+INSERT OR REPLACE INTO chat_profiles(
+    id,
+    name,
+    is_system_prompt_enabled,
+    system_prompt_text,
+    is_summarization_enabled,
+    summarize_after_tokens,
+    is_sliding_window_enabled,
+    sliding_window_size,
+    is_sticky_facts_enabled,
+    sticky_facts_window_size,
+    sticky_facts_system_message,
+    is_branching_enabled,
+    show_raw_history
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+
+selectProfiles:
+SELECT *
+FROM chat_profiles
+ORDER BY id ASC;
+
+insertProfile:
+INSERT INTO chat_profiles(
+    name,
     is_system_prompt_enabled,
     system_prompt_text,
     is_summarization_enabled,
@@ -110,6 +145,32 @@ INSERT OR REPLACE INTO chat_feature_state(
     show_raw_history
 )
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+
+updateProfile:
+UPDATE chat_profiles
+SET
+    name = ?,
+    is_system_prompt_enabled = ?,
+    system_prompt_text = ?,
+    is_summarization_enabled = ?,
+    summarize_after_tokens = ?,
+    is_sliding_window_enabled = ?,
+    sliding_window_size = ?,
+    is_sticky_facts_enabled = ?,
+    sticky_facts_window_size = ?,
+    sticky_facts_system_message = ?,
+    is_branching_enabled = ?,
+    show_raw_history = ?
+WHERE id = ?;
+
+deleteProfileById:
+DELETE FROM chat_profiles
+WHERE id = ?;
+
+updateChatSelectedProfile:
+UPDATE chats
+SET selected_profile_id = ?
+WHERE id = ?;
 
 insertBranchMessage:
 INSERT INTO chat_branch_messages(
@@ -129,8 +190,9 @@ DELETE FROM chat_messages
 WHERE chat_id = ?;
 
 deleteFeatureStateByChat:
-DELETE FROM chat_feature_state
-WHERE chat_id = ?;
+UPDATE chats
+SET selected_profile_id = NULL
+WHERE id = ?;
 
 deleteBranchMessagesByChat:
 DELETE FROM chat_branch_messages
@@ -152,7 +214,7 @@ deleteAllMessages:
 DELETE FROM chat_messages;
 
 deleteAllFeatureState:
-DELETE FROM chat_feature_state;
+DELETE FROM chat_profiles;
 
 deleteAllBranchMessages:
 DELETE FROM chat_branch_messages;

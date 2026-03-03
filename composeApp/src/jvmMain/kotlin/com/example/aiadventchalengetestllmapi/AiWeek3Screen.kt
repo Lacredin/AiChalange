@@ -145,7 +145,14 @@ private enum class AiAgentStream { Real, Raw }
 
 private data class AiAgentChatItem(
     val id: Long,
-    val title: String
+    val title: String,
+    val selectedProfileId: Long?
+)
+
+private data class AiAgentProfileItem(
+    val id: Long,
+    val name: String,
+    val featureState: AiAgentFeatureState
 )
 
 private data class AiAgentBranchItem(
@@ -349,6 +356,14 @@ private fun AiWeek3Chat(
     var modelSelectorExpanded by remember { mutableStateOf(false) }
     var modelInput by remember { mutableStateOf(AiAgentApi.DeepSeek.defaultModel) }
     var activeChatId by remember { mutableStateOf<Long?>(null) }
+    val profiles = remember { mutableStateListOf<AiAgentProfileItem>() }
+    var selectedProfileId by remember { mutableStateOf<Long?>(null) }
+    var selectedProfileNameInput by remember { mutableStateOf("") }
+    var newProfileNameInput by remember { mutableStateOf("") }
+    var profileSelectorExpanded by remember { mutableStateOf(false) }
+    var isProfileRenameMode by remember { mutableStateOf(false) }
+    var isProfileCreateMode by remember { mutableStateOf(false) }
+    var isApplyingProfileState by remember { mutableStateOf(false) }
     var chatSessionId by remember { mutableIntStateOf(0) }
     var isLoading by remember { mutableStateOf(false) }
     var isFeaturesPanelVisible by remember { mutableStateOf(false) }
@@ -382,19 +397,106 @@ private fun AiWeek3Chat(
 
     fun loadChatsFromDb(): List<AiAgentChatItem> {
         val result = queries.selectChats().executeAsList().map {
-            AiAgentChatItem(id = it.id, title = it.title)
+            AiAgentChatItem(
+                id = it.id,
+                title = it.title,
+                selectedProfileId = it.selected_profile_id
+            )
         }
         val existingIds = result.map { it.id }.toSet()
         branchingEnabledByChat.keys.toList()
             .filterNot { it in existingIds }
             .forEach { branchingEnabledByChat.remove(it) }
         result.forEach { chat ->
-            val isEnabled = queries.selectFeatureStateByChat(chat.id)
-                .executeAsOneOrNull()
-                ?.is_branching_enabled == 1L
+            val isEnabled = profiles.firstOrNull { it.id == chat.selectedProfileId }
+                ?.featureState
+                ?.isBranchingEnabled
+                ?: false
             branchingEnabledByChat[chat.id] = isEnabled
         }
         return result
+    }
+
+    fun loadProfilesFromDb(): List<AiAgentProfileItem> {
+        return queries.selectProfiles().executeAsList().map { row ->
+            AiAgentProfileItem(
+                id = row.id,
+                name = row.name,
+                featureState = AiAgentFeatureState(
+                    isSystemPromptEnabled = row.is_system_prompt_enabled != 0L,
+                    systemPromptText = row.system_prompt_text,
+                    isSummarizationEnabled = row.is_summarization_enabled != 0L,
+                    summarizeAfterTokensInput = row.summarize_after_tokens,
+                    isSlidingWindowEnabled = row.is_sliding_window_enabled != 0L,
+                    slidingWindowSizeInput = row.sliding_window_size,
+                    isStickyFactsEnabled = row.is_sticky_facts_enabled != 0L,
+                    stickyFactsWindowSizeInput = row.sticky_facts_window_size,
+                    stickyFactsSystemMessage = row.sticky_facts_system_message,
+                    isBranchingEnabled = row.is_branching_enabled != 0L,
+                    showRawHistory = row.show_raw_history != 0L
+                )
+            )
+        }
+    }
+
+    fun refreshProfiles() {
+        profiles.clear()
+        profiles += loadProfilesFromDb()
+    }
+
+    fun applyFeatureState(state: AiAgentFeatureState) {
+        isApplyingProfileState = true
+        isSystemPromptEnabled = state.isSystemPromptEnabled
+        systemPromptText = state.systemPromptText
+        isSummarizationEnabled = state.isSummarizationEnabled
+        summarizeAfterTokensInput = state.summarizeAfterTokensInput
+        isSlidingWindowEnabled = state.isSlidingWindowEnabled
+        slidingWindowSizeInput = state.slidingWindowSizeInput
+        isStickyFactsEnabled = state.isStickyFactsEnabled
+        stickyFactsWindowSizeInput = state.stickyFactsWindowSizeInput
+        stickyFactsSystemMessage = aiAgentNormalizeFactsText(state.stickyFactsSystemMessage)
+        stickyFacts.clear()
+        stickyFacts.putAll(aiAgentFactsMapFromText(stickyFactsSystemMessage))
+        isBranchingEnabled = state.isBranchingEnabled
+        showRawHistory = state.showRawHistory
+        isApplyingProfileState = false
+    }
+
+    fun refreshBranchingForProfile(profileId: Long) {
+        val enabled = profiles.firstOrNull { it.id == profileId }?.featureState?.isBranchingEnabled ?: false
+        chats.filter { it.selectedProfileId == profileId }.forEach { chat ->
+            branchingEnabledByChat[chat.id] = enabled
+        }
+    }
+
+    fun ensureDefaultProfileExists() {
+        if (profiles.isNotEmpty()) return
+        queries.insertProfile(
+            name = "Профиль 1",
+            is_system_prompt_enabled = 0,
+            system_prompt_text = "",
+            is_summarization_enabled = 0,
+            summarize_after_tokens = "10000",
+            is_sliding_window_enabled = 0,
+            sliding_window_size = "12",
+            is_sticky_facts_enabled = 0,
+            sticky_facts_window_size = "12",
+            sticky_facts_system_message = "",
+            is_branching_enabled = 0,
+            show_raw_history = 0
+        )
+        refreshProfiles()
+    }
+
+    fun nextAutoProfileName(): String {
+        var number = 1
+        while (true) {
+            val candidate = "Профиль $number"
+            if (profiles.none { it.name.equals(candidate, ignoreCase = true) }) {
+                return candidate
+            }
+            number++
+        }
     }
 
     fun loadMessagesForChat(chatId: Long) {
@@ -438,39 +540,87 @@ private fun AiWeek3Chat(
     }
 
     fun loadFeatureStateForChat(chatId: Long) {
-        val row = queries.selectFeatureStateByChat(chatId).executeAsOneOrNull()
-        val state = if (row == null) {
-            AiAgentFeatureState()
-        } else {
-            AiAgentFeatureState(
-                isSystemPromptEnabled = row.is_system_prompt_enabled != 0L,
-                systemPromptText = row.system_prompt_text,
-                isSummarizationEnabled = row.is_summarization_enabled != 0L,
-                summarizeAfterTokensInput = row.summarize_after_tokens,
-                isSlidingWindowEnabled = row.is_sliding_window_enabled != 0L,
-                slidingWindowSizeInput = row.sliding_window_size,
-                isStickyFactsEnabled = row.is_sticky_facts_enabled != 0L,
-                stickyFactsWindowSizeInput = row.sticky_facts_window_size,
-                stickyFactsSystemMessage = row.sticky_facts_system_message,
-                isBranchingEnabled = row.is_branching_enabled != 0L,
-                showRawHistory = row.show_raw_history != 0L
-            )
+        val chatRow = queries.selectChatById(chatId).executeAsOneOrNull()
+        var profileId = chatRow?.selected_profile_id
+        if (profileId == null) {
+            val fallbackId = profiles.firstOrNull()?.id ?: return
+            queries.updateChatSelectedProfile(selected_profile_id = fallbackId, id = chatId)
+            profileId = fallbackId
         }
+        val profile = profiles.firstOrNull { it.id == profileId } ?: return
+        selectedProfileId = profile.id
+        selectedProfileNameInput = profile.name
+        applyFeatureState(profile.featureState)
+        branchingEnabledByChat[chatId] = profile.featureState.isBranchingEnabled
+    }
 
-        isSystemPromptEnabled = state.isSystemPromptEnabled
-        systemPromptText = state.systemPromptText
-        isSummarizationEnabled = state.isSummarizationEnabled
-        summarizeAfterTokensInput = state.summarizeAfterTokensInput
-        isSlidingWindowEnabled = state.isSlidingWindowEnabled
-        slidingWindowSizeInput = state.slidingWindowSizeInput
-        isStickyFactsEnabled = state.isStickyFactsEnabled
-        stickyFactsWindowSizeInput = state.stickyFactsWindowSizeInput
-        stickyFactsSystemMessage = aiAgentNormalizeFactsText(state.stickyFactsSystemMessage)
-        stickyFacts.clear()
-        stickyFacts.putAll(aiAgentFactsMapFromText(stickyFactsSystemMessage))
-        isBranchingEnabled = state.isBranchingEnabled
-        branchingEnabledByChat[chatId] = state.isBranchingEnabled
-        showRawHistory = state.showRawHistory
+    fun selectProfileForActiveChat(profileId: Long) {
+        val chatId = activeChatId ?: return
+        val profile = profiles.firstOrNull { it.id == profileId } ?: return
+        queries.updateChatSelectedProfile(selected_profile_id = profile.id, id = chatId)
+        selectedProfileId = profile.id
+        selectedProfileNameInput = profile.name
+        applyFeatureState(profile.featureState)
+        branchingEnabledByChat[chatId] = profile.featureState.isBranchingEnabled
+        val updatedChats = loadChatsFromDb()
+        chats.clear()
+        chats += updatedChats
+    }
+
+    fun createProfile() {
+        val requestedName = newProfileNameInput.trim()
+        val profileName = if (requestedName.isEmpty()) nextAutoProfileName() else requestedName
+        if (profiles.any { it.name.equals(profileName, ignoreCase = true) }) return
+
+        queries.insertProfile(
+            name = profileName,
+            is_system_prompt_enabled = if (isSystemPromptEnabled) 1 else 0,
+            system_prompt_text = systemPromptText,
+            is_summarization_enabled = if (isSummarizationEnabled) 1 else 0,
+            summarize_after_tokens = summarizeAfterTokensInput,
+            is_sliding_window_enabled = if (isSlidingWindowEnabled) 1 else 0,
+            sliding_window_size = slidingWindowSizeInput,
+            is_sticky_facts_enabled = if (isStickyFactsEnabled) 1 else 0,
+            sticky_facts_window_size = stickyFactsWindowSizeInput,
+            sticky_facts_system_message = if (isStickyFactsEnabled) stickyFactsSystemMessage else "",
+            is_branching_enabled = if (isBranchingEnabled) 1 else 0,
+            show_raw_history = if (showRawHistory) 1 else 0
+        )
+        refreshProfiles()
+        newProfileNameInput = ""
+        val created = profiles.lastOrNull() ?: return
+        selectProfileForActiveChat(created.id)
+        isProfileCreateMode = false
+    }
+
+    fun renameSelectedProfile() {
+        val profileId = selectedProfileId ?: return
+        val newName = selectedProfileNameInput.trim()
+        if (newName.isEmpty()) return
+        if (profiles.any { it.id != profileId && it.name.equals(newName, ignoreCase = true) }) return
+        val profile = profiles.firstOrNull { it.id == profileId } ?: return
+        val state = profile.featureState
+        queries.updateProfile(
+            name = newName,
+            is_system_prompt_enabled = if (state.isSystemPromptEnabled) 1 else 0,
+            system_prompt_text = state.systemPromptText,
+            is_summarization_enabled = if (state.isSummarizationEnabled) 1 else 0,
+            summarize_after_tokens = state.summarizeAfterTokensInput,
+            is_sliding_window_enabled = if (state.isSlidingWindowEnabled) 1 else 0,
+            sliding_window_size = state.slidingWindowSizeInput,
+            is_sticky_facts_enabled = if (state.isStickyFactsEnabled) 1 else 0,
+            sticky_facts_window_size = state.stickyFactsWindowSizeInput,
+            sticky_facts_system_message = state.stickyFactsSystemMessage,
+            is_branching_enabled = if (state.isBranchingEnabled) 1 else 0,
+            show_raw_history = if (state.showRawHistory) 1 else 0,
+            id = profileId
+        )
+        refreshProfiles()
+        selectedProfileNameInput = newName
+        val updatedChats = loadChatsFromDb()
+        chats.clear()
+        chats += updatedChats
+        isProfileRenameMode = false
     }
 
     fun loadLongTermMemory() {
@@ -511,9 +661,11 @@ private fun AiWeek3Chat(
     }
 
     fun saveActiveChatFeatureState() {
-        val chatId = activeChatId ?: return
+        val profileId = selectedProfileId ?: return
+        val profileName = profiles.firstOrNull { it.id == profileId }?.name ?: return
         queries.upsertFeatureState(
-            chat_id = chatId,
+            id = profileId,
+            name = profileName,
             is_system_prompt_enabled = if (isSystemPromptEnabled) 1 else 0,
             system_prompt_text = systemPromptText,
             is_summarization_enabled = if (isSummarizationEnabled) 1 else 0,
@@ -526,6 +678,8 @@ private fun AiWeek3Chat(
             is_branching_enabled = if (isBranchingEnabled) 1 else 0,
             show_raw_history = if (showRawHistory) 1 else 0
         )
+        refreshProfiles()
+        refreshBranchingForProfile(profileId)
     }
 
     fun loadBranchesForChat(chatId: Long): SnapshotStateList<AiAgentBranchItem> {
@@ -687,9 +841,11 @@ private fun AiWeek3Chat(
 
     fun createNewChatAndOpen() {
         val title = "Чат ${chats.size + 1}"
+        val profileIdForChat = selectedProfileId ?: profiles.firstOrNull()?.id
         queries.insertChat(
             title = title,
-            created_at = System.currentTimeMillis()
+            created_at = System.currentTimeMillis(),
+            selected_profile_id = profileIdForChat
         )
         val updatedChats = loadChatsFromDb()
         chats.clear()
@@ -716,6 +872,12 @@ private fun AiWeek3Chat(
         stickyFactsSystemMessage = ""
         isBranchingEnabled = false
         selectedBranchNumber = null
+        selectedProfileId = null
+        selectedProfileNameInput = ""
+        newProfileNameInput = ""
+        profileSelectorExpanded = false
+        isProfileRenameMode = false
+        isProfileCreateMode = false
         inputText = TextFieldValue("")
         apiSelectorExpanded = false
         modelSelectorExpanded = false
@@ -1224,6 +1386,8 @@ private fun AiWeek3Chat(
 
     LaunchedEffect(Unit) {
         loadLongTermMemory()
+        refreshProfiles()
+        ensureDefaultProfileExists()
         val storedChats = loadChatsFromDb()
         chats.clear()
         chats += storedChats
@@ -1268,6 +1432,7 @@ private fun AiWeek3Chat(
 
     LaunchedEffect(
         activeChatId,
+        selectedProfileId,
         isSystemPromptEnabled,
         systemPromptText,
         isSummarizationEnabled,
@@ -1280,6 +1445,7 @@ private fun AiWeek3Chat(
         isBranchingEnabled,
         showRawHistory
     ) {
+        if (isApplyingProfileState) return@LaunchedEffect
         saveActiveChatFeatureState()
     }
 
@@ -1292,6 +1458,13 @@ private fun AiWeek3Chat(
     }
 
     val activeChatTitle = chats.firstOrNull { it.id == activeChatId }?.title.orEmpty()
+    val activeProfile = profiles.firstOrNull { it.id == selectedProfileId }
+    val profileNameExists = profiles.any {
+        it.id != selectedProfileId && it.name.equals(selectedProfileNameInput.trim(), ignoreCase = true)
+    }
+    val newProfileNameExists = profiles.any {
+        it.name.equals(newProfileNameInput.trim(), ignoreCase = true)
+    }
     val activeChatTotalTokens = displayMessages
         .asReversed()
         .firstOrNull { it.tokensSpent() > 0 }
@@ -1611,6 +1784,134 @@ private fun AiWeek3Chat(
                     .fillMaxSize(),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                ExposedDropdownMenuBox(
+                    expanded = profileSelectorExpanded,
+                    onExpandedChange = { expanded -> if (!isLoading) profileSelectorExpanded = expanded },
+                    modifier = Modifier.weight(1f)
+                ) {
+                    OutlinedTextField(
+                        value = activeProfile?.name.orEmpty(),
+                        onValueChange = {},
+                        modifier = Modifier
+                            .menuAnchor(
+                                type = ExposedDropdownMenuAnchorType.PrimaryNotEditable,
+                                enabled = !isLoading && activeChatId != null && profiles.isNotEmpty()
+                            )
+                            .fillMaxWidth()
+                            .height(52.dp),
+                        readOnly = true,
+                        enabled = !isLoading && activeChatId != null && profiles.isNotEmpty(),
+                        placeholder = { Text("Профиль", style = MaterialTheme.typography.labelSmall) },
+                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = profileSelectorExpanded) },
+                        singleLine = true,
+                        textStyle = MaterialTheme.typography.labelSmall
+                    )
+                    ExposedDropdownMenu(
+                        expanded = profileSelectorExpanded,
+                        onDismissRequest = { profileSelectorExpanded = false }
+                    ) {
+                        profiles.forEach { profile ->
+                            DropdownMenuItem(
+                                text = { Text(profile.name) },
+                                onClick = {
+                                    selectProfileForActiveChat(profile.id)
+                                    profileSelectorExpanded = false
+                                }
+                            )
+                        }
+                    }
+                }
+                Button(
+                    onClick = {
+                        isProfileRenameMode = true
+                        isProfileCreateMode = false
+                    },
+                    enabled = !isLoading && selectedProfileId != null
+                ) {
+                    Text("Редактировать")
+                }
+                Button(
+                    onClick = {
+                        isProfileCreateMode = true
+                        isProfileRenameMode = false
+                    },
+                    enabled = !isLoading && activeChatId != null
+                ) {
+                    Text("Создать")
+                }
+            }
+
+            if (isProfileRenameMode) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedTextField(
+                        value = selectedProfileNameInput,
+                        onValueChange = { selectedProfileNameInput = it },
+                        modifier = Modifier.weight(1f).height(52.dp),
+                        enabled = !isLoading && selectedProfileId != null,
+                        singleLine = true,
+                        label = { Text("Имя профиля") },
+                        isError = selectedProfileNameInput.trim().isNotEmpty() && profileNameExists,
+                        textStyle = MaterialTheme.typography.labelSmall
+                    )
+                    Button(
+                        onClick = ::renameSelectedProfile,
+                        enabled = !isLoading &&
+                            selectedProfileId != null &&
+                            selectedProfileNameInput.trim().isNotEmpty() &&
+                            !profileNameExists
+                    ) {
+                        Text("Сохранить")
+                    }
+                    TextButton(
+                        onClick = { isProfileRenameMode = false },
+                        enabled = !isLoading
+                    ) {
+                        Text("Отмена")
+                    }
+                }
+            }
+
+            if (isProfileCreateMode) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedTextField(
+                        value = newProfileNameInput,
+                        onValueChange = { newProfileNameInput = it },
+                        modifier = Modifier.weight(1f).height(52.dp),
+                        enabled = !isLoading && activeChatId != null,
+                        singleLine = true,
+                        label = { Text("Новый профиль") },
+                        placeholder = { Text("Пусто = автоимя", style = MaterialTheme.typography.labelSmall) },
+                        isError = newProfileNameInput.trim().isNotEmpty() && newProfileNameExists,
+                        textStyle = MaterialTheme.typography.labelSmall
+                    )
+                    Button(
+                        onClick = ::createProfile,
+                        enabled = !isLoading && activeChatId != null && !newProfileNameExists
+                    ) {
+                        Text("Создать профиль")
+                    }
+                    TextButton(
+                        onClick = {
+                            isProfileCreateMode = false
+                            newProfileNameInput = ""
+                        },
+                        enabled = !isLoading
+                    ) {
+                        Text("Отмена")
+                    }
+                }
+            }
+
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
