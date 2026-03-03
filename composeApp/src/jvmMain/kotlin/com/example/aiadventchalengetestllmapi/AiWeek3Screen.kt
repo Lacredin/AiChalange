@@ -321,41 +321,41 @@ private fun AiAgentMessage.displayParamsInfo(): String =
  * Тема экрана AiWeek3. Меняйте цвета здесь, чтобы изменить оформление всего экрана.
  */
 internal object AiWeek3ScreenTheme {
-    // Основная палитра красных оттенков
-    val primary = Color(0xFFB71C1C)            // Red 900 — основной акцент
+    // Sunset Amber — тёплая янтарная палитра
+    val primary = Color(0xFFE65100)            // Deep Orange 900 — основной акцент
     val onPrimary = Color(0xFFFFFFFF)
-    val primaryContainer = Color(0xFFFFCDD2)   // Red 100 — фон пузырьков пользователя
-    val onPrimaryContainer = Color(0xFF5C0000) // Тёмно-красный — текст пользователя
+    val primaryContainer = Color(0xFFFFE0B2)   // Orange 100 — фон пузырьков пользователя
+    val onPrimaryContainer = Color(0xFF4A1800) // Тёмно-коричневый — текст пользователя
 
-    val secondary = Color(0xFFD32F2F)          // Red 700
+    val secondary = Color(0xFFBF360C)          // Deep Orange 800
     val onSecondary = Color(0xFFFFFFFF)
-    val secondaryContainer = Color(0xFFFFEBEE) // Red 50
-    val onSecondaryContainer = Color(0xFF7F0000)
+    val secondaryContainer = Color(0xFFFFF3E0) // Orange 50
+    val onSecondaryContainer = Color(0xFF3E1000)
 
-    val background = Color(0xFFFFF8F8)         // Тёплый белый с красным оттенком
-    val onBackground = Color(0xFF1A0000)
+    val background = Color(0xFFFFFBF5)         // Кремовый тёплый фон
+    val onBackground = Color(0xFF1A0800)
     val surface = Color(0xFFFFFFFF)
-    val onSurface = Color(0xFF1A0000)
-    val surfaceVariant = Color(0xFFFFEAEA)
-    val onSurfaceVariant = Color(0xFF5C0000)
-    val outline = Color(0xFFEF9A9A)            // Red 200
+    val onSurface = Color(0xFF1A0800)
+    val surfaceVariant = Color(0xFFFFF3E0)     // Orange 50
+    val onSurfaceVariant = Color(0xFF4A1800)
+    val outline = Color(0xFFFFCC80)            // Orange 200
 
     // Пузырьки ответов ассистента
-    val assistantBubble = Color(0xFFFFF0F0)    // Очень светлый розово-красный
-    val onAssistantBubble = Color(0xFF3E0000)  // Тёмно-бордовый
+    val assistantBubble = Color(0xFFFFF8F0)    // Тёплый молочный
+    val onAssistantBubble = Color(0xFF2D0F00)  // Глубокий тёмно-коричневый
 
     // Баннер Sticky Facts
-    val stickyFactsBg = Color(0xFFFFEBEE)      // Red 50
-    val stickyFactsBorder = Color(0xFFEF9A9A)  // Red 200
-    val stickyFactsTitle = Color(0xFF7F0000)   // Тёмно-красный заголовок
-    val stickyFactsText = Color(0xFF1A0000)    // Почти чёрный с красным оттенком
+    val stickyFactsBg = Color(0xFFFFF3E0)      // Orange 50
+    val stickyFactsBorder = Color(0xFFFFCC80)  // Orange 200
+    val stickyFactsTitle = Color(0xFF6D2B00)   // Тёмный янтарь — заголовок
+    val stickyFactsText = Color(0xFF1A0800)    // Почти чёрный с тёплым оттенком
 
     // Разделительные линии между панелями
-    val divider = Color(0xFFFFCDD2)            // Red 100
+    val divider = Color(0xFFFFE0B2)            // Orange 100
 
     // TopAppBar
-    val topBarContainer = Color(0xFFFFEBEE)    // Red 50 — светлая красная шапка
-    val topBarContent = Color(0xFF7F0000)      // Тёмно-красный текст/иконки
+    val topBarContainer = Color(0xFFFFF3E0)    // Orange 50 — светлая янтарная шапка
+    val topBarContent = Color(0xFF6D2B00)      // Тёмный янтарь — текст/иконки
 
     fun colorScheme() = lightColorScheme(
         primary = primary,
