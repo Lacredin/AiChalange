@@ -175,6 +175,7 @@ private enum class AiAgentContextStrategy {
 }
 
 private data class AiAgentFeatureState(
+    val isLongTermMemoryEnabled: Boolean = true,
     val isSystemPromptEnabled: Boolean = false,
     val systemPromptText: String = "",
     val isSummarizationEnabled: Boolean = false,
@@ -423,6 +424,7 @@ private fun AiWeek3Chat(
                 id = row.id,
                 name = row.name,
                 featureState = AiAgentFeatureState(
+                    isLongTermMemoryEnabled = row.is_long_term_memory_enabled != 0L,
                     isSystemPromptEnabled = row.is_system_prompt_enabled != 0L,
                     systemPromptText = row.system_prompt_text,
                     isSummarizationEnabled = row.is_summarization_enabled != 0L,
@@ -446,6 +448,7 @@ private fun AiWeek3Chat(
 
     fun applyFeatureState(state: AiAgentFeatureState) {
         isApplyingProfileState = true
+        isLongTermMemoryEnabled = state.isLongTermMemoryEnabled
         isSystemPromptEnabled = state.isSystemPromptEnabled
         systemPromptText = state.systemPromptText
         isSummarizationEnabled = state.isSummarizationEnabled
@@ -473,6 +476,7 @@ private fun AiWeek3Chat(
         if (profiles.isNotEmpty()) return
         queries.insertProfile(
             name = "Профиль 1",
+            is_long_term_memory_enabled = 1,
             is_system_prompt_enabled = 0,
             system_prompt_text = "",
             is_summarization_enabled = 0,
@@ -497,6 +501,18 @@ private fun AiWeek3Chat(
             }
             number++
         }
+    }
+
+    fun loadLongTermMemoryForProfile(profileId: Long) {
+        val entries = queries.selectMemoryEntriesByProfile(profile_id = profileId).executeAsList().map { row ->
+            LongTermMemoryEntry(
+                id = row.id,
+                key = row.entry_key, value = row.entry_value,
+                createdAt = row.created_at, updatedAt = row.updated_at
+            )
+        }
+        longTermMemory.clear()
+        longTermMemory += entries
     }
 
     fun loadMessagesForChat(chatId: Long) {
@@ -551,6 +567,7 @@ private fun AiWeek3Chat(
         selectedProfileId = profile.id
         selectedProfileNameInput = profile.name
         applyFeatureState(profile.featureState)
+        loadLongTermMemoryForProfile(profile.id)
         branchingEnabledByChat[chatId] = profile.featureState.isBranchingEnabled
     }
 
@@ -561,6 +578,7 @@ private fun AiWeek3Chat(
         selectedProfileId = profile.id
         selectedProfileNameInput = profile.name
         applyFeatureState(profile.featureState)
+        loadLongTermMemoryForProfile(profile.id)
         branchingEnabledByChat[chatId] = profile.featureState.isBranchingEnabled
         val updatedChats = loadChatsFromDb()
         chats.clear()
@@ -574,6 +592,7 @@ private fun AiWeek3Chat(
 
         queries.insertProfile(
             name = profileName,
+            is_long_term_memory_enabled = if (isLongTermMemoryEnabled) 1 else 0,
             is_system_prompt_enabled = if (isSystemPromptEnabled) 1 else 0,
             system_prompt_text = systemPromptText,
             is_summarization_enabled = if (isSummarizationEnabled) 1 else 0,
@@ -602,6 +621,7 @@ private fun AiWeek3Chat(
         val state = profile.featureState
         queries.updateProfile(
             name = newName,
+            is_long_term_memory_enabled = if (state.isLongTermMemoryEnabled) 1 else 0,
             is_system_prompt_enabled = if (state.isSystemPromptEnabled) 1 else 0,
             system_prompt_text = state.systemPromptText,
             is_summarization_enabled = if (state.isSummarizationEnabled) 1 else 0,
@@ -623,32 +643,23 @@ private fun AiWeek3Chat(
         isProfileRenameMode = false
     }
 
-    fun loadLongTermMemory() {
-        val entries = queries.selectAllMemoryEntries().executeAsList().map { row ->
-            LongTermMemoryEntry(
-                id = row.id,
-                key = row.entry_key, value = row.entry_value,
-                createdAt = row.created_at, updatedAt = row.updated_at
-            )
-        }
-        longTermMemory.clear()
-        longTermMemory += entries
-    }
-
     fun insertLongTermEntry(key: String, value: String) {
+        val profileId = selectedProfileId ?: return
         val now = System.currentTimeMillis()
-        queries.insertMemoryEntry(key.trim(), value.trim(), now, now)
-        loadLongTermMemory()
+        queries.insertMemoryEntry(profile_id = profileId, entry_key = key.trim(), entry_value = value.trim(), created_at = now, updated_at = now)
+        loadLongTermMemoryForProfile(profileId)
     }
 
     fun updateLongTermEntry(id: Long, value: String) {
+        val profileId = selectedProfileId ?: return
         queries.updateMemoryEntry(value.trim(), System.currentTimeMillis(), id)
-        loadLongTermMemory()
+        loadLongTermMemoryForProfile(profileId)
     }
 
     fun deleteLongTermEntry(id: Long) {
+        val profileId = selectedProfileId ?: return
         queries.deleteMemoryEntry(id)
-        loadLongTermMemory()
+        loadLongTermMemoryForProfile(profileId)
     }
 
     fun saveAssistantMessageToLongTermMemory(text: String) {
@@ -666,6 +677,7 @@ private fun AiWeek3Chat(
         queries.upsertFeatureState(
             id = profileId,
             name = profileName,
+            is_long_term_memory_enabled = if (isLongTermMemoryEnabled) 1 else 0,
             is_system_prompt_enabled = if (isSystemPromptEnabled) 1 else 0,
             system_prompt_text = systemPromptText,
             is_summarization_enabled = if (isSummarizationEnabled) 1 else 0,
@@ -875,6 +887,8 @@ private fun AiWeek3Chat(
         selectedProfileId = null
         selectedProfileNameInput = ""
         newProfileNameInput = ""
+        isLongTermMemoryEnabled = true
+        longTermMemory.clear()
         profileSelectorExpanded = false
         isProfileRenameMode = false
         isProfileCreateMode = false
@@ -1385,7 +1399,6 @@ private fun AiWeek3Chat(
     }
 
     LaunchedEffect(Unit) {
-        loadLongTermMemory()
         refreshProfiles()
         ensureDefaultProfileExists()
         val storedChats = loadChatsFromDb()
@@ -1433,6 +1446,7 @@ private fun AiWeek3Chat(
     LaunchedEffect(
         activeChatId,
         selectedProfileId,
+        isLongTermMemoryEnabled,
         isSystemPromptEnabled,
         systemPromptText,
         isSummarizationEnabled,
@@ -2169,7 +2183,15 @@ private fun AiWeek3Chat(
                             TextButton(onClick = { memoryEditingId = null; memoryKeyInput = ""; memoryValueInput = ""; isMemoryFormVisible = !isMemoryFormVisible }, enabled = !isLoading) {
                                 Text(if (isMemoryFormVisible && memoryEditingId == null) "Отмена" else "+ Добавить")
                             }
-                            TextButton(onClick = { scope.launch { queries.deleteAllMemoryEntries(); longTermMemory.clear() } }, enabled = longTermMemory.isNotEmpty() && !isLoading) {
+                            TextButton(onClick = {
+                                scope.launch {
+                                    val profileId = selectedProfileId
+                                    if (profileId != null) {
+                                        queries.deleteAllMemoryEntriesByProfile(profile_id = profileId)
+                                    }
+                                    longTermMemory.clear()
+                                }
+                            }, enabled = longTermMemory.isNotEmpty() && !isLoading) {
                                 Text("Очистить")
                             }
                         }

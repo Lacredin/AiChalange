@@ -19,6 +19,7 @@ CREATE TABLE chat_messages (
 CREATE TABLE chat_profiles (
     id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,
+    is_long_term_memory_enabled INTEGER NOT NULL,
     is_system_prompt_enabled INTEGER NOT NULL,
     system_prompt_text TEXT NOT NULL,
     is_summarization_enabled INTEGER NOT NULL,
@@ -46,6 +47,7 @@ CREATE TABLE chat_branch_messages (
 
 CREATE TABLE memory_entries (
     id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    profile_id INTEGER NOT NULL REFERENCES chat_profiles(id) ON DELETE CASCADE,
     entry_key TEXT NOT NULL,
     entry_value TEXT NOT NULL,
     created_at INTEGER NOT NULL,
@@ -110,6 +112,30 @@ upsertFeatureState:
 INSERT OR REPLACE INTO chat_profiles(
     id,
     name,
+    is_long_term_memory_enabled,
+    is_system_prompt_enabled,
+    system_prompt_text,
+    is_summarization_enabled,
+    summarize_after_tokens,
+    is_sliding_window_enabled,
+    sliding_window_size,
+    is_sticky_facts_enabled,
+    sticky_facts_window_size,
+    sticky_facts_system_message,
+    is_branching_enabled,
+    show_raw_history
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+
+selectProfiles:
+SELECT *
+FROM chat_profiles
+ORDER BY id ASC;
+
+insertProfile:
+INSERT INTO chat_profiles(
+    name,
+    is_long_term_memory_enabled,
     is_system_prompt_enabled,
     system_prompt_text,
     is_summarization_enabled,
@@ -124,32 +150,11 @@ INSERT OR REPLACE INTO chat_profiles(
 )
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 
-selectProfiles:
-SELECT *
-FROM chat_profiles
-ORDER BY id ASC;
-
-insertProfile:
-INSERT INTO chat_profiles(
-    name,
-    is_system_prompt_enabled,
-    system_prompt_text,
-    is_summarization_enabled,
-    summarize_after_tokens,
-    is_sliding_window_enabled,
-    sliding_window_size,
-    is_sticky_facts_enabled,
-    sticky_facts_window_size,
-    sticky_facts_system_message,
-    is_branching_enabled,
-    show_raw_history
-)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-
 updateProfile:
 UPDATE chat_profiles
 SET
     name = ?,
+    is_long_term_memory_enabled = ?,
     is_system_prompt_enabled = ?,
     system_prompt_text = ?,
     is_summarization_enabled = ?,
@@ -222,12 +227,15 @@ DELETE FROM chat_branch_messages;
 deleteAllChats:
 DELETE FROM chats;
 
-selectAllMemoryEntries:
-SELECT * FROM memory_entries ORDER BY id ASC;
+selectMemoryEntriesByProfile:
+SELECT *
+FROM memory_entries
+WHERE profile_id = ?
+ORDER BY id ASC;
 
 insertMemoryEntry:
-INSERT INTO memory_entries(entry_key, entry_value, created_at, updated_at)
-VALUES (?, ?, ?, ?);
+INSERT INTO memory_entries(profile_id, entry_key, entry_value, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?);
 
 updateMemoryEntry:
 UPDATE memory_entries SET entry_value = ?, updated_at = ? WHERE id = ?;
@@ -235,5 +243,6 @@ UPDATE memory_entries SET entry_value = ?, updated_at = ? WHERE id = ?;
 deleteMemoryEntry:
 DELETE FROM memory_entries WHERE id = ?;
 
-deleteAllMemoryEntries:
-DELETE FROM memory_entries;
+deleteAllMemoryEntriesByProfile:
+DELETE FROM memory_entries
+WHERE profile_id = ?;
