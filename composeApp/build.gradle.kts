@@ -56,6 +56,10 @@ sqldelight {
             packageName.set("com.example.aiadventchalengetestllmapi.aiweek3db")
             srcDirs.setFrom("src/commonMain/sqldelight_aiweek3")
         }
+        create("AiStateAgentDatabase") {
+            packageName.set("com.example.aiadventchalengetestllmapi.aistateagentdb")
+            srcDirs.setFrom("src/commonMain/sqldelight_aistateagent")
+        }
     }
 }
 

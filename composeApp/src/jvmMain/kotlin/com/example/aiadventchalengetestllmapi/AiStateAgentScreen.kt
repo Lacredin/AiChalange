@@ -1,4 +1,4 @@
-﻿package com.example.aiadventchalengetestllmapi.aiweek3
+﻿package com.example.aiadventchalengetestllmapi.aistateagent
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -66,8 +66,8 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import com.example.aiadventchalengetestllmapi.BuildSecrets
 import com.example.aiadventchalengetestllmapi.RootScreen
-import com.example.aiadventchalengetestllmapi.aiweek3db.AiWeek3DatabaseDriverFactory
-import com.example.aiadventchalengetestllmapi.aiweek3db.createAiWeek3Database
+import com.example.aiadventchalengetestllmapi.aistateagentdb.AiStateAgentDatabaseDriverFactory
+import com.example.aiadventchalengetestllmapi.aistateagentdb.createAiStateAgentDatabase
 import com.example.aiadventchalengetestllmapi.network.DeepSeekApi
 import com.example.aiadventchalengetestllmapi.network.DeepSeekChatRequest
 import com.example.aiadventchalengetestllmapi.network.DeepSeekMessage
@@ -320,7 +320,7 @@ private fun AiAgentMessage.displayParamsInfo(): String =
 /**
  * Тема экрана AiWeek3. Меняйте цвета здесь, чтобы изменить оформление всего экрана.
  */
-internal object AiWeek3ScreenTheme {
+internal object AiStateAgentScreenTheme {
     // Sunset Amber — тёплая янтарная палитра
     val primary = Color(0xFFE65100)            // Deep Orange 900 — основной акцент
     val onPrimary = Color(0xFFFFFFFF)
@@ -380,12 +380,12 @@ internal object AiWeek3ScreenTheme {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AiWeek3Screen(
+fun AiStateAgentScreen(
     currentScreen: RootScreen,
     onSelectScreen: (RootScreen) -> Unit
 ) {
-    MaterialTheme(colorScheme = AiWeek3ScreenTheme.colorScheme()) {
-        AiWeek3Chat(
+    MaterialTheme(colorScheme = AiStateAgentScreenTheme.colorScheme()) {
+        AiStateAgentChat(
             modifier = Modifier.fillMaxSize(),
             currentScreen = currentScreen,
             onSelectScreen = onSelectScreen
@@ -395,7 +395,7 @@ fun AiWeek3Screen(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun AiWeek3Chat(
+private fun AiStateAgentChat(
     modifier: Modifier = Modifier,
     currentScreen: RootScreen,
     onSelectScreen: (RootScreen) -> Unit
@@ -405,7 +405,7 @@ private fun AiWeek3Chat(
     val openAiApi = remember { OpenAiApi() }
     val gigaChatApi = remember { GigaChatApi() }
     val proxyOpenAiApi = remember { ProxyOpenAiApi() }
-    val database = remember { createAiWeek3Database(AiWeek3DatabaseDriverFactory()) }
+    val database = remember { createAiStateAgentDatabase(AiStateAgentDatabaseDriverFactory()) }
     val queries = remember(database) { database.chatHistoryQueries }
 
     val chats = remember { mutableStateListOf<AiAgentChatItem>() }
@@ -1562,7 +1562,7 @@ private fun AiWeek3Chat(
                             } else {
                                 ""
                             }
-                            Text("Ai неделя 3$titleSuffix")
+                            Text("AiStateAgent$titleSuffix")
                         }
                         DropdownMenu(
                             expanded = screensMenuExpanded,
@@ -1635,9 +1635,9 @@ private fun AiWeek3Chat(
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = AiWeek3ScreenTheme.topBarContainer,
-                    titleContentColor = AiWeek3ScreenTheme.topBarContent,
-                    actionIconContentColor = AiWeek3ScreenTheme.topBarContent
+                    containerColor = AiStateAgentScreenTheme.topBarContainer,
+                    titleContentColor = AiStateAgentScreenTheme.topBarContent,
+                    actionIconContentColor = AiStateAgentScreenTheme.topBarContent
                 )
             )
         }
@@ -1868,7 +1868,7 @@ private fun AiWeek3Chat(
                 modifier = Modifier
                     .width(1.dp)
                     .fillMaxSize()
-                    .background(AiWeek3ScreenTheme.divider)
+                    .background(AiStateAgentScreenTheme.divider)
             )
 
             Column(
@@ -2210,7 +2210,7 @@ private fun AiWeek3Chat(
                 modifier = Modifier
                     .width(1.dp)
                     .fillMaxSize()
-                    .background(AiWeek3ScreenTheme.divider)
+                    .background(AiStateAgentScreenTheme.divider)
             )
 
             Column(
@@ -2476,12 +2476,12 @@ private fun AiAgentStickyFactsBanner(systemFacts: String) {
         modifier = Modifier
             .fillMaxWidth()
             .background(
-                color = AiWeek3ScreenTheme.stickyFactsBg,
+                color = AiStateAgentScreenTheme.stickyFactsBg,
                 shape = RoundedCornerShape(12.dp)
             )
             .border(
                 width = 1.dp,
-                color = AiWeek3ScreenTheme.stickyFactsBorder,
+                color = AiStateAgentScreenTheme.stickyFactsBorder,
                 shape = RoundedCornerShape(12.dp)
             )
             .padding(12.dp)
@@ -2490,12 +2490,12 @@ private fun AiAgentStickyFactsBanner(systemFacts: String) {
             Text(
                 text = "Рабочая память • Sticky Facts",
                 style = MaterialTheme.typography.labelSmall,
-                color = AiWeek3ScreenTheme.stickyFactsTitle
+                color = AiStateAgentScreenTheme.stickyFactsTitle
             )
             SelectionContainer {
                 Text(
                     text = systemFacts,
-                    color = AiWeek3ScreenTheme.stickyFactsText
+                    color = AiStateAgentScreenTheme.stickyFactsText
                 )
             }
         }
@@ -2507,8 +2507,8 @@ private fun AiAgentBubble(
     message: AiAgentMessage,
     onSaveToMemory: ((String) -> Unit)? = null
 ) {
-    val assistantBubbleColor = AiWeek3ScreenTheme.assistantBubble
-    val assistantTextColor = AiWeek3ScreenTheme.onAssistantBubble
+    val assistantBubbleColor = AiStateAgentScreenTheme.assistantBubble
+    val assistantTextColor = AiStateAgentScreenTheme.onAssistantBubble
 
     Row(
         modifier = Modifier.fillMaxWidth(),
