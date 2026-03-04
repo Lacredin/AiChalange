@@ -278,6 +278,7 @@ private fun AiStateAgentChat(
     val executionSteps = remember { mutableStateListOf<PlanStepJson>() }
     var executionCurrentStepIndex by remember { mutableStateOf(0) }
     val executionResults = remember { mutableStateMapOf<Int, String>() }
+    var validationPhase by remember { mutableStateOf(1) }
 
     // ─── DB helpers ────────────────────────────────────────────────────────────
 
@@ -535,6 +536,131 @@ private fun AiStateAgentChat(
             .ifEmpty { "Пустой ответ от ${requestApi.label}." }
     }
 
+    suspend fun callValidationApi(promptText: String): String {
+        val requestApi = selectedApi
+        val model = modelInput.trim().ifEmpty { requestApi.defaultModel }
+        val apiKey = aiAgentReadApiKey(requestApi.envVar)
+        if (apiKey.isBlank()) error("Нет API ключа. Проверьте ${requestApi.envVar}")
+        val messages = buildList {
+            buildLtmSystemMessage()?.let { add(it) }
+            add(DeepSeekMessage(role = "user", content = promptText))
+        }
+        val request = DeepSeekChatRequest(
+            model = model,
+            messages = messages,
+            temperature = 0.1,
+            maxTokens = 1500,
+            topP = 0.9,
+            responseFormat = DeepSeekResponseFormat(type = "json_object")
+        )
+        val response = when (requestApi) {
+            AiAgentApi.DeepSeek -> deepSeekApi.createChatCompletion(apiKey = apiKey, request = request)
+            AiAgentApi.OpenAI -> openAiApi.createChatCompletion(apiKey = apiKey, request = request)
+            AiAgentApi.GigaChat -> gigaChatApi.createChatCompletion(accessToken = apiKey, request = request)
+            AiAgentApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletion(apiKey = apiKey, request = request)
+        }
+        return response.choices.firstOrNull()?.message?.content?.trim().orEmpty()
+            .ifEmpty { "Пустой ответ от ${requestApi.label}." }
+    }
+
+    suspend fun runValidationLoop(
+        chatId: Long,
+        checkMessages: SnapshotStateList<AiAgentMessage>,
+        sessionId: Int
+    ) {
+        val plan = try { lenientJson.decodeFromString<PlanJson>(planText) } catch (_: Exception) { PlanJson() }
+        val originalGoal = plan.goal.ifBlank { userRequestText }
+        val validationCriteria = plan.validationCriteria
+            .joinToString("\n") { "- $it" }
+            .ifBlank { "Нет формальных критериев. Оцени по смыслу." }
+        val previousStepsResults = executionResults.entries.sortedBy { it.key }
+            .joinToString("\n") { (id, res) -> "step_id=$id: $res" }
+            .ifEmpty { "Нет промежуточных результатов." }
+
+        // Фаза 1: формальная проверка
+        if (validationPhase == 1) {
+            val phase1UserMsg = AiAgentMessage(
+                text = "Формальная проверка",
+                isUser = true,
+                paramsInfo = "stage=checking|phase=1",
+                stream = AiAgentStream.Raw, epoch = 0,
+                createdAt = System.currentTimeMillis()
+            )
+            checkMessages += phase1UserMsg
+            appendMessageToBranch(chatId, 4, phase1UserMsg)
+
+            val prompt1 = VALIDATION_FORMAL_PROMPT_TEMPLATE
+                .replace("{original_goal}", originalGoal)
+                .replace("{validation_criteria}", validationCriteria)
+                .replace("{execution_results}", executionText)
+
+            val result1 = try {
+                val r = callValidationApi(prompt1)
+                isErrorState = false
+                r
+            } catch (e: Exception) {
+                isErrorState = true
+                "Request failed: ${e.message ?: "unknown error"}"
+            }
+
+            if (sessionId != chatSessionId) { isLoading = false; return }
+
+            val phase1RespMsg = AiAgentMessage(
+                text = result1, isUser = false,
+                paramsInfo = "stage=checking|phase=1",
+                stream = AiAgentStream.Raw, epoch = 0,
+                createdAt = System.currentTimeMillis()
+            )
+            checkMessages += phase1RespMsg
+            appendMessageToBranch(chatId, 4, phase1RespMsg)
+
+            if (isErrorState) { isLoading = false; return }
+
+            validationPhase = 2
+        }
+
+        // Фаза 2: смысловая проверка
+        if (sessionId != chatSessionId) { isLoading = false; return }
+
+        val phase2UserMsg = AiAgentMessage(
+            text = "Смысловая проверка",
+            isUser = true,
+            paramsInfo = "stage=checking|phase=2",
+            stream = AiAgentStream.Raw, epoch = 0,
+            createdAt = System.currentTimeMillis()
+        )
+        checkMessages += phase2UserMsg
+        appendMessageToBranch(chatId, 4, phase2UserMsg)
+
+        val prompt2 = VALIDATION_SEMANTIC_PROMPT_TEMPLATE
+            .replace("{original_goal}", originalGoal)
+            .replace("{task_context}", userRequestText)
+            .replace("{validation_criteria}", validationCriteria)
+            .replace("{execution_results}", executionText)
+            .replace("{previous_steps_results}", previousStepsResults)
+
+        val result2 = try {
+            val r = callValidationApi(prompt2)
+            isErrorState = false
+            r
+        } catch (e: Exception) {
+            isErrorState = true
+            "Request failed: ${e.message ?: "unknown error"}"
+        }
+
+        if (sessionId != chatSessionId) { isLoading = false; return }
+
+        val phase2RespMsg = AiAgentMessage(
+            text = result2, isUser = false,
+            paramsInfo = "stage=checking|phase=2",
+            stream = AiAgentStream.Raw, epoch = 0,
+            createdAt = System.currentTimeMillis()
+        )
+        checkMessages += phase2RespMsg
+        appendMessageToBranch(chatId, 4, phase2RespMsg)
+        isLoading = false
+    }
+
     suspend fun executeStepsLoop(
         chatId: Long,
         execMessages: SnapshotStateList<AiAgentMessage>,
@@ -731,6 +857,7 @@ private fun AiStateAgentChat(
         val chatId = activeChatId ?: return
         if (isLoading) return
 
+        validationPhase = 1
         val checkMessages = createStateBranch(chatId, 4, "Проверка")
         selectedBranchNumber = 4
         agentState = AgentState.Checking
@@ -738,35 +865,7 @@ private fun AiStateAgentChat(
         scope.launch {
             val sessionId = chatSessionId
             isLoading = true
-
-            val checkUserText = "Проверь реализацию плана. План:\n$planText\nРеализация:\n$executionText\nОтветь предельно кратко ошибки есть или нет"
-            val checkUserMsg = AiAgentMessage(
-                text = checkUserText, isUser = true,
-                paramsInfo = "stage=checking", stream = AiAgentStream.Raw, epoch = 0,
-                createdAt = System.currentTimeMillis()
-            )
-            checkMessages += checkUserMsg
-            appendMessageToBranch(chatId, 4, checkUserMsg)
-
-            val result = try {
-                val r = callApi(checkUserText)
-                isErrorState = false
-                r
-            } catch (e: Exception) {
-                isErrorState = true
-                "Request failed: ${e.message ?: "unknown error"}"
-            }
-
-            if (sessionId != chatSessionId) { isLoading = false; return@launch }
-
-            val checkRespMsg = AiAgentMessage(
-                text = result, isUser = false,
-                paramsInfo = "stage=checking", stream = AiAgentStream.Raw, epoch = 0,
-                createdAt = System.currentTimeMillis()
-            )
-            checkMessages += checkRespMsg
-            appendMessageToBranch(chatId, 4, checkRespMsg)
-            isLoading = false
+            runValidationLoop(chatId, checkMessages, sessionId)
         }
     }
 
@@ -890,24 +989,7 @@ private fun AiStateAgentChat(
         scope.launch {
             val sessionId = chatSessionId
             isLoading = true
-            val checkUserText = "Проверь реализацию плана. План:\n$planText\nРеализация:\n$executionText\nОтветь предельно кратко ошибки есть или нет"
-            val result = try {
-                val r = callApi(checkUserText)
-                isErrorState = false
-                r
-            } catch (e: Exception) {
-                isErrorState = true
-                "Request failed: ${e.message ?: "unknown error"}"
-            }
-            if (sessionId != chatSessionId) { isLoading = false; return@launch }
-            val msg = AiAgentMessage(
-                text = result, isUser = false,
-                paramsInfo = "stage=checking|retry", stream = AiAgentStream.Raw, epoch = 0,
-                createdAt = System.currentTimeMillis()
-            )
-            checkMessages += msg
-            appendMessageToBranch(chatId, 4, msg)
-            isLoading = false
+            runValidationLoop(chatId, checkMessages, sessionId)
         }
     }
 
@@ -931,6 +1013,7 @@ private fun AiStateAgentChat(
         executionSteps.clear()
         executionCurrentStepIndex = 0
         executionResults.clear()
+        validationPhase = 1
         apiSelectorExpanded = false
         modelSelectorExpanded = false
     }
