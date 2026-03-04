@@ -72,6 +72,7 @@ import com.example.aiadventchalengetestllmapi.network.DeepSeekResponseFormat
 import com.example.aiadventchalengetestllmapi.network.GigaChatApi
 import com.example.aiadventchalengetestllmapi.network.OpenAiApi
 import com.example.aiadventchalengetestllmapi.network.ProxyOpenAiApi
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 
@@ -279,6 +280,7 @@ private fun AiStateAgentChat(
     var executionCurrentStepIndex by remember { mutableStateOf(0) }
     val executionResults = remember { mutableStateMapOf<Int, String>() }
     var validationPhase by remember { mutableStateOf(1) }
+    var isPaused by remember { mutableStateOf(false) }
 
     // ─── DB helpers ────────────────────────────────────────────────────────────
 
@@ -536,6 +538,14 @@ private fun AiStateAgentChat(
             .ifEmpty { "Пустой ответ от ${requestApi.label}." }
     }
 
+    suspend fun awaitUnpaused(sessionId: Int): Boolean {
+        while (isPaused) {
+            delay(150)
+            if (sessionId != chatSessionId) return false
+        }
+        return sessionId == chatSessionId
+    }
+
     suspend fun callValidationApi(promptText: String): String {
         val requestApi = selectedApi
         val model = modelInput.trim().ifEmpty { requestApi.defaultModel }
@@ -579,6 +589,7 @@ private fun AiStateAgentChat(
 
         // Фаза 1: формальная проверка
         if (validationPhase == 1) {
+            if (!awaitUnpaused(sessionId)) { isLoading = false; return }
             val phase1UserMsg = AiAgentMessage(
                 text = "Формальная проверка",
                 isUser = true,
@@ -620,7 +631,7 @@ private fun AiStateAgentChat(
         }
 
         // Фаза 2: смысловая проверка
-        if (sessionId != chatSessionId) { isLoading = false; return }
+        if (!awaitUnpaused(sessionId)) { isLoading = false; return }
 
         val phase2UserMsg = AiAgentMessage(
             text = "Смысловая проверка",
@@ -689,7 +700,7 @@ private fun AiStateAgentChat(
         }
 
         while (executionCurrentStepIndex < executionSteps.size) {
-            if (sessionId != chatSessionId) { isLoading = false; return }
+            if (!awaitUnpaused(sessionId)) { isLoading = false; return }
 
             val step = executionSteps[executionCurrentStepIndex]
             val previousResultsFormatted = if (executionResults.isEmpty()) {
@@ -1014,6 +1025,7 @@ private fun AiStateAgentChat(
         executionCurrentStepIndex = 0
         executionResults.clear()
         validationPhase = 1
+        isPaused = false
         apiSelectorExpanded = false
         modelSelectorExpanded = false
     }
@@ -1441,6 +1453,26 @@ private fun AiStateAgentChat(
 
                 // State machine action area
                 when {
+                    (agentState == AgentState.Execution || agentState == AgentState.Checking) && isLoading -> {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                if (isPaused) "Пауза" else
+                                    if (agentState == AgentState.Execution) "Выполнение шагов..."
+                                    else "Валидация...",
+                                modifier = Modifier.weight(1f),
+                                color = if (isPaused) MaterialTheme.colorScheme.primary
+                                        else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                                style = MaterialTheme.typography.labelMedium
+                            )
+                            Button(onClick = { isPaused = !isPaused }) {
+                                Text(if (isPaused) "Продолжить" else "Пауза")
+                            }
+                        }
+                    }
                     agentState == AgentState.Planning && !isLoading -> {
                         Column(
                             modifier = Modifier.fillMaxWidth(),
