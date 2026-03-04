@@ -271,6 +271,8 @@ private fun AiStateAgentChat(
     var planText by remember { mutableStateOf("") }
     var executionText by remember { mutableStateOf("") }
     var isErrorState by remember { mutableStateOf(false) }
+    var planEditInput by remember { mutableStateOf(TextFieldValue("")) }
+    var lastPlanEditText by remember { mutableStateOf("") }
 
     // ─── DB helpers ────────────────────────────────────────────────────────────
 
@@ -414,6 +416,38 @@ private fun AiStateAgentChat(
         val apiKey = aiAgentReadApiKey(requestApi.envVar)
         if (apiKey.isBlank()) error("Нет API ключа. Проверьте ${requestApi.envVar}")
         val promptText = PLANNING_PROMPT_TEMPLATE.replace("{user_query}", userQuery)
+        val messages = buildList {
+            buildLtmSystemMessage()?.let { add(it) }
+            add(DeepSeekMessage(role = "user", content = promptText))
+        }
+        val request = DeepSeekChatRequest(
+            model = model,
+            messages = messages,
+            temperature = 0.1,
+            maxTokens = 2000,
+            topP = 0.9,
+            frequencyPenalty = 0.0,
+            presencePenalty = 0.0,
+            responseFormat = DeepSeekResponseFormat(type = "json_object")
+        )
+        val response = when (requestApi) {
+            AiAgentApi.DeepSeek -> deepSeekApi.createChatCompletion(apiKey = apiKey, request = request)
+            AiAgentApi.OpenAI -> openAiApi.createChatCompletion(apiKey = apiKey, request = request)
+            AiAgentApi.GigaChat -> gigaChatApi.createChatCompletion(accessToken = apiKey, request = request)
+            AiAgentApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletion(apiKey = apiKey, request = request)
+        }
+        return response.choices.firstOrNull()?.message?.content?.trim().orEmpty()
+            .ifEmpty { "Пустой ответ от ${requestApi.label}." }
+    }
+
+    suspend fun callPlanEditApi(originalPlanJson: String, userEditText: String): String {
+        val requestApi = selectedApi
+        val model = modelInput.trim().ifEmpty { requestApi.defaultModel }
+        val apiKey = aiAgentReadApiKey(requestApi.envVar)
+        if (apiKey.isBlank()) error("Нет API ключа. Проверьте ${requestApi.envVar}")
+        val promptText = PLAN_EDIT_PROMPT_TEMPLATE
+            .replace("{original_plan_json}", originalPlanJson)
+            .replace("{user_edit_text}", userEditText)
         val messages = buildList {
             buildLtmSystemMessage()?.let { add(it) }
             add(DeepSeekMessage(role = "user", content = promptText))
@@ -633,6 +667,51 @@ private fun AiStateAgentChat(
         agentState = AgentState.Done
     }
 
+    // ─── Plan edit ─────────────────────────────────────────────────────────────
+
+    fun sendPlanEdit() {
+        val chatId = activeChatId ?: return
+        val editText = planEditInput.text.trim()
+        if (editText.isEmpty() || isLoading) return
+        val planningMessages = branchesByChat[chatId]?.firstOrNull { it.number == 2 }?.messages ?: return
+
+        lastPlanEditText = editText
+        planEditInput = TextFieldValue("")
+
+        scope.launch {
+            val sessionId = chatSessionId
+            isLoading = true
+
+            val userEditMsg = AiAgentMessage(
+                text = editText, isUser = true,
+                paramsInfo = "stage=planning|edit", stream = AiAgentStream.Raw, epoch = 0,
+                createdAt = System.currentTimeMillis()
+            )
+            planningMessages += userEditMsg
+            appendMessageToBranch(chatId, 2, userEditMsg)
+
+            val originalPlan = planText
+            val result = try {
+                val r = callPlanEditApi(originalPlan, editText)
+                isErrorState = false
+                r
+            } catch (e: Exception) {
+                isErrorState = true
+                "Request failed: ${e.message ?: "unknown error"}"
+            }
+            if (sessionId != chatSessionId) { isLoading = false; return@launch }
+            if (!isErrorState) planText = result
+            val respMsg = AiAgentMessage(
+                text = result, isUser = false,
+                paramsInfo = "stage=planning|edit", stream = AiAgentStream.Raw, epoch = 0,
+                createdAt = System.currentTimeMillis()
+            )
+            planningMessages += respMsg
+            appendMessageToBranch(chatId, 2, respMsg)
+            isLoading = false
+        }
+    }
+
     // ─── Retry helpers ─────────────────────────────────────────────────────────
 
     fun retryPlanning() {
@@ -642,19 +721,27 @@ private fun AiStateAgentChat(
         scope.launch {
             val sessionId = chatSessionId
             isLoading = true
-            val result = try {
-                val r = callPlanningApi(userRequestText)
+            // повторяем тот же тип вызова, что провалился последним
+            val (result, paramsInfo) = try {
+                val r = if (lastPlanEditText.isNotEmpty()) {
+                    callPlanEditApi(planText, lastPlanEditText)
+                } else {
+                    callPlanningApi(userRequestText)
+                }
                 isErrorState = false
-                r
+                Pair(r, if (lastPlanEditText.isNotEmpty()) "stage=planning|edit|retry" else "stage=planning|retry")
             } catch (e: Exception) {
                 isErrorState = true
-                "Request failed: ${e.message ?: "unknown error"}"
+                Pair(
+                    "Request failed: ${e.message ?: "unknown error"}",
+                    if (lastPlanEditText.isNotEmpty()) "stage=planning|edit|retry" else "stage=planning|retry"
+                )
             }
             if (sessionId != chatSessionId) { isLoading = false; return@launch }
-            planText = result
+            if (!isErrorState) planText = result
             val msg = AiAgentMessage(
                 text = result, isUser = false,
-                paramsInfo = "stage=planning|retry", stream = AiAgentStream.Raw, epoch = 0,
+                paramsInfo = paramsInfo, stream = AiAgentStream.Raw, epoch = 0,
                 createdAt = System.currentTimeMillis()
             )
             planningMessages += msg
@@ -735,6 +822,8 @@ private fun AiStateAgentChat(
         executionText = ""
         branchNames.clear()
         inputText = TextFieldValue("")
+        planEditInput = TextFieldValue("")
+        lastPlanEditText = ""
         apiSelectorExpanded = false
         modelSelectorExpanded = false
     }
@@ -1163,20 +1252,62 @@ private fun AiStateAgentChat(
                 // State machine action area
                 when {
                     agentState == AgentState.Planning && !isLoading -> {
-                        Row(
-                            modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        Column(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
-                            Text(
-                                if (isErrorState) "Ошибка при планировании" else "Устраивает план?",
-                                modifier = Modifier.weight(1f),
-                                color = if (isErrorState) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
-                            )
-                            if (isErrorState) {
-                                Button(onClick = ::retryPlanning) { Text("Повторить") }
-                            } else {
-                                Button(onClick = ::onPlanApproved) { Text("Да") }
+                            // поле редактирования плана
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.Bottom,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                OutlinedTextField(
+                                    value = planEditInput,
+                                    onValueChange = { planEditInput = it },
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .onPreviewKeyEvent { keyEvent ->
+                                            if (keyEvent.type != KeyEventType.KeyDown || keyEvent.key != Key.Enter) {
+                                                return@onPreviewKeyEvent false
+                                            }
+                                            if (keyEvent.isAltPressed) {
+                                                val start = planEditInput.selection.min
+                                                val end = planEditInput.selection.max
+                                                planEditInput = planEditInput.copy(
+                                                    text = planEditInput.text.replaceRange(start, end, "\n"),
+                                                    selection = TextRange(start + 1)
+                                                )
+                                                return@onPreviewKeyEvent true
+                                            }
+                                            sendPlanEdit()
+                                            true
+                                        },
+                                    label = { Text("Скорректировать план") },
+                                    maxLines = 4
+                                )
+                                Button(
+                                    onClick = ::sendPlanEdit,
+                                    enabled = planEditInput.text.isNotBlank()
+                                ) { Text("Отправить") }
+                            }
+                            // строка подтверждения / ошибки
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text(
+                                    if (isErrorState) "Ошибка при планировании" else "Устраивает план?",
+                                    modifier = Modifier.weight(1f),
+                                    color = if (isErrorState) MaterialTheme.colorScheme.error
+                                            else MaterialTheme.colorScheme.onSurface
+                                )
+                                if (isErrorState) {
+                                    Button(onClick = ::retryPlanning) { Text("Повторить") }
+                                } else {
+                                    Button(onClick = ::onPlanApproved) { Text("Да") }
+                                }
                             }
                         }
                     }
