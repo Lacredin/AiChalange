@@ -174,7 +174,9 @@ internal object AiStateAgentScreenTheme {
     val surfaceVariant = Color(0xFFFFF3E0)
     val onSurfaceVariant = Color(0xFF4A1800)
     val outline = Color(0xFFFFCC80)
-    val assistantBubble = Color(0xFFFFF8F0)
+    val userBubble = Color(0xFFC47A52)
+    val onUserBubble = Color(0xFFFFFFFF)
+    val assistantBubble = Color(0xFFE2C9A8)
     val onAssistantBubble = Color(0xFF2D0F00)
     val divider = Color(0xFFFFE0B2)
     val topBarContainer = Color(0xFFFFF3E0)
@@ -1357,6 +1359,8 @@ private fun AiAgentBubble(
     message: AiAgentMessage,
     onSaveToMemory: ((String) -> Unit)? = null
 ) {
+    val userBubbleColor = AiStateAgentScreenTheme.userBubble
+    val userTextColor = AiStateAgentScreenTheme.onUserBubble
     val assistantBubbleColor = AiStateAgentScreenTheme.assistantBubble
     val assistantTextColor = AiStateAgentScreenTheme.onAssistantBubble
 
@@ -1368,7 +1372,7 @@ private fun AiAgentBubble(
             modifier = Modifier
                 .fillMaxWidth(0.8f)
                 .background(
-                    color = if (message.isUser) MaterialTheme.colorScheme.primaryContainer else assistantBubbleColor,
+                    color = if (message.isUser) userBubbleColor else assistantBubbleColor,
                     shape = RoundedCornerShape(16.dp)
                 )
                 .padding(12.dp)
@@ -1377,13 +1381,13 @@ private fun AiAgentBubble(
                 SelectionContainer {
                     Text(
                         text = message.text,
-                        color = if (message.isUser) MaterialTheme.colorScheme.onPrimaryContainer else assistantTextColor
+                        color = if (message.isUser) userTextColor else assistantTextColor
                     )
                 }
                 Text(
                     text = message.displayParamsInfo(),
                     style = MaterialTheme.typography.labelSmall,
-                    color = if (message.isUser) MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
+                    color = if (message.isUser) userTextColor.copy(alpha = 0.7f)
                             else assistantTextColor.copy(alpha = 0.7f)
                 )
                 if (!message.isUser && onSaveToMemory != null) {
