@@ -68,6 +68,7 @@ import com.example.aiadventchalengetestllmapi.aistateagentdb.createAiStateAgentD
 import com.example.aiadventchalengetestllmapi.network.DeepSeekApi
 import com.example.aiadventchalengetestllmapi.network.DeepSeekChatRequest
 import com.example.aiadventchalengetestllmapi.network.DeepSeekMessage
+import com.example.aiadventchalengetestllmapi.network.DeepSeekResponseFormat
 import com.example.aiadventchalengetestllmapi.network.GigaChatApi
 import com.example.aiadventchalengetestllmapi.network.OpenAiApi
 import com.example.aiadventchalengetestllmapi.network.ProxyOpenAiApi
@@ -407,6 +408,36 @@ private fun AiStateAgentChat(
         return messages
     }
 
+    suspend fun callPlanningApi(userQuery: String): String {
+        val requestApi = selectedApi
+        val model = modelInput.trim().ifEmpty { requestApi.defaultModel }
+        val apiKey = aiAgentReadApiKey(requestApi.envVar)
+        if (apiKey.isBlank()) error("Нет API ключа. Проверьте ${requestApi.envVar}")
+        val promptText = PLANNING_PROMPT_TEMPLATE.replace("{user_query}", userQuery)
+        val messages = buildList {
+            buildLtmSystemMessage()?.let { add(it) }
+            add(DeepSeekMessage(role = "user", content = promptText))
+        }
+        val request = DeepSeekChatRequest(
+            model = model,
+            messages = messages,
+            temperature = 0.1,
+            maxTokens = 2000,
+            topP = 0.9,
+            frequencyPenalty = 0.0,
+            presencePenalty = 0.0,
+            responseFormat = DeepSeekResponseFormat(type = "json_object")
+        )
+        val response = when (requestApi) {
+            AiAgentApi.DeepSeek -> deepSeekApi.createChatCompletion(apiKey = apiKey, request = request)
+            AiAgentApi.OpenAI -> openAiApi.createChatCompletion(apiKey = apiKey, request = request)
+            AiAgentApi.GigaChat -> gigaChatApi.createChatCompletion(accessToken = apiKey, request = request)
+            AiAgentApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletion(apiKey = apiKey, request = request)
+        }
+        return response.choices.firstOrNull()?.message?.content?.trim().orEmpty()
+            .ifEmpty { "Пустой ответ от ${requestApi.label}." }
+    }
+
     suspend fun callApi(userMessageText: String): String {
         val requestApi = selectedApi
         val model = modelInput.trim().ifEmpty { requestApi.defaultModel }
@@ -465,9 +496,8 @@ private fun AiStateAgentChat(
             val sessionId = chatSessionId
             isLoading = true
 
-            val planUserText = "Составь поэтапный план для решения этого запроса:\n$trimmed"
             val planUserMsg = AiAgentMessage(
-                text = planUserText, isUser = true,
+                text = trimmed, isUser = true,
                 paramsInfo = "stage=planning", stream = AiAgentStream.Raw, epoch = 0,
                 createdAt = System.currentTimeMillis()
             )
@@ -475,7 +505,7 @@ private fun AiStateAgentChat(
             appendMessageToBranch(chatId, 2, planUserMsg)
 
             val result = try {
-                val r = callApi(planUserText)
+                val r = callPlanningApi(trimmed)
                 isErrorState = false
                 r
             } catch (e: Exception) {
@@ -612,9 +642,8 @@ private fun AiStateAgentChat(
         scope.launch {
             val sessionId = chatSessionId
             isLoading = true
-            val planUserText = "Составь поэтапный план для решения этого запроса:\n$userRequestText"
             val result = try {
-                val r = callApi(planUserText)
+                val r = callPlanningApi(userRequestText)
                 isErrorState = false
                 r
             } catch (e: Exception) {

@@ -39,8 +39,13 @@ data class DeepSeekChatRequest(
     val presencePenalty: Double? = null,
     @SerialName("frequency_penalty")
     val frequencyPenalty: Double? = null,
-    val stop: List<String>? = null
+    val stop: List<String>? = null,
+    @SerialName("response_format")
+    val responseFormat: DeepSeekResponseFormat? = null
 )
+
+@Serializable
+data class DeepSeekResponseFormat(val type: String)
 
 @Serializable
 data class DeepSeekMessage(
