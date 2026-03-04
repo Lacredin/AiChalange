@@ -267,6 +267,7 @@ private fun AiStateAgentChat(
     var userRequestText by remember { mutableStateOf("") }
     var planText by remember { mutableStateOf("") }
     var executionText by remember { mutableStateOf("") }
+    var isErrorState by remember { mutableStateOf(false) }
 
     // ─── DB helpers ────────────────────────────────────────────────────────────
 
@@ -472,8 +473,11 @@ private fun AiStateAgentChat(
             appendMessageToBranch(chatId, 2, planUserMsg)
 
             val result = try {
-                callApi(planUserText)
+                val r = callApi(planUserText)
+                isErrorState = false
+                r
             } catch (e: Exception) {
+                isErrorState = true
                 "Request failed: ${e.message ?: "unknown error"}"
             }
 
@@ -513,8 +517,11 @@ private fun AiStateAgentChat(
             appendMessageToBranch(chatId, 3, execUserMsg)
 
             val result = try {
-                callApi(execUserText)
+                val r = callApi(execUserText)
+                isErrorState = false
+                r
             } catch (e: Exception) {
+                isErrorState = true
                 "Request failed: ${e.message ?: "unknown error"}"
             }
 
@@ -554,8 +561,11 @@ private fun AiStateAgentChat(
             appendMessageToBranch(chatId, 4, checkUserMsg)
 
             val result = try {
-                callApi(checkUserText)
+                val r = callApi(checkUserText)
+                isErrorState = false
+                r
             } catch (e: Exception) {
+                isErrorState = true
                 "Request failed: ${e.message ?: "unknown error"}"
             }
 
@@ -591,11 +601,100 @@ private fun AiStateAgentChat(
         agentState = AgentState.Done
     }
 
+    // ─── Retry helpers ─────────────────────────────────────────────────────────
+
+    fun retryPlanning() {
+        val chatId = activeChatId ?: return
+        if (isLoading) return
+        val planningMessages = branchesByChat[chatId]?.firstOrNull { it.number == 2 }?.messages ?: return
+        scope.launch {
+            val sessionId = chatSessionId
+            isLoading = true
+            val planUserText = "Составь поэтапный план для решения этого запроса:\n$userRequestText"
+            val result = try {
+                val r = callApi(planUserText)
+                isErrorState = false
+                r
+            } catch (e: Exception) {
+                isErrorState = true
+                "Request failed: ${e.message ?: "unknown error"}"
+            }
+            if (sessionId != chatSessionId) { isLoading = false; return@launch }
+            planText = result
+            val msg = AiAgentMessage(
+                text = result, isUser = false,
+                paramsInfo = "stage=planning|retry", stream = AiAgentStream.Raw, epoch = 0,
+                createdAt = System.currentTimeMillis()
+            )
+            planningMessages += msg
+            appendMessageToBranch(chatId, 2, msg)
+            isLoading = false
+        }
+    }
+
+    fun retryExecution() {
+        val chatId = activeChatId ?: return
+        if (isLoading) return
+        val execMessages = branchesByChat[chatId]?.firstOrNull { it.number == 3 }?.messages ?: return
+        scope.launch {
+            val sessionId = chatSessionId
+            isLoading = true
+            val execUserText = "Выполни всё по плану:\n$planText"
+            val result = try {
+                val r = callApi(execUserText)
+                isErrorState = false
+                r
+            } catch (e: Exception) {
+                isErrorState = true
+                "Request failed: ${e.message ?: "unknown error"}"
+            }
+            if (sessionId != chatSessionId) { isLoading = false; return@launch }
+            executionText = result
+            val msg = AiAgentMessage(
+                text = result, isUser = false,
+                paramsInfo = "stage=execution|retry", stream = AiAgentStream.Raw, epoch = 0,
+                createdAt = System.currentTimeMillis()
+            )
+            execMessages += msg
+            appendMessageToBranch(chatId, 3, msg)
+            isLoading = false
+        }
+    }
+
+    fun retryChecking() {
+        val chatId = activeChatId ?: return
+        if (isLoading) return
+        val checkMessages = branchesByChat[chatId]?.firstOrNull { it.number == 4 }?.messages ?: return
+        scope.launch {
+            val sessionId = chatSessionId
+            isLoading = true
+            val checkUserText = "Проверь реализацию плана. План:\n$planText\nРеализация:\n$executionText\nОтветь предельно кратко ошибки есть или нет"
+            val result = try {
+                val r = callApi(checkUserText)
+                isErrorState = false
+                r
+            } catch (e: Exception) {
+                isErrorState = true
+                "Request failed: ${e.message ?: "unknown error"}"
+            }
+            if (sessionId != chatSessionId) { isLoading = false; return@launch }
+            val msg = AiAgentMessage(
+                text = result, isUser = false,
+                paramsInfo = "stage=checking|retry", stream = AiAgentStream.Raw, epoch = 0,
+                createdAt = System.currentTimeMillis()
+            )
+            checkMessages += msg
+            appendMessageToBranch(chatId, 4, msg)
+            isLoading = false
+        }
+    }
+
     // ─── Chat management ───────────────────────────────────────────────────────
 
     fun clearChatSelection() {
         chatSessionId++
         isLoading = false
+        isErrorState = false
         activeChatId = null
         isBranchingEnabled = false
         selectedBranchNumber = null
@@ -1038,24 +1137,54 @@ private fun AiStateAgentChat(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Text("Устраивает план?", modifier = Modifier.weight(1f))
-                            Button(onClick = ::onPlanApproved) { Text("Да") }
+                            Text(
+                                if (isErrorState) "Ошибка при планировании" else "Устраивает план?",
+                                modifier = Modifier.weight(1f),
+                                color = if (isErrorState) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
+                            )
+                            if (isErrorState) {
+                                Button(onClick = ::retryPlanning) { Text("Повторить") }
+                            } else {
+                                Button(onClick = ::onPlanApproved) { Text("Да") }
+                            }
                         }
                     }
                     agentState == AgentState.Execution && !isLoading -> {
                         Row(
                             modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp),
-                            horizontalArrangement = Arrangement.End
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Button(onClick = ::onExecutionDone) { Text("Дальше") }
+                            if (isErrorState) {
+                                Text(
+                                    "Ошибка при выполнении",
+                                    modifier = Modifier.weight(1f),
+                                    color = MaterialTheme.colorScheme.error
+                                )
+                                Button(onClick = ::retryExecution) { Text("Повторить") }
+                            } else {
+                                Box(modifier = Modifier.weight(1f))
+                                Button(onClick = ::onExecutionDone) { Text("Дальше") }
+                            }
                         }
                     }
                     agentState == AgentState.Checking && !isLoading -> {
                         Row(
                             modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp),
-                            horizontalArrangement = Arrangement.End
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Button(onClick = ::onCheckingDone) { Text("Дальше") }
+                            if (isErrorState) {
+                                Text(
+                                    "Ошибка при проверке",
+                                    modifier = Modifier.weight(1f),
+                                    color = MaterialTheme.colorScheme.error
+                                )
+                                Button(onClick = ::retryChecking) { Text("Повторить") }
+                            } else {
+                                Box(modifier = Modifier.weight(1f))
+                                Button(onClick = ::onCheckingDone) { Text("Дальше") }
+                            }
                         }
                     }
                     agentState == AgentState.Done -> {
