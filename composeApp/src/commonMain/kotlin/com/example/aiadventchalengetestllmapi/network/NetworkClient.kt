@@ -11,9 +11,9 @@ import io.ktor.serialization.kotlinx.json.json
 import kotlinx.serialization.json.Json
 
 object NetworkClient {
-    private const val REQUEST_TIMEOUT_MS = 120_000L
+    private const val REQUEST_TIMEOUT_MS = 300_000L
     private const val CONNECT_TIMEOUT_MS = 30_000L
-    private const val SOCKET_TIMEOUT_MS = 120_000L
+    private const val SOCKET_TIMEOUT_MS = 300_000L
 
     val httpClient: HttpClient by lazy {
         HttpClient(provideHttpClientEngine()) {
