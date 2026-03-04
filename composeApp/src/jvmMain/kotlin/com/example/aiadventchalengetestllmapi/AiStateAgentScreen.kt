@@ -73,9 +73,11 @@ import com.example.aiadventchalengetestllmapi.network.GigaChatApi
 import com.example.aiadventchalengetestllmapi.network.OpenAiApi
 import com.example.aiadventchalengetestllmapi.network.ProxyOpenAiApi
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.Json
 
 private val streamStripRegex = Regex("""\s*\|\s*stream=(real|raw)""")
 private val epochStripRegex = Regex("""\s*\|\s*epoch=\d+""")
+private val lenientJson = Json { ignoreUnknownKeys = true }
 
 private enum class AiAgentApi(
     val label: String,
@@ -273,6 +275,9 @@ private fun AiStateAgentChat(
     var isErrorState by remember { mutableStateOf(false) }
     var planEditInput by remember { mutableStateOf(TextFieldValue("")) }
     var lastPlanEditText by remember { mutableStateOf("") }
+    val executionSteps = remember { mutableStateListOf<PlanStepJson>() }
+    var executionCurrentStepIndex by remember { mutableStateOf(0) }
+    val executionResults = remember { mutableStateMapOf<Int, String>() }
 
     // ─── DB helpers ────────────────────────────────────────────────────────────
 
@@ -492,6 +497,139 @@ private fun AiStateAgentChat(
             .ifEmpty { "Пустой ответ от ${requestApi.label}." }
     }
 
+    suspend fun callExecutionStepApi(
+        taskContext: String,
+        stepId: Int,
+        stepDescription: String,
+        previousResultsFormatted: String
+    ): String {
+        val requestApi = selectedApi
+        val model = modelInput.trim().ifEmpty { requestApi.defaultModel }
+        val apiKey = aiAgentReadApiKey(requestApi.envVar)
+        if (apiKey.isBlank()) error("Нет API ключа. Проверьте ${requestApi.envVar}")
+        val promptText = EXECUTION_STEP_PROMPT_TEMPLATE
+            .replace("{task_context}", taskContext)
+            .replace("{step_id}", stepId.toString())
+            .replace("{step_description}", stepDescription)
+            .replace("{previous_results_formatted}", previousResultsFormatted)
+        val messages = buildList {
+            buildLtmSystemMessage()?.let { add(it) }
+            add(DeepSeekMessage(role = "user", content = promptText))
+        }
+        val request = DeepSeekChatRequest(
+            model = model,
+            messages = messages,
+            temperature = 0.2,
+            maxTokens = 4000,
+            topP = 0.95,
+            frequencyPenalty = 0.1,
+            presencePenalty = null
+        )
+        val response = when (requestApi) {
+            AiAgentApi.DeepSeek -> deepSeekApi.createChatCompletion(apiKey = apiKey, request = request)
+            AiAgentApi.OpenAI -> openAiApi.createChatCompletion(apiKey = apiKey, request = request)
+            AiAgentApi.GigaChat -> gigaChatApi.createChatCompletion(accessToken = apiKey, request = request)
+            AiAgentApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletion(apiKey = apiKey, request = request)
+        }
+        return response.choices.firstOrNull()?.message?.content?.trim().orEmpty()
+            .ifEmpty { "Пустой ответ от ${requestApi.label}." }
+    }
+
+    suspend fun executeStepsLoop(
+        chatId: Long,
+        execMessages: SnapshotStateList<AiAgentMessage>,
+        sessionId: Int
+    ) {
+        val planJson = try {
+            lenientJson.decodeFromString<PlanJson>(planText)
+        } catch (e: Exception) {
+            isErrorState = true
+            val errMsg = AiAgentMessage(
+                text = "Ошибка парсинга плана: ${e.message}",
+                isUser = false,
+                paramsInfo = "stage=execution|error",
+                stream = AiAgentStream.Raw, epoch = 0,
+                createdAt = System.currentTimeMillis()
+            )
+            execMessages += errMsg
+            appendMessageToBranch(chatId, 3, errMsg)
+            isLoading = false
+            return
+        }
+
+        val taskContext = buildString {
+            if (planJson.goal.isNotBlank()) appendLine("Цель: ${planJson.goal}")
+            append("Задача: $userRequestText")
+        }
+
+        while (executionCurrentStepIndex < executionSteps.size) {
+            if (sessionId != chatSessionId) { isLoading = false; return }
+
+            val step = executionSteps[executionCurrentStepIndex]
+            val previousResultsFormatted = if (executionResults.isEmpty()) {
+                "Нет предыдущих результатов."
+            } else {
+                executionResults.entries.sortedBy { it.key }
+                    .joinToString("\n") { (id, res) -> "step_id=$id: $res" }
+            }
+
+            val stepLabel = "Шаг ${step.stepId}${step.tool?.let { " [$it]" }.orEmpty()}: ${step.description}"
+            val stepUserMsg = AiAgentMessage(
+                text = stepLabel, isUser = true,
+                paramsInfo = "stage=execution|step=${step.stepId}",
+                stream = AiAgentStream.Raw, epoch = 0,
+                createdAt = System.currentTimeMillis()
+            )
+            execMessages += stepUserMsg
+            appendMessageToBranch(chatId, 3, stepUserMsg)
+
+            val result = try {
+                val r = callExecutionStepApi(
+                    taskContext = taskContext,
+                    stepId = step.stepId,
+                    stepDescription = step.description,
+                    previousResultsFormatted = previousResultsFormatted
+                )
+                isErrorState = false
+                r
+            } catch (e: Exception) {
+                isErrorState = true
+                "Request failed: ${e.message ?: "unknown error"}"
+            }
+
+            if (sessionId != chatSessionId) { isLoading = false; return }
+
+            val stepRespMsg = AiAgentMessage(
+                text = result, isUser = false,
+                paramsInfo = "stage=execution|step=${step.stepId}",
+                stream = AiAgentStream.Raw, epoch = 0,
+                createdAt = System.currentTimeMillis()
+            )
+            execMessages += stepRespMsg
+            appendMessageToBranch(chatId, 3, stepRespMsg)
+
+            if (isErrorState) { isLoading = false; return }
+
+            executionResults[step.stepId] = result
+            executionCurrentStepIndex++
+        }
+
+        // все шаги выполнены
+        executionText = executionResults.entries.sortedBy { it.key }
+            .joinToString("\n\n") { (id, res) -> "=== Шаг $id ===\n$res" }
+
+        val summaryMsg = AiAgentMessage(
+            text = executionText,
+            isUser = false,
+            paramsInfo = "stage=execution|summary",
+            stream = AiAgentStream.Raw, epoch = 0,
+            createdAt = System.currentTimeMillis()
+        )
+        execMessages += summaryMsg
+        appendMessageToBranch(chatId, 3, summaryMsg)
+        isLoading = false
+    }
+
     // ─── State machine transitions ─────────────────────────────────────────────
 
     fun startPlanningPhase() {
@@ -565,6 +703,19 @@ private fun AiStateAgentChat(
         val chatId = activeChatId ?: return
         if (isLoading) return
 
+        val plan = try {
+            lenientJson.decodeFromString<PlanJson>(planText)
+        } catch (e: Exception) {
+            isErrorState = true
+            return
+        }
+        if (plan.steps.isEmpty()) { isErrorState = true; return }
+
+        executionSteps.clear()
+        executionSteps.addAll(plan.steps)
+        executionCurrentStepIndex = 0
+        executionResults.clear()
+
         val execMessages = createStateBranch(chatId, 3, "Выполнение")
         selectedBranchNumber = 3
         agentState = AgentState.Execution
@@ -572,36 +723,7 @@ private fun AiStateAgentChat(
         scope.launch {
             val sessionId = chatSessionId
             isLoading = true
-
-            val execUserText = "Выполни всё по плану:\n$planText"
-            val execUserMsg = AiAgentMessage(
-                text = execUserText, isUser = true,
-                paramsInfo = "stage=execution", stream = AiAgentStream.Raw, epoch = 0,
-                createdAt = System.currentTimeMillis()
-            )
-            execMessages += execUserMsg
-            appendMessageToBranch(chatId, 3, execUserMsg)
-
-            val result = try {
-                val r = callApi(execUserText)
-                isErrorState = false
-                r
-            } catch (e: Exception) {
-                isErrorState = true
-                "Request failed: ${e.message ?: "unknown error"}"
-            }
-
-            if (sessionId != chatSessionId) { isLoading = false; return@launch }
-
-            executionText = result
-            val execRespMsg = AiAgentMessage(
-                text = result, isUser = false,
-                paramsInfo = "stage=execution", stream = AiAgentStream.Raw, epoch = 0,
-                createdAt = System.currentTimeMillis()
-            )
-            execMessages += execRespMsg
-            appendMessageToBranch(chatId, 3, execRespMsg)
-            isLoading = false
+            executeStepsLoop(chatId, execMessages, sessionId)
         }
     }
 
@@ -757,25 +879,7 @@ private fun AiStateAgentChat(
         scope.launch {
             val sessionId = chatSessionId
             isLoading = true
-            val execUserText = "Выполни всё по плану:\n$planText"
-            val result = try {
-                val r = callApi(execUserText)
-                isErrorState = false
-                r
-            } catch (e: Exception) {
-                isErrorState = true
-                "Request failed: ${e.message ?: "unknown error"}"
-            }
-            if (sessionId != chatSessionId) { isLoading = false; return@launch }
-            executionText = result
-            val msg = AiAgentMessage(
-                text = result, isUser = false,
-                paramsInfo = "stage=execution|retry", stream = AiAgentStream.Raw, epoch = 0,
-                createdAt = System.currentTimeMillis()
-            )
-            execMessages += msg
-            appendMessageToBranch(chatId, 3, msg)
-            isLoading = false
+            executeStepsLoop(chatId, execMessages, sessionId)
         }
     }
 
@@ -824,6 +928,9 @@ private fun AiStateAgentChat(
         inputText = TextFieldValue("")
         planEditInput = TextFieldValue("")
         lastPlanEditText = ""
+        executionSteps.clear()
+        executionCurrentStepIndex = 0
+        executionResults.clear()
         apiSelectorExpanded = false
         modelSelectorExpanded = false
     }
@@ -854,7 +961,7 @@ private fun AiStateAgentChat(
                     planText = branches.firstOrNull { it.number == 2 }
                         ?.messages?.lastOrNull { !it.isUser }?.text.orEmpty()
                     executionText = branches.firstOrNull { it.number == 3 }
-                        ?.messages?.lastOrNull { !it.isUser }?.text.orEmpty()
+                        ?.messages?.filter { !it.isUser }?.joinToString("\n\n") { it.text }.orEmpty()
                 }
                 maxBranch >= 3 -> {
                     agentState = AgentState.Execution
@@ -862,7 +969,7 @@ private fun AiStateAgentChat(
                     planText = branches.firstOrNull { it.number == 2 }
                         ?.messages?.lastOrNull { !it.isUser }?.text.orEmpty()
                     executionText = branches.firstOrNull { it.number == 3 }
-                        ?.messages?.lastOrNull { !it.isUser }?.text.orEmpty()
+                        ?.messages?.filter { !it.isUser }?.joinToString("\n\n") { it.text }.orEmpty()
                 }
                 maxBranch >= 2 -> {
                     agentState = AgentState.Planning
