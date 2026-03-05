@@ -74,13 +74,14 @@ actual class AiStateAgentDatabaseDriverFactory {
                 "epoch",
                 "created_at"
             ),
-            "memory_entries" to setOf("id", "profile_id", "entry_key", "entry_value", "created_at", "updated_at")
+            "memory_entries" to setOf("id", "profile_id", "entry_key", "entry_value", "created_at", "updated_at"),
+            "invariant_entries" to setOf("id", "entry_key", "entry_value", "created_at", "updated_at")
         )
         val actualTables = mutableSetOf<String>()
         val connectionUrl = "jdbc:sqlite:$dbPath"
         DriverManager.getConnection(connectionUrl).use { connection ->
             connection.prepareStatement(
-                "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('chats', 'chat_messages', 'chat_profiles', 'chat_branch_messages', 'memory_entries');"
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('chats', 'chat_messages', 'chat_profiles', 'chat_branch_messages', 'memory_entries', 'invariant_entries');"
             ).use { statement ->
                 statement.executeQuery().use { resultSet ->
                     while (resultSet.next()) {

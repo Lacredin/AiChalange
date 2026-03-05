@@ -21,6 +21,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -77,6 +78,11 @@ import com.example.aiadventchalengetestllmapi.network.ProxyOpenAiApi
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 private val streamStripRegex = Regex("""\s*\|\s*stream=(real|raw)""")
 private val epochStripRegex = Regex("""\s*\|\s*epoch=\d+""")
@@ -137,6 +143,14 @@ private data class AiAgentMessage(
 )
 
 private data class LongTermMemoryEntry(
+    val id: Long,
+    val key: String,
+    val value: String,
+    val createdAt: Long,
+    val updatedAt: Long
+)
+
+private data class InvariantEntry(
     val id: Long,
     val key: String,
     val value: String,
@@ -270,6 +284,19 @@ private fun AiStateAgentChat(
     var memoryValueInput by remember { mutableStateOf("") }
     var isMemoryFormVisible by remember { mutableStateOf(false) }
 
+    // Invariants
+    val invariants = remember { mutableStateListOf<InvariantEntry>() }
+    var isInvariantPanelVisible by remember { mutableStateOf(false) }
+    var isInvariantPanelExpanded by remember { mutableStateOf(true) }
+    var invariantEditingId by remember { mutableStateOf<Long?>(null) }
+    var invariantKeyInput by remember { mutableStateOf("") }
+    var invariantValueInput by remember { mutableStateOf("") }
+    var isInvariantFormVisible by remember { mutableStateOf(false) }
+    var isInvariantsEnabled by remember { mutableStateOf(false) }
+    var invariantViolations by remember { mutableStateOf<List<String>>(emptyList()) }
+    var invariantViolationPreviousState by remember { mutableStateOf(AgentState.Idle) }
+    var planInvariantCheckFailed by remember { mutableStateOf(false) }
+
     // State machine
     var agentState by remember { mutableStateOf(AgentState.Idle) }
     var userRequestText by remember { mutableStateOf("") }
@@ -365,6 +392,43 @@ private fun AiStateAgentChat(
         loadLongTermMemoryForProfile(profileId)
     }
 
+    // ─── Invariants ────────────────────────────────────────────────────────────
+
+    fun loadInvariants() {
+        val entries = queries.selectAllInvariantEntries().executeAsList().map { row ->
+            InvariantEntry(
+                id = row.id,
+                key = row.entry_key,
+                value = row.entry_value,
+                createdAt = row.created_at,
+                updatedAt = row.updated_at
+            )
+        }
+        invariants.clear()
+        invariants += entries
+    }
+
+    fun insertInvariantEntry(key: String, value: String) {
+        val now = System.currentTimeMillis()
+        queries.insertInvariantEntry(
+            entry_key = key.trim(),
+            entry_value = value.trim(),
+            created_at = now,
+            updated_at = now
+        )
+        loadInvariants()
+    }
+
+    fun updateInvariantEntry(id: Long, value: String) {
+        queries.updateInvariantEntry(value.trim(), System.currentTimeMillis(), id)
+        loadInvariants()
+    }
+
+    fun deleteInvariantEntry(id: Long) {
+        queries.deleteInvariantEntry(id)
+        loadInvariants()
+    }
+
     fun ensureProfileAndLtm() {
         val profiles = queries.selectProfiles().executeAsList()
         val profileId = if (profiles.isNotEmpty()) {
@@ -389,6 +453,7 @@ private fun AiStateAgentChat(
         }
         selectedProfileId = profileId
         loadLongTermMemoryForProfile(profileId)
+        loadInvariants()
     }
 
     fun saveToLtm(text: String) {
@@ -409,6 +474,89 @@ private fun AiStateAgentChat(
             append("\nУчитывай эту информацию во всех ответах.")
         }
         return DeepSeekMessage(role = "system", content = content.trim())
+    }
+
+    fun buildInvariantsSystemMessage(): DeepSeekMessage? {
+        if (!isInvariantsEnabled || invariants.isEmpty()) return null
+        val content = buildString {
+            appendLine("Инварианты (ограничения, которые ВСЕГДА должны соблюдаться):")
+            invariants.forEach { e -> appendLine("- ${e.key}: ${e.value}") }
+        }
+        return DeepSeekMessage(role = "system", content = content.trim())
+    }
+
+    fun buildInvariantsPromptSuffix(): String {
+        if (!isInvariantsEnabled || invariants.isEmpty()) return ""
+        return buildString {
+            appendLine()
+            appendLine("Обязательно проверь выполнение этих ограничений:")
+            invariants.forEach { e -> appendLine("- ${e.key}: ${e.value}") }
+        }.trimEnd()
+    }
+
+    fun checkInvariantViolations(response: String): List<String> {
+        if (!isInvariantsEnabled || invariants.isEmpty()) return emptyList()
+        val violations = mutableListOf<String>()
+        val responseLower = response.lowercase()
+        try {
+            val json = lenientJson.parseToJsonElement(response).jsonObject
+            // Formal validation: failed criteria matching invariant keys
+            json["criteria_results"]?.jsonArray?.forEach { item ->
+                val obj = item.jsonObject
+                if (obj["passed"]?.jsonPrimitive?.booleanOrNull == false) {
+                    val criterion = obj["criterion"]?.jsonPrimitive?.contentOrNull?.lowercase() ?: ""
+                    invariants.forEach { inv ->
+                        if (criterion.contains(inv.key.lowercase()) || criterion.contains(inv.value.lowercase())) {
+                            val entry = "${inv.key}: ${inv.value}"
+                            if (entry !in violations) violations += entry
+                        }
+                    }
+                }
+            }
+            // Execution: error result or not ready
+            val resultType = json["result"]?.jsonObject?.get("type")?.jsonPrimitive?.contentOrNull
+            val nextStepReady = json["next_step_ready"]?.jsonPrimitive?.booleanOrNull
+            if (resultType == "error" || nextStepReady == false) {
+                val reasoning = json["reasoning"]?.jsonPrimitive?.contentOrNull?.lowercase() ?: ""
+                invariants.forEach { inv ->
+                    if (reasoning.contains(inv.key.lowercase())) {
+                        val entry = "${inv.key}: ${inv.value}"
+                        if (entry !in violations) violations += entry
+                    }
+                }
+            }
+            // Semantic: overall_passed == false, check issues
+            if (json["overall_passed"]?.jsonPrimitive?.booleanOrNull == false) {
+                val issues = json["issues"]?.jsonArray?.joinToString(" ") {
+                    it.jsonPrimitive.contentOrNull.orEmpty()
+                }?.lowercase() ?: ""
+                invariants.forEach { inv ->
+                    if (issues.contains(inv.key.lowercase()) || issues.contains(inv.value.lowercase())) {
+                        val entry = "${inv.key}: ${inv.value}"
+                        if (entry !in violations) violations += entry
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+        // Text heuristic: invariant key/value near violation markers
+        if (violations.isEmpty()) {
+            val markers = listOf(
+                "нарушено", "нарушение", "violated", "не соответствует",
+                "не выполнено", "failed", "не пройден", "constraint violation"
+            )
+            invariants.forEach { inv ->
+                if (markers.any { marker ->
+                    val idx = responseLower.indexOf(marker)
+                    if (idx < 0) return@any false
+                    val window = responseLower.substring(maxOf(0, idx - 150), minOf(responseLower.length, idx + 150))
+                    window.contains(inv.key.lowercase()) || window.contains(inv.value.lowercase())
+                }) {
+                    val entry = "${inv.key}: ${inv.value}"
+                    if (entry !in violations) violations += entry
+                }
+            }
+        }
+        return violations
     }
 
     fun createStateBranch(chatId: Long, branchNumber: Int, name: String): SnapshotStateList<AiAgentMessage> {
@@ -577,6 +725,7 @@ private fun AiStateAgentChat(
             .replace("{previous_results_formatted}", previousResultsFormatted)
         val messages = buildList {
             buildLtmSystemMessage()?.let { add(it) }
+            buildInvariantsSystemMessage()?.let { add(it) }
             add(DeepSeekMessage(role = "user", content = promptText))
         }
         val request = DeepSeekChatRequest(
@@ -596,6 +745,61 @@ private fun AiStateAgentChat(
         }
         return response.choices.firstOrNull()?.message?.content?.trim().orEmpty()
             .ifEmpty { "Пустой ответ от ${requestApi.label}." }
+    }
+
+    suspend fun callPlanInvariantCheckApi(planJson: String, invariantsList: String): String {
+        val requestApi = selectedApi
+        val model = modelInput.trim().ifEmpty { requestApi.defaultModel }
+        val apiKey = aiAgentReadApiKey(requestApi.envVar)
+        if (apiKey.isBlank()) error("Нет API ключа. Проверьте ${requestApi.envVar}")
+        val promptText = INVARIANT_PLAN_CHECK_PROMPT_TEMPLATE
+            .replace("{plan_json}", planJson)
+            .replace("{invariants_list}", invariantsList)
+        val messages = buildList {
+            buildLtmSystemMessage()?.let { add(it) }
+            add(DeepSeekMessage(role = "user", content = promptText))
+        }
+        val request = DeepSeekChatRequest(
+            model = model,
+            messages = messages,
+            temperature = 0.1,
+            maxTokens = 1500,
+            topP = 0.9,
+            responseFormat = DeepSeekResponseFormat(type = "json_object")
+        )
+        val response = when (requestApi) {
+            AiAgentApi.DeepSeek -> deepSeekApi.createChatCompletion(apiKey = apiKey, request = request)
+            AiAgentApi.OpenAI -> openAiApi.createChatCompletion(apiKey = apiKey, request = request)
+            AiAgentApi.GigaChat -> gigaChatApi.createChatCompletion(accessToken = apiKey, request = request)
+            AiAgentApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletion(apiKey = apiKey, request = request)
+        }
+        return response.choices.firstOrNull()?.message?.content?.trim().orEmpty()
+            .ifEmpty { "Пустой ответ от ${requestApi.label}." }
+    }
+
+    fun checkPlanInvariantViolations(response: String): List<String> {
+        val violations = mutableListOf<String>()
+        try {
+            val json = lenientJson.parseToJsonElement(response).jsonObject
+            if (json["overall_passed"]?.jsonPrimitive?.booleanOrNull == true) return emptyList()
+            json["invariant_checks"]?.jsonArray?.forEach { item ->
+                val obj = item.jsonObject
+                if (obj["passed"]?.jsonPrimitive?.booleanOrNull == false) {
+                    val key = obj["invariant_key"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                    val value = obj["invariant_value"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                    val details = obj["violation_details"]?.jsonPrimitive?.contentOrNull
+                    val entry = if (!details.isNullOrBlank()) "$key: $value — $details" else "$key: $value"
+                    if (entry !in violations) violations += entry
+                }
+            }
+            if (violations.isEmpty()) {
+                val summary = json["summary"]?.jsonPrimitive?.contentOrNull
+                violations += summary ?: "Инварианты плана нарушены"
+            }
+        } catch (_: Exception) {
+            violations += "Ошибка разбора ответа проверки инвариантов"
+        }
+        return violations
     }
 
     suspend fun awaitUnpaused(sessionId: Int): Boolean {
@@ -650,8 +854,14 @@ private fun AiStateAgentChat(
         // Фаза 1: формальная проверка
         if (validationPhase == 1) {
             if (!awaitUnpaused(sessionId)) { isLoading = false; return }
+
+            val prompt1 = (VALIDATION_FORMAL_PROMPT_TEMPLATE
+                .replace("{original_goal}", originalGoal)
+                .replace("{validation_criteria}", validationCriteria)
+                .replace("{execution_results}", executionText)) + buildInvariantsPromptSuffix()
+
             val phase1UserMsg = AiAgentMessage(
-                text = "Формальная проверка",
+                text = "Формальная проверка\n\n▼ Запрос к ИИ:\n$prompt1",
                 isUser = true,
                 paramsInfo = "stage=checking|phase=1",
                 stream = AiAgentStream.Raw, epoch = 0,
@@ -659,11 +869,6 @@ private fun AiStateAgentChat(
             )
             checkMessages += phase1UserMsg
             appendMessageToBranch(chatId, 4, phase1UserMsg)
-
-            val prompt1 = VALIDATION_FORMAL_PROMPT_TEMPLATE
-                .replace("{original_goal}", originalGoal)
-                .replace("{validation_criteria}", validationCriteria)
-                .replace("{execution_results}", executionText)
 
             val result1 = try {
                 val r = callValidationApi(prompt1)
@@ -687,21 +892,19 @@ private fun AiStateAgentChat(
 
             if (isErrorState) { isLoading = false; return }
 
+            val phase1Violations = checkInvariantViolations(result1)
+            if (phase1Violations.isNotEmpty()) {
+                invariantViolationPreviousState = AgentState.Execution
+                invariantViolations = phase1Violations
+                isLoading = false
+                return
+            }
+
             validationPhase = 2
         }
 
         // Фаза 2: смысловая проверка
         if (!awaitUnpaused(sessionId)) { isLoading = false; return }
-
-        val phase2UserMsg = AiAgentMessage(
-            text = "Смысловая проверка",
-            isUser = true,
-            paramsInfo = "stage=checking|phase=2",
-            stream = AiAgentStream.Raw, epoch = 0,
-            createdAt = System.currentTimeMillis()
-        )
-        checkMessages += phase2UserMsg
-        appendMessageToBranch(chatId, 4, phase2UserMsg)
 
         val prompt2 = VALIDATION_SEMANTIC_PROMPT_TEMPLATE
             .replace("{original_goal}", originalGoal)
@@ -709,6 +912,16 @@ private fun AiStateAgentChat(
             .replace("{validation_criteria}", validationCriteria)
             .replace("{execution_results}", executionText)
             .replace("{previous_steps_results}", previousStepsResults)
+
+        val phase2UserMsg = AiAgentMessage(
+            text = "Смысловая проверка\n\n▼ Запрос к ИИ:\n$prompt2",
+            isUser = true,
+            paramsInfo = "stage=checking|phase=2",
+            stream = AiAgentStream.Raw, epoch = 0,
+            createdAt = System.currentTimeMillis()
+        )
+        checkMessages += phase2UserMsg
+        appendMessageToBranch(chatId, 4, phase2UserMsg)
 
         val result2 = try {
             val r = callValidationApi(prompt2)
@@ -729,6 +942,14 @@ private fun AiStateAgentChat(
         )
         checkMessages += phase2RespMsg
         appendMessageToBranch(chatId, 4, phase2RespMsg)
+
+        val phase2Violations = checkInvariantViolations(result2)
+        if (phase2Violations.isNotEmpty()) {
+            invariantViolationPreviousState = AgentState.Execution
+            val combined = (invariantViolations + phase2Violations).distinct()
+            invariantViolations = combined
+        }
+
         isLoading = false
     }
 
@@ -806,6 +1027,14 @@ private fun AiStateAgentChat(
             appendMessageToBranch(chatId, 3, stepRespMsg)
 
             if (isErrorState) { isLoading = false; return }
+
+            val stepViolations = checkInvariantViolations(result)
+            if (stepViolations.isNotEmpty()) {
+                invariantViolationPreviousState = AgentState.Planning
+                invariantViolations = (invariantViolations + stepViolations).distinct()
+                isLoading = false
+                return
+            }
 
             executionResults[step.stepId] = result
             executionCurrentStepIndex++
@@ -903,7 +1132,7 @@ private fun AiStateAgentChat(
 
         val plan = try {
             lenientJson.decodeFromString<PlanJson>(planText)
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             isErrorState = true
             return
         }
@@ -914,13 +1143,35 @@ private fun AiStateAgentChat(
         executionCurrentStepIndex = 0
         executionResults.clear()
 
-        val execMessages = createStateBranch(chatId, 3, "Выполнение")
-        selectedBranchNumber = 3
-        agentState = AgentState.Execution
-
         scope.launch {
             val sessionId = chatSessionId
             isLoading = true
+
+            if (isInvariantsEnabled && invariants.isNotEmpty()) {
+                val invariantsList = invariants.joinToString("\n") { "- ${it.key}: ${it.value}" }
+                val checkResult = try {
+                    val r = callPlanInvariantCheckApi(planText, invariantsList)
+                    isErrorState = false
+                    r
+                } catch (e: Exception) {
+                    isErrorState = true
+                    isLoading = false
+                    return@launch
+                }
+                if (sessionId != chatSessionId) { isLoading = false; return@launch }
+                val violations = checkPlanInvariantViolations(checkResult)
+                if (violations.isNotEmpty()) {
+                    invariantViolationPreviousState = AgentState.Planning
+                    invariantViolations = violations
+                    planInvariantCheckFailed = true
+                    isLoading = false
+                    return@launch
+                }
+            }
+
+            val execMessages = createStateBranch(chatId, 3, "Выполнение")
+            selectedBranchNumber = 3
+            agentState = AgentState.Execution
             executeStepsLoop(chatId, execMessages, sessionId)
         }
     }
@@ -970,6 +1221,8 @@ private fun AiStateAgentChat(
 
         lastPlanEditText = editText
         planEditInput = TextFieldValue("")
+        planInvariantCheckFailed = false
+        invariantViolations = emptyList()
 
         scope.launch {
             val sessionId = chatSessionId
@@ -1136,6 +1389,8 @@ private fun AiStateAgentChat(
         validationPhase = 1
         isPaused = false
         planClarificationNeeded = null
+        invariantViolations = emptyList()
+        planInvariantCheckFailed = false
         apiSelectorExpanded = false
         modelSelectorExpanded = false
     }
@@ -1205,6 +1460,7 @@ private fun AiStateAgentChat(
         }
 
         inputText = TextFieldValue("")
+        invariantViolations = emptyList()
         apiSelectorExpanded = false
         modelSelectorExpanded = false
         selectedProfileId?.let { loadLongTermMemoryForProfile(it) }
@@ -1325,6 +1581,9 @@ private fun AiStateAgentChat(
                         color = AiStateAgentScreenTheme.topBarContent,
                         modifier = Modifier.padding(horizontal = 8.dp)
                     )
+                    TextButton(onClick = { isInvariantPanelVisible = !isInvariantPanelVisible }) {
+                        Text(if (isInvariantPanelVisible) "Инварианты ▾" else "Инварианты ▸")
+                    }
                     TextButton(onClick = { isMemoryPanelVisible = !isMemoryPanelVisible }) {
                         Text(if (isMemoryPanelVisible) "Память ▾" else "Память ▸")
                     }
@@ -1569,6 +1828,47 @@ private fun AiStateAgentChat(
                     }
                 }
 
+                // Invariant violations banner
+                if (invariantViolations.isNotEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(MaterialTheme.colorScheme.errorContainer, RoundedCornerShape(12.dp))
+                            .padding(12.dp)
+                    ) {
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text(
+                                "Найдены нарушения ограничений:",
+                                color = MaterialTheme.colorScheme.onErrorContainer,
+                                style = MaterialTheme.typography.labelMedium
+                            )
+                            invariantViolations.forEach { violation ->
+                                Text(
+                                    "• $violation",
+                                    color = MaterialTheme.colorScheme.onErrorContainer,
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                            }
+                            if (agentState != AgentState.Checking) {
+                                TextButton(onClick = {
+                                    invariantViolations = emptyList()
+                                    agentState = invariantViolationPreviousState
+                                    selectedBranchNumber = when (invariantViolationPreviousState) {
+                                        AgentState.Planning -> 2
+                                        AgentState.Execution -> 3
+                                        else -> selectedBranchNumber
+                                    }
+                                }) {
+                                    Text(
+                                        "Вернуться на предыдущий статус",
+                                        color = MaterialTheme.colorScheme.onErrorContainer
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // State machine action area
                 when {
                     (agentState == AgentState.Execution || agentState == AgentState.Checking) && isLoading -> {
@@ -1674,16 +1974,30 @@ private fun AiStateAgentChat(
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
-                                    Text(
-                                        if (isErrorState) "Ошибка при планировании" else "Устраивает план?",
-                                        modifier = Modifier.weight(1f),
-                                        color = if (isErrorState) MaterialTheme.colorScheme.error
-                                                else MaterialTheme.colorScheme.onSurface
-                                    )
-                                    if (isErrorState) {
-                                        Button(onClick = ::retryPlanning) { Text("Повторить") }
-                                    } else {
-                                        Button(onClick = ::onPlanApproved) { Text("Да") }
+                                    when {
+                                        isErrorState -> {
+                                            Text(
+                                                "Ошибка при планировании",
+                                                modifier = Modifier.weight(1f),
+                                                color = MaterialTheme.colorScheme.error
+                                            )
+                                            Button(onClick = ::retryPlanning) { Text("Повторить") }
+                                        }
+                                        planInvariantCheckFailed -> {
+                                            Text(
+                                                "Инварианты плана нарушены. Скорректируйте план:",
+                                                modifier = Modifier.weight(1f),
+                                                color = MaterialTheme.colorScheme.error
+                                            )
+                                        }
+                                        else -> {
+                                            Text(
+                                                "Устраивает план?",
+                                                modifier = Modifier.weight(1f),
+                                                color = MaterialTheme.colorScheme.onSurface
+                                            )
+                                            Button(onClick = ::onPlanApproved) { Text("Да") }
+                                        }
                                     }
                                 }
                             }
@@ -1721,6 +2035,18 @@ private fun AiStateAgentChat(
                                     color = MaterialTheme.colorScheme.error
                                 )
                                 Button(onClick = ::retryChecking) { Text("Повторить") }
+                            } else if (invariantViolations.isNotEmpty()) {
+                                Box(modifier = Modifier.weight(1f))
+                                Button(onClick = {
+                                    invariantViolations = emptyList()
+                                    agentState = AgentState.Planning
+                                    selectedBranchNumber = 2
+                                }) { Text("К планированию") }
+                                Button(onClick = {
+                                    invariantViolations = emptyList()
+                                    agentState = AgentState.Execution
+                                    selectedBranchNumber = 3
+                                }) { Text("К выполнению") }
                             } else {
                                 Box(modifier = Modifier.weight(1f))
                                 Button(onClick = ::onCheckingDone) { Text("Дальше") }
@@ -1773,6 +2099,124 @@ private fun AiStateAgentChat(
                                 onClick = ::startPlanningPhase,
                                 enabled = inputText.text.isNotBlank() && !isLoading
                             ) { Text("Отправить") }
+                        }
+                    }
+                }
+            }
+
+            // ── Invariants panel ───────────────────────────────────────────────
+            if (isInvariantPanelVisible) {
+                Box(modifier = Modifier.width(1.dp).fillMaxSize().background(AiStateAgentScreenTheme.divider))
+
+                Column(
+                    modifier = Modifier
+                        .width(240.dp)
+                        .fillMaxSize()
+                        .verticalScroll(rememberScrollState())
+                        .padding(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().clickable { isInvariantPanelExpanded = !isInvariantPanelExpanded },
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text("Инварианты", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+                        Text(if (isInvariantPanelExpanded) "▾" else "▸", style = MaterialTheme.typography.labelSmall)
+                    }
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Checkbox(checked = isInvariantsEnabled, onCheckedChange = { isInvariantsEnabled = it })
+                        Text("Включить", style = MaterialTheme.typography.labelSmall)
+                    }
+
+                    if (isInvariantPanelExpanded) {
+                        invariants.forEach { entry ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(entry.key, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                                    Text(entry.value, style = MaterialTheme.typography.labelSmall)
+                                }
+                                TextButton(
+                                    onClick = { invariantEditingId = entry.id; invariantKeyInput = entry.key; invariantValueInput = entry.value; isInvariantFormVisible = true },
+                                    enabled = !isLoading
+                                ) { Text("✎") }
+                                TextButton(
+                                    onClick = { scope.launch { deleteInvariantEntry(entry.id) } },
+                                    enabled = !isLoading
+                                ) { Text("X") }
+                            }
+                        }
+                        if (invariants.isEmpty()) {
+                            Text("Инвариантов нет", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+                        }
+
+                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            TextButton(
+                                onClick = { invariantEditingId = null; invariantKeyInput = ""; invariantValueInput = ""; isInvariantFormVisible = !isInvariantFormVisible },
+                                enabled = !isLoading
+                            ) { Text(if (isInvariantFormVisible && invariantEditingId == null) "Отмена" else "+ Добавить") }
+                            TextButton(
+                                onClick = {
+                                    scope.launch {
+                                        queries.deleteAllInvariantEntries()
+                                        invariants.clear()
+                                    }
+                                },
+                                enabled = invariants.isNotEmpty() && !isLoading
+                            ) { Text("Очистить") }
+                        }
+
+                        if (isInvariantFormVisible) {
+                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                OutlinedTextField(
+                                    value = invariantKeyInput,
+                                    onValueChange = { invariantKeyInput = it },
+                                    modifier = Modifier.fillMaxWidth().height(52.dp),
+                                    enabled = invariantEditingId == null && !isLoading,
+                                    placeholder = { Text("Ключ", style = MaterialTheme.typography.labelSmall) },
+                                    singleLine = true,
+                                    textStyle = MaterialTheme.typography.labelSmall
+                                )
+                                OutlinedTextField(
+                                    value = invariantValueInput,
+                                    onValueChange = { invariantValueInput = it },
+                                    modifier = Modifier.fillMaxWidth().height(80.dp),
+                                    enabled = !isLoading,
+                                    placeholder = { Text("Значение", style = MaterialTheme.typography.labelSmall) },
+                                    textStyle = MaterialTheme.typography.labelSmall,
+                                    maxLines = 3
+                                )
+                                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    Button(
+                                        onClick = {
+                                            if (invariantKeyInput.isNotBlank() && invariantValueInput.isNotBlank()) {
+                                                scope.launch {
+                                                    val editId = invariantEditingId
+                                                    if (editId != null) updateInvariantEntry(editId, invariantValueInput)
+                                                    else insertInvariantEntry(invariantKeyInput, invariantValueInput)
+                                                    isInvariantFormVisible = false
+                                                    invariantEditingId = null
+                                                    invariantKeyInput = ""
+                                                    invariantValueInput = ""
+                                                }
+                                            }
+                                        },
+                                        enabled = invariantKeyInput.isNotBlank() && invariantValueInput.isNotBlank() && !isLoading
+                                    ) { Text(if (invariantEditingId != null) "Сохранить" else "Добавить") }
+                                    TextButton(
+                                        onClick = { isInvariantFormVisible = false; invariantEditingId = null; invariantKeyInput = ""; invariantValueInput = "" },
+                                        enabled = !isLoading
+                                    ) { Text("Отмена") }
+                                }
+                            }
                         }
                     }
                 }

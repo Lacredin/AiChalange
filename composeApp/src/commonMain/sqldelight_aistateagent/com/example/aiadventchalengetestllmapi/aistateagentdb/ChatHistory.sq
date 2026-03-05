@@ -246,3 +246,27 @@ DELETE FROM memory_entries WHERE id = ?;
 deleteAllMemoryEntriesByProfile:
 DELETE FROM memory_entries
 WHERE profile_id = ?;
+
+CREATE TABLE invariant_entries (
+    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    entry_key TEXT NOT NULL,
+    entry_value TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+selectAllInvariantEntries:
+SELECT * FROM invariant_entries ORDER BY id ASC;
+
+insertInvariantEntry:
+INSERT INTO invariant_entries(entry_key, entry_value, created_at, updated_at)
+VALUES (?, ?, ?, ?);
+
+updateInvariantEntry:
+UPDATE invariant_entries SET entry_value = ?, updated_at = ? WHERE id = ?;
+
+deleteInvariantEntry:
+DELETE FROM invariant_entries WHERE id = ?;
+
+deleteAllInvariantEntries:
+DELETE FROM invariant_entries;
