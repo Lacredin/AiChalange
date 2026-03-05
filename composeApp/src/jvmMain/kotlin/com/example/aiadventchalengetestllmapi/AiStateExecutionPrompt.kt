@@ -3,28 +3,34 @@ package com.example.aiadventchalengetestllmapi.aistateagent
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
-internal const val EXECUTION_STEP_PROMPT_TEMPLATE = """Ты — ИИ-агент, выполняющий конкретный шаг общего плана.
+internal const val EXECUTION_STEP_PROMPT_TEMPLATE = """Ты — ИИ-агент, выполняющий аналитический шаг плана.
 Контекст задачи:
 {task_context}
 
 Текущий шаг (step_id: {step_id}):
 {step_description}
+
 Результаты предыдущих шагов:
 {previous_results_formatted}
+
 Инструкция:
-1. Проанализируй результаты предыдущих шагов и контекст задачи.
-2. Если для выполнения шага нужны данные, которых нет в предыдущих результатах, запроси их в поле "missing_data".
-Ответ должен быть строго в формате JSON:
+1. Выполни шаг самостоятельно, используя свои знания и результаты предыдущих шагов.
+2. Если шаг подразумевает генерацию текста/кода/анализа — создай это.
+3. Если шаг подразумевает преобразование данных — выполни преобразование.
+4. Верни результат в структурированном виде.
+
+Ответ должен быть в формате JSON:
 {
-  "tool_call": {
-    "tool": "имя_инструмента",
-    "params": {
-      "param1": "значение1",
-      "param2": "значение2"
+  "result": {
+    "type": "text" | "code" | "data" | "error",
+    "content": "содержимое результата",
+    "metadata": {
+      "format": "markdown" | "json" | "python" | "plain",
+      "confidence": 0.0-1.0
     }
   },
-  "reasoning": "Краткое объяснение, почему выбраны такие параметры",
-  "missing_data": null
+  "reasoning": "Объяснение хода мыслей",
+  "next_step_ready": true
 }"""
 
 @Serializable
