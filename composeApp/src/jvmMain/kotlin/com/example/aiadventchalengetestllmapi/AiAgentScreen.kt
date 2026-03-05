@@ -54,6 +54,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isAltPressed
+import androidx.compose.ui.input.key.isCtrlPressed
+import androidx.compose.ui.input.key.isShiftPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
@@ -1642,7 +1644,7 @@ private fun AiAgentChat(
                                 return@onPreviewKeyEvent false
                             }
 
-                            if (keyEvent.isAltPressed) {
+                            if (keyEvent.isAltPressed || keyEvent.isShiftPressed || keyEvent.isCtrlPressed) {
                                 val start = inputText.selection.min
                                 val end = inputText.selection.max
                                 inputText = inputText.copy(
