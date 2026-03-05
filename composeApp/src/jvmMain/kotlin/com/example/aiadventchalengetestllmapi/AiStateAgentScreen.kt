@@ -62,6 +62,7 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import com.example.aiadventchalengetestllmapi.BuildSecrets
@@ -78,6 +79,11 @@ import com.example.aiadventchalengetestllmapi.network.ProxyOpenAiApi
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
@@ -87,6 +93,125 @@ import kotlinx.serialization.json.jsonPrimitive
 private val streamStripRegex = Regex("""\s*\|\s*stream=(real|raw)""")
 private val epochStripRegex = Regex("""\s*\|\s*epoch=\d+""")
 private val lenientJson = Json { ignoreUnknownKeys = true }
+
+private fun tryParseJson(text: String): JsonElement? {
+    val trimmed = text.trim()
+    if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return null
+    return try {
+        lenientJson.parseToJsonElement(trimmed)
+    } catch (_: Exception) {
+        null
+    }
+}
+
+@Composable
+private fun JsonTreeView(element: JsonElement, indent: Int = 0) {
+    val pad = (indent * 16).dp
+    when (element) {
+        is JsonObject -> {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                element.entries.forEach { (key, value) ->
+                    when (value) {
+                        is JsonObject, is JsonArray -> {
+                            Column(
+                                modifier = Modifier.padding(start = pad),
+                                verticalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                Text(
+                                    text = "$key:",
+                                    fontWeight = FontWeight.Bold,
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                                JsonTreeView(value, indent + 1)
+                            }
+                        }
+                        else -> {
+                            Row(
+                                modifier = Modifier.padding(start = pad),
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Text(
+                                    text = "$key:",
+                                    fontWeight = FontWeight.Bold,
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                                JsonPrimitiveText(value)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        is JsonArray -> {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                element.forEachIndexed { index, value ->
+                    when (value) {
+                        is JsonObject, is JsonArray -> {
+                            Column(
+                                modifier = Modifier.padding(start = pad),
+                                verticalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                Text(
+                                    text = "[$index]",
+                                    fontWeight = FontWeight.Bold,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                                )
+                                JsonTreeView(value, indent + 1)
+                            }
+                        }
+                        else -> {
+                            Row(
+                                modifier = Modifier.padding(start = pad),
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Text(
+                                    text = "•",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                                )
+                                JsonPrimitiveText(value)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        is JsonPrimitive -> JsonPrimitiveText(element)
+        is JsonNull -> Text(
+            text = "—",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
+        )
+    }
+}
+
+@Composable
+private fun JsonPrimitiveText(element: JsonElement) {
+    val primitive = element as? JsonPrimitive ?: return
+    val boolVal = primitive.booleanOrNull
+    val text: String
+    val color: Color
+    when {
+        primitive is JsonNull -> {
+            text = "—"
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
+        }
+        boolVal != null -> {
+            text = if (boolVal) "✓" else "✗"
+            color = if (boolVal) Color(0xFF2E7D32) else Color(0xFFC62828)
+        }
+        else -> {
+            text = primitive.contentOrNull ?: "null"
+            color = MaterialTheme.colorScheme.onSurface
+        }
+    }
+    Text(
+        text = text,
+        style = MaterialTheme.typography.bodySmall,
+        color = color
+    )
+}
 
 private enum class AiAgentApi(
     val label: String,
@@ -292,7 +417,7 @@ private fun AiStateAgentChat(
     var invariantKeyInput by remember { mutableStateOf("") }
     var invariantValueInput by remember { mutableStateOf("") }
     var isInvariantFormVisible by remember { mutableStateOf(false) }
-    var isInvariantsEnabled by remember { mutableStateOf(false) }
+    var isInvariantsEnabled by remember { mutableStateOf(true) }
     var invariantViolations by remember { mutableStateOf<List<String>>(emptyList()) }
     var invariantViolationPreviousState by remember { mutableStateOf(AgentState.Idle) }
     var planInvariantCheckFailed by remember { mutableStateOf(false) }
@@ -454,15 +579,6 @@ private fun AiStateAgentChat(
         selectedProfileId = profileId
         loadLongTermMemoryForProfile(profileId)
         loadInvariants()
-    }
-
-    fun saveToLtm(text: String) {
-        memoryEditingId = null
-        memoryKeyInput = ""
-        memoryValueInput = text.take(500)
-        isMemoryFormVisible = true
-        isMemoryPanelVisible = true
-        isMemoryPanelExpanded = true
     }
 
     // ─── State machine helpers ─────────────────────────────────────────────────
@@ -1814,10 +1930,7 @@ private fun AiStateAgentChat(
                         )
                     }
                     items(displayMessages) { message ->
-                        AiAgentBubble(
-                            message = message,
-                            onSaveToMemory = if (!message.isUser) { { text -> saveToLtm(text) } } else null
-                        )
+                        AiAgentBubble(message = message)
                     }
                     if (isLoading) {
                         item {
@@ -2338,13 +2451,17 @@ private fun AiStateAgentChat(
 
 @Composable
 private fun AiAgentBubble(
-    message: AiAgentMessage,
-    onSaveToMemory: ((String) -> Unit)? = null
+    message: AiAgentMessage
 ) {
     val userBubbleColor = AiStateAgentScreenTheme.userBubble
     val userTextColor = AiStateAgentScreenTheme.onUserBubble
     val assistantBubbleColor = AiStateAgentScreenTheme.assistantBubble
     val assistantTextColor = AiStateAgentScreenTheme.onAssistantBubble
+
+    val parsedElement = remember(message.text) {
+        if (message.isUser) null else tryParseJson(message.text)
+    }
+    var showParsed by remember { mutableStateOf(true) }
 
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -2360,11 +2477,17 @@ private fun AiAgentBubble(
                 .padding(12.dp)
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                SelectionContainer {
-                    Text(
-                        text = message.text,
-                        color = if (message.isUser) userTextColor else assistantTextColor
-                    )
+                if (!message.isUser && parsedElement != null && showParsed) {
+                    SelectionContainer {
+                        JsonTreeView(parsedElement)
+                    }
+                } else {
+                    SelectionContainer {
+                        Text(
+                            text = message.text,
+                            color = if (message.isUser) userTextColor else assistantTextColor
+                        )
+                    }
                 }
                 Text(
                     text = message.displayParamsInfo(),
@@ -2372,13 +2495,13 @@ private fun AiAgentBubble(
                     color = if (message.isUser) userTextColor.copy(alpha = 0.7f)
                             else assistantTextColor.copy(alpha = 0.7f)
                 )
-                if (!message.isUser && onSaveToMemory != null) {
+                if (!message.isUser && parsedElement != null) {
                     TextButton(
-                        onClick = { onSaveToMemory(message.text) },
+                        onClick = { showParsed = !showParsed },
                         modifier = Modifier.align(Alignment.End)
                     ) {
                         Text(
-                            "Сохранить в память",
+                            if (showParsed) "Исходный" else "Дерево",
                             style = MaterialTheme.typography.labelSmall,
                             color = assistantTextColor.copy(alpha = 0.7f)
                         )
