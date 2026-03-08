@@ -421,6 +421,7 @@ private fun AiStateAgentChat(
     var invariantViolations by remember { mutableStateOf<List<String>>(emptyList()) }
     var invariantViolationPreviousState by remember { mutableStateOf(AgentState.Idle) }
     var planInvariantCheckFailed by remember { mutableStateOf(false) }
+    var planInvariantViolationByAi by remember { mutableStateOf(false) }
 
     // State machine
     var agentState by remember { mutableStateOf(AgentState.Idle) }
@@ -863,7 +864,7 @@ private fun AiStateAgentChat(
             .ifEmpty { "Пустой ответ от ${requestApi.label}." }
     }
 
-    suspend fun callPlanInvariantCheckApi(planJson: String, invariantsList: String): String {
+    suspend fun callPlanInvariantCheckApi(planJson: String, invariantsList: String, userEditRequest: String = ""): String {
         val requestApi = selectedApi
         val model = modelInput.trim().ifEmpty { requestApi.defaultModel }
         val apiKey = aiAgentReadApiKey(requestApi.envVar)
@@ -871,6 +872,7 @@ private fun AiStateAgentChat(
         val promptText = INVARIANT_PLAN_CHECK_PROMPT_TEMPLATE
             .replace("{plan_json}", planJson)
             .replace("{invariants_list}", invariantsList)
+            .replace("{user_edit_request}", userEditRequest.ifBlank { "(отсутствует — план создан ИИ)" })
         val messages = buildList {
             buildLtmSystemMessage()?.let { add(it) }
             add(DeepSeekMessage(role = "user", content = promptText))
@@ -893,11 +895,13 @@ private fun AiStateAgentChat(
             .ifEmpty { "Пустой ответ от ${requestApi.label}." }
     }
 
-    fun checkPlanInvariantViolations(response: String): List<String> {
+    fun checkPlanInvariantViolations(response: String): Pair<List<String>, Boolean> {
         val violations = mutableListOf<String>()
+        var aiViolated = false
         try {
             val json = lenientJson.parseToJsonElement(response).jsonObject
-            if (json["overall_passed"]?.jsonPrimitive?.booleanOrNull == true) return emptyList()
+            if (json["overall_passed"]?.jsonPrimitive?.booleanOrNull == true) return Pair(emptyList(), false)
+            aiViolated = json["ai_violated"]?.jsonPrimitive?.booleanOrNull ?: true
             json["invariant_checks"]?.jsonArray?.forEach { item ->
                 val obj = item.jsonObject
                 if (obj["passed"]?.jsonPrimitive?.booleanOrNull == false) {
@@ -914,8 +918,9 @@ private fun AiStateAgentChat(
             }
         } catch (_: Exception) {
             violations += "Ошибка разбора ответа проверки инвариантов"
+            aiViolated = true
         }
-        return violations
+        return Pair(violations, aiViolated)
     }
 
     suspend fun awaitUnpaused(sessionId: Int): Boolean {
@@ -1266,20 +1271,59 @@ private fun AiStateAgentChat(
             if (isInvariantsEnabled && invariants.isNotEmpty()) {
                 val invariantsList = invariants.joinToString("\n") { "- ${it.key}: ${it.value}" }
                 val checkResult = try {
-                    val r = callPlanInvariantCheckApi(planText, invariantsList)
+                    val r = callPlanInvariantCheckApi(planText, invariantsList, lastPlanEditText)
                     isErrorState = false
                     r
-                } catch (e: Exception) {
+                } catch (_: Exception) {
                     isErrorState = true
                     isLoading = false
                     return@launch
                 }
                 if (sessionId != chatSessionId) { isLoading = false; return@launch }
-                val violations = checkPlanInvariantViolations(checkResult)
+                val (violations, aiViolated) = checkPlanInvariantViolations(checkResult)
                 if (violations.isNotEmpty()) {
                     invariantViolationPreviousState = AgentState.Planning
                     invariantViolations = violations
-                    planInvariantCheckFailed = true
+                    if (aiViolated) {
+                        // ИИ сам предложил нарушение — показываем баннер и автоматически исправляем
+                        planInvariantViolationByAi = true
+                        val planningMessages = branchesByChat[chatId]?.firstOrNull { it.number == 2 }?.messages
+                        if (planningMessages == null) {
+                            planInvariantCheckFailed = true
+                            isLoading = false
+                            return@launch
+                        }
+                        val correctionInstruction = buildString {
+                            appendLine("Ты сам предложил план, нарушающий следующие инварианты:")
+                            violations.forEach { appendLine("• $it") }
+                            appendLine("Исправь план так, чтобы он строго соблюдал все эти ограничения.")
+                        }
+                        val correctedPlan = try {
+                            val r = callPlanEditApi(planText, correctionInstruction)
+                            isErrorState = false
+                            r
+                        } catch (_: Exception) {
+                            isErrorState = true
+                            planInvariantViolationByAi = false
+                            planInvariantCheckFailed = true
+                            isLoading = false
+                            return@launch
+                        }
+                        if (sessionId != chatSessionId) { isLoading = false; return@launch }
+                        planText = correctedPlan
+                        val autoFixMsg = AiAgentMessage(
+                            text = correctedPlan, isUser = false,
+                            paramsInfo = "stage=planning|ai-invariant-autofix", stream = AiAgentStream.Raw, epoch = 0,
+                            createdAt = System.currentTimeMillis()
+                        )
+                        planningMessages += autoFixMsg
+                        appendMessageToBranch(chatId, 2, autoFixMsg)
+                        invariantViolations = emptyList()
+                        planInvariantViolationByAi = false
+                    } else {
+                        // Пользователь явно запросил нарушающее действие — стандартное поведение
+                        planInvariantCheckFailed = true
+                    }
                     isLoading = false
                     return@launch
                 }
@@ -1338,6 +1382,7 @@ private fun AiStateAgentChat(
         lastPlanEditText = editText
         planEditInput = TextFieldValue("")
         planInvariantCheckFailed = false
+        planInvariantViolationByAi = false
         invariantViolations = emptyList()
 
         scope.launch {
@@ -1507,6 +1552,7 @@ private fun AiStateAgentChat(
         planClarificationNeeded = null
         invariantViolations = emptyList()
         planInvariantCheckFailed = false
+        planInvariantViolationByAi = false
         apiSelectorExpanded = false
         modelSelectorExpanded = false
     }
@@ -1951,7 +1997,12 @@ private fun AiStateAgentChat(
                     ) {
                         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             Text(
-                                "Найдены нарушения ограничений:",
+                                if (planInvariantViolationByAi && isLoading)
+                                    "ИИ нарушил ограничения — автоматически исправляю..."
+                                else if (planInvariantViolationByAi)
+                                    "ИИ нарушил ограничения (исправление не удалось):"
+                                else
+                                    "Найдены нарушения ограничений (запрошено пользователем):",
                                 color = MaterialTheme.colorScheme.onErrorContainer,
                                 style = MaterialTheme.typography.labelMedium
                             )
@@ -1962,7 +2013,7 @@ private fun AiStateAgentChat(
                                     style = MaterialTheme.typography.labelSmall
                                 )
                             }
-                            if (agentState != AgentState.Checking) {
+                            if (agentState != AgentState.Checking && !planInvariantViolationByAi) {
                                 TextButton(onClick = {
                                     invariantViolations = emptyList()
                                     agentState = invariantViolationPreviousState
@@ -2098,7 +2149,7 @@ private fun AiStateAgentChat(
                                         }
                                         planInvariantCheckFailed -> {
                                             Text(
-                                                "Инварианты плана нарушены. Скорректируйте план:",
+                                                "Вы запросили действие, нарушающее инварианты. Скорректируйте план:",
                                                 modifier = Modifier.weight(1f),
                                                 color = MaterialTheme.colorScheme.error
                                             )
