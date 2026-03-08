@@ -87,6 +87,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -258,6 +259,13 @@ private enum class AiAgentApi(
 }
 
 private enum class AgentState { Idle, Planning, Execution, Checking, Done }
+
+private data class ValidationFailureInfo(
+    val problem: String,
+    val failedStepId: Int,
+    val retryFromStepId: Int,
+    val proposedSolution: String
+)
 
 private data class AiAgentMessage(
     val text: String,
@@ -435,7 +443,9 @@ private fun AiStateAgentChat(
     val executionSteps = remember { mutableStateListOf<PlanStepJson>() }
     var executionCurrentStepIndex by remember { mutableStateOf(0) }
     val executionResults = remember { mutableStateMapOf<Int, String>() }
+    var executionRecoveryInstruction by remember { mutableStateOf<String?>(null) }
     var validationPhase by remember { mutableStateOf(1) }
+    var validationFailure by remember { mutableStateOf<ValidationFailureInfo?>(null) }
     var isPaused by remember { mutableStateOf(false) }
     var planClarificationNeeded by remember { mutableStateOf<String?>(null) }
 
@@ -830,7 +840,8 @@ private fun AiStateAgentChat(
         taskContext: String,
         stepId: Int,
         stepDescription: String,
-        previousResultsFormatted: String
+        previousResultsFormatted: String,
+        recoveryContext: String? = null
     ): String {
         val requestApi = selectedApi
         val model = modelInput.trim().ifEmpty { requestApi.defaultModel }
@@ -838,6 +849,7 @@ private fun AiStateAgentChat(
         if (apiKey.isBlank()) error("Нет API ключа. Проверьте ${requestApi.envVar}")
         val promptText = EXECUTION_STEP_PROMPT_TEMPLATE
             .replace("{task_context}", taskContext)
+            .replace("{recovery_context}", recoveryContext?.ifBlank { "нет" } ?: "нет")
             .replace("{step_id}", stepId.toString())
             .replace("{step_description}", stepDescription)
             .replace("{previous_results_formatted}", previousResultsFormatted)
@@ -923,6 +935,74 @@ private fun AiStateAgentChat(
         }
         return Pair(violations, aiViolated)
     }
+
+    fun findStepIndexById(stepId: Int): Int =
+        executionSteps.indexOfFirst { it.stepId == stepId }.takeIf { it >= 0 } ?: 0
+
+    fun extractStepId(text: String?): Int? {
+        if (text.isNullOrBlank()) return null
+        return Regex("""(?:step[_\s-]*id|шаг)\D{0,10}(\d+)""", RegexOption.IGNORE_CASE)
+            .find(text)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.toIntOrNull()
+    }
+
+    fun parseValidationFailure(response: String): ValidationFailureInfo? {
+        val json = try { lenientJson.parseToJsonElement(response).jsonObject } catch (_: Exception) { return null }
+        val overallPassed = json["overall_passed"]?.jsonPrimitive?.booleanOrNull
+        val needsReplanning = json["needs_replanning"]?.jsonPrimitive?.booleanOrNull ?: false
+        if (overallPassed == true && !needsReplanning) return null
+
+        val directProblem = json["detected_problem"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+        val fallbackProblem = buildString {
+            json["criteria_results"]?.jsonArray
+                ?.firstOrNull { it.jsonObject["passed"]?.jsonPrimitive?.booleanOrNull == false }
+                ?.jsonObject
+                ?.let { item ->
+                    val criterion = item["criterion"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                    val details = item["error_details"]?.jsonPrimitive?.contentOrNull
+                    val actual = item["actual"]?.jsonPrimitive?.contentOrNull
+                    append(criterion.ifBlank { "Проверка не пройдена" })
+                    if (!details.isNullOrBlank()) append(": $details")
+                    else if (!actual.isNullOrBlank()) append(": $actual")
+                }
+            if (isBlank()) {
+                val issue = json["issues"]?.jsonArray?.firstOrNull()?.jsonPrimitive?.contentOrNull
+                val feedback = json["feedback_for_planning"]?.jsonPrimitive?.contentOrNull
+                append(issue ?: feedback ?: "Валидация обнаружила проблему в результате выполнения")
+            }
+        }.trim()
+        val problem = directProblem.ifBlank { fallbackProblem }
+
+        val directSolution = json["proposed_solution"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+        val fallbackSolution = (
+            json["feedback_for_planning"]?.jsonPrimitive?.contentOrNull
+                ?: json["recommendation"]?.jsonPrimitive?.contentOrNull
+                ?: "Вернуться к проблемному шагу, исправить результат и затем повторить проверку."
+            ).trim()
+        val solution = directSolution.ifBlank { fallbackSolution }
+
+        val failedStepId = json["failed_step_id"]?.jsonPrimitive?.contentOrNull?.toIntOrNull()
+            ?: json["failed_step_id"]?.jsonPrimitive?.intOrNull
+            ?: extractStepId(problem)
+            ?: extractStepId(solution)
+            ?: executionSteps.getOrNull(executionCurrentStepIndex)?.stepId
+            ?: executionSteps.lastOrNull()?.stepId
+            ?: 1
+
+        val retryFromStepId = json["retry_from_step_id"]?.jsonPrimitive?.contentOrNull?.toIntOrNull()
+            ?: json["retry_from_step_id"]?.jsonPrimitive?.intOrNull
+            ?: failedStepId
+
+        return ValidationFailureInfo(
+            problem = problem,
+            failedStepId = failedStepId,
+            retryFromStepId = retryFromStepId,
+            proposedSolution = solution
+        )
+    }
+
 
     suspend fun awaitUnpaused(sessionId: Int): Boolean {
         while (isPaused) {
@@ -1022,6 +1102,12 @@ private fun AiStateAgentChat(
                 return
             }
 
+            parseValidationFailure(result1)?.let {
+                validationFailure = it
+                isLoading = false
+                return
+            }
+
             validationPhase = 2
         }
 
@@ -1071,6 +1157,8 @@ private fun AiStateAgentChat(
             val combined = (invariantViolations + phase2Violations).distinct()
             invariantViolations = combined
         }
+
+        validationFailure = parseValidationFailure(result2)
 
         isLoading = false
     }
@@ -1161,8 +1249,8 @@ private fun AiStateAgentChat(
             executionResults[step.stepId] = result
             executionCurrentStepIndex++
         }
-
         // все шаги выполнены
+        executionRecoveryInstruction = null
         executionText = executionResults.entries.sortedBy { it.key }
             .joinToString("\n\n") { (id, res) -> "=== Шаг $id ===\n$res" }
 
@@ -1264,6 +1352,8 @@ private fun AiStateAgentChat(
         executionSteps.addAll(plan.steps)
         executionCurrentStepIndex = 0
         executionResults.clear()
+        executionRecoveryInstruction = null
+        validationFailure = null
 
         scope.launch {
             val sessionId = chatSessionId
@@ -1342,6 +1432,7 @@ private fun AiStateAgentChat(
         if (isLoading) return
 
         validationPhase = 1
+        validationFailure = null
         val checkMessages = createStateBranch(chatId, 4, "Проверка")
         selectedBranchNumber = 4
         agentState = AgentState.Checking
@@ -1356,6 +1447,7 @@ private fun AiStateAgentChat(
     fun onCheckingDone() {
         val chatId = activeChatId ?: return
         if (isLoading) return
+        if (validationFailure != null) return
 
         val branches = branchesByChat[chatId] ?: return
         val mainBranch = branches.firstOrNull { it.number == 1 } ?: return
@@ -1487,6 +1579,8 @@ private fun AiStateAgentChat(
         executionSteps.clear()
         executionCurrentStepIndex = 0
         executionResults.clear()
+        executionRecoveryInstruction = null
+        validationFailure = null
         executionText = ""
         planningMessages.clear()
         agentState = AgentState.Planning
@@ -1548,6 +1642,8 @@ private fun AiStateAgentChat(
         isErrorState = false
         executionCurrentStepIndex = 0
         executionResults.clear()
+        executionRecoveryInstruction = null
+        validationFailure = null
         execMessages.clear()
         agentState = AgentState.Execution
         selectedBranchNumber = 3
@@ -1604,6 +1700,7 @@ private fun AiStateAgentChat(
     fun retryExecution() {
         val chatId = activeChatId ?: return
         if (isLoading) return
+        isErrorState = false
         val execMessages = branchesByChat[chatId]?.firstOrNull { it.number == 3 }?.messages ?: return
         scope.launch {
             val sessionId = chatSessionId
@@ -1612,9 +1709,56 @@ private fun AiStateAgentChat(
         }
     }
 
+    fun applyValidationFix() {
+        val chatId = activeChatId ?: return
+        val failure = validationFailure ?: return
+        if (isLoading) return
+
+        val retryIndex = findStepIndexById(failure.retryFromStepId)
+        val retryStepIds = executionSteps.drop(retryIndex).map { it.stepId }.toSet()
+        retryStepIds.forEach { executionResults.remove(it) }
+        executionCurrentStepIndex = retryIndex
+        executionText = executionResults.entries.sortedBy { it.key }
+            .joinToString("\n\n") { (id, res) -> "Шаг $id:\n$res" }
+        executionRecoveryInstruction = buildString {
+            appendLine("Проверка обнаружила проблему после выполнения плана.")
+            appendLine("Проблема: ${failure.problem}")
+            appendLine("Проблемный шаг: ${failure.failedStepId}")
+            append("Решение: ${failure.proposedSolution}")
+        }
+        validationFailure = null
+        selectedBranchNumber = 3
+        agentState = AgentState.Execution
+
+        val execMessages = branchesByChat[chatId]?.firstOrNull { it.number == 3 }?.messages ?: return
+        val resumeMsg = AiAgentMessage(
+            text = buildString {
+                appendLine("Исправление после проверки")
+                appendLine("Возврат к шагу ${failure.retryFromStepId}")
+                appendLine("Проблема: ${failure.problem}")
+                append("Решение: ${failure.proposedSolution}")
+            },
+            isUser = true,
+            paramsInfo = "stage=execution|recovery|step=${failure.retryFromStepId}",
+            stream = AiAgentStream.Raw,
+            epoch = 0,
+            createdAt = System.currentTimeMillis()
+        )
+        execMessages += resumeMsg
+        appendMessageToBranch(chatId, 3, resumeMsg)
+        scope.launch {
+            val sessionId = chatSessionId
+            isLoading = true
+            isErrorState = false
+            executeStepsLoop(chatId, execMessages, sessionId)
+        }
+
+    }
     fun retryChecking() {
         val chatId = activeChatId ?: return
         if (isLoading) return
+        isErrorState = false
+        validationFailure = null
         val checkMessages = branchesByChat[chatId]?.firstOrNull { it.number == 4 }?.messages ?: return
         scope.launch {
             val sessionId = chatSessionId
@@ -1643,6 +1787,8 @@ private fun AiStateAgentChat(
         executionSteps.clear()
         executionCurrentStepIndex = 0
         executionResults.clear()
+        executionRecoveryInstruction = null
+        validationFailure = null
         validationPhase = 1
         isPaused = false
         planClarificationNeeded = null
@@ -1959,7 +2105,7 @@ private fun AiStateAgentChat(
                                     verticalArrangement = Arrangement.spacedBy(4.dp),
                                     horizontalAlignment = Alignment.End
                                 ) {
-                                    chatBranches!!.forEach { branch ->
+                                    chatBranches.forEach { branch ->
                                         val isActiveBranch = chat.id == activeChatId && selectedBranchNumber == branch.number
                                         val branchContentColor = if (isActiveBranch)
                                             MaterialTheme.colorScheme.onPrimaryContainer
@@ -2150,6 +2296,39 @@ private fun AiStateAgentChat(
                     }
                 }
 
+                if (agentState == AgentState.Checking && validationFailure != null) {
+                    val failure = validationFailure!!
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(MaterialTheme.colorScheme.errorContainer, RoundedCornerShape(12.dp))
+                            .padding(12.dp)
+                    ) {
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text(
+                                "Найдена проблема при проверке результата",
+                                color = MaterialTheme.colorScheme.onErrorContainer,
+                                style = MaterialTheme.typography.labelMedium
+                            )
+                            Text(
+                                "Проблема: ${failure.problem}",
+                                color = MaterialTheme.colorScheme.onErrorContainer,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                            Text(
+                                "Проблемный шаг плана: ${failure.failedStepId}",
+                                color = MaterialTheme.colorScheme.onErrorContainer,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                            Text(
+                                "Решение: ${failure.proposedSolution}",
+                                color = MaterialTheme.colorScheme.onErrorContainer,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                    }
+                }
+
                 // State machine action area
                 when {
                     (agentState == AgentState.Execution || agentState == AgentState.Checking) && isLoading -> {
@@ -2316,6 +2495,13 @@ private fun AiStateAgentChat(
                                     color = MaterialTheme.colorScheme.error
                                 )
                                 Button(onClick = ::retryChecking) { Text("Повторить") }
+                            } else if (validationFailure != null) {
+                                Text(
+                                    "Проверка нашла проблему. Можно вернуться к шагу исправления.",
+                                    modifier = Modifier.weight(1f),
+                                    color = MaterialTheme.colorScheme.error
+                                )
+                                Button(onClick = ::applyValidationFix) { Text("Исправить") }
                             } else if (invariantViolations.isNotEmpty()) {
                                 Box(modifier = Modifier.weight(1f))
                                 Button(onClick = {
@@ -2679,3 +2865,6 @@ private fun AiAgentBubble(
         }
     }
 }
+
+
+

@@ -1,4 +1,4 @@
-package com.example.aiadventchalengetestllmapi.aistateagent
+﻿package com.example.aiadventchalengetestllmapi.aistateagent
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
@@ -6,6 +6,9 @@ import kotlinx.serialization.Serializable
 internal const val EXECUTION_STEP_PROMPT_TEMPLATE = """Ты — ИИ-агент, выполняющий аналитический шаг плана.
 Контекст задачи:
 {task_context}
+
+Контекст исправления (если есть):
+{recovery_context}
 
 Текущий шаг (step_id: {step_id}):
 {step_description}
@@ -15,9 +18,10 @@ internal const val EXECUTION_STEP_PROMPT_TEMPLATE = """Ты — ИИ-агент,
 
 Инструкция:
 1. Выполни шаг самостоятельно, используя свои знания и результаты предыдущих шагов.
-2. Если шаг подразумевает генерацию текста/кода/анализа — создай это.
+2. Если шаг подразумевает генерацию текста, кода или анализа — создай это.
 3. Если шаг подразумевает преобразование данных — выполни преобразование.
-4. Верни результат в структурированном виде.
+4. Если передан контекст исправления, обязательно учти его при повторном выполнении.
+5. Верни результат в структурированном виде.
 
 Ответ должен быть в формате JSON:
 {
@@ -29,7 +33,7 @@ internal const val EXECUTION_STEP_PROMPT_TEMPLATE = """Ты — ИИ-агент,
       "confidence": 0.0-1.0
     }
   },
-  "reasoning": "Объяснение хода мыслей",
+  "reasoning": "объяснение хода мыслей",
   "next_step_ready": true
 }"""
 
