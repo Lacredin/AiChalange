@@ -6,6 +6,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -1469,6 +1470,101 @@ private fun AiStateAgentChat(
 
     // ─── Retry helpers ─────────────────────────────────────────────────────────
 
+    fun restartPlanning(chatId: Long) {
+        if (userRequestText.isBlank()) return
+        val planningMessages = branchesByChat[chatId]?.firstOrNull { it.number == 2 }?.messages ?: return
+        chatSessionId++
+        val sessionId = chatSessionId
+        isPaused = false
+        isErrorState = false
+        planText = ""
+        planClarificationNeeded = null
+        planInvariantCheckFailed = false
+        planInvariantViolationByAi = false
+        invariantViolations = emptyList()
+        lastPlanEditText = ""
+        // сбрасываем всё зависимое от плана: старые шаги и результаты выполнения устарели
+        executionSteps.clear()
+        executionCurrentStepIndex = 0
+        executionResults.clear()
+        executionText = ""
+        planningMessages.clear()
+        agentState = AgentState.Planning
+        selectedBranchNumber = 2
+        isLoading = true
+        scope.launch {
+            val result = try {
+                val r = callPlanningApi(userRequestText)
+                isErrorState = false
+                r
+            } catch (_: Exception) {
+                isErrorState = true
+                isLoading = false
+                return@launch
+            }
+            if (sessionId != chatSessionId) { isLoading = false; return@launch }
+            planText = result
+            val msg = AiAgentMessage(
+                text = result, isUser = false,
+                paramsInfo = "stage=planning|restart", stream = AiAgentStream.Raw, epoch = 0,
+                createdAt = System.currentTimeMillis()
+            )
+            planningMessages += msg
+            appendMessageToBranch(chatId, 2, msg)
+            handleClarificationInPlanResult(result, chatId, planningMessages)
+            isLoading = false
+        }
+    }
+
+    fun restartChecking(chatId: Long) {
+        if (executionText.isBlank()) return  // нечего проверять без результатов выполнения
+        val checkMessages = branchesByChat[chatId]?.firstOrNull { it.number == 4 }?.messages ?: return
+        chatSessionId++
+        val sessionId = chatSessionId
+        isPaused = false
+        isErrorState = false
+        validationPhase = 1
+        checkMessages.clear()
+        agentState = AgentState.Checking
+        selectedBranchNumber = 4
+        isLoading = true
+        scope.launch {
+            runValidationLoop(chatId, checkMessages, sessionId)
+        }
+    }
+
+    fun restartExecution() {
+        val chatId = activeChatId ?: return
+        if (executionSteps.isEmpty()) {
+            if (planText.isBlank()) return
+            val plan = try { lenientJson.decodeFromString<PlanJson>(planText) } catch (_: Exception) { return }
+            if (plan.steps.isEmpty()) return
+            executionSteps.addAll(plan.steps)
+        }
+        val execMessages = branchesByChat[chatId]?.firstOrNull { it.number == 3 }?.messages ?: return
+        chatSessionId++
+        val sessionId = chatSessionId
+        isPaused = false
+        isErrorState = false
+        executionCurrentStepIndex = 0
+        executionResults.clear()
+        execMessages.clear()
+        agentState = AgentState.Execution
+        selectedBranchNumber = 3
+        isLoading = true
+        scope.launch {
+            executeStepsLoop(chatId, execMessages, sessionId)
+        }
+    }
+
+    fun restartBranch(chatId: Long, branchNumber: Int) {
+        when (branchNumber) {
+            1, 3 -> restartExecution()
+            2 -> restartPlanning(chatId)
+            4 -> restartChecking(chatId)
+        }
+    }
+
     fun retryPlanning() {
         val chatId = activeChatId ?: return
         if (isLoading) return
@@ -1865,6 +1961,10 @@ private fun AiStateAgentChat(
                                 ) {
                                     chatBranches!!.forEach { branch ->
                                         val isActiveBranch = chat.id == activeChatId && selectedBranchNumber == branch.number
+                                        val branchContentColor = if (isActiveBranch)
+                                            MaterialTheme.colorScheme.onPrimaryContainer
+                                        else
+                                            MaterialTheme.colorScheme.onSurface
                                         Box(
                                             modifier = Modifier
                                                 .fillMaxWidth(0.85f)
@@ -1874,18 +1974,35 @@ private fun AiStateAgentChat(
                                                     else
                                                         Modifier.border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(8.dp))
                                                 )
-                                                .clickable(enabled = !isLoading) {
-                                                    if (activeChatId != chat.id) openChat(chat.id)
-                                                    selectedBranchNumber = branch.number
-                                                }
-                                                .padding(horizontal = 8.dp, vertical = 8.dp)
+                                                .padding(start = 8.dp, end = 4.dp, top = 4.dp, bottom = 4.dp)
                                         ) {
-                                            Text(
-                                                text = branchNames[branch.number] ?: "Ветка ${branch.number}",
-                                                style = MaterialTheme.typography.labelSmall,
-                                                color = if (isActiveBranch) MaterialTheme.colorScheme.onPrimaryContainer
-                                                        else MaterialTheme.colorScheme.onSurface
-                                            )
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                            ) {
+                                                Text(
+                                                    text = branchNames[branch.number] ?: "Ветка ${branch.number}",
+                                                    modifier = Modifier
+                                                        .weight(1f)
+                                                        .clickable {
+                                                            if (activeChatId != chat.id) openChat(chat.id)
+                                                            selectedBranchNumber = branch.number
+                                                        }
+                                                        .padding(vertical = 4.dp),
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = branchContentColor
+                                                )
+                                                TextButton(
+                                                    onClick = {
+                                                        if (activeChatId != chat.id) openChat(chat.id)
+                                                        restartBranch(chat.id, branch.number)
+                                                    },
+                                                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp),
+                                                    modifier = Modifier.height(28.dp)
+                                                ) {
+                                                    Text("↺", style = MaterialTheme.typography.labelSmall, color = branchContentColor)
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -1978,7 +2095,7 @@ private fun AiStateAgentChat(
                     items(displayMessages) { message ->
                         AiAgentBubble(message = message)
                     }
-                    if (isLoading) {
+                    if (isLoading && !isPaused) {
                         item {
                             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                                 CircularProgressIndicator(modifier = Modifier.padding(8.dp))
