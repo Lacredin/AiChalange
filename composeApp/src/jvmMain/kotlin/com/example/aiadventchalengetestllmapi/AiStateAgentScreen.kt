@@ -264,7 +264,8 @@ private data class ValidationFailureInfo(
     val problem: String,
     val failedStepId: Int,
     val retryFromStepId: Int,
-    val proposedSolution: String
+    val proposedSolution: String,
+    val stepDetectionSource: String
 )
 
 private data class AiAgentMessage(
@@ -446,6 +447,8 @@ private fun AiStateAgentChat(
     var executionRecoveryInstruction by remember { mutableStateOf<String?>(null) }
     var validationPhase by remember { mutableStateOf(1) }
     var validationFailure by remember { mutableStateOf<ValidationFailureInfo?>(null) }
+    var validationRecoveryBranchNumber by remember { mutableStateOf<Int?>(null) }
+    var validationRecoveryAttempt by remember { mutableStateOf(0) }
     var isPaused by remember { mutableStateOf(false) }
     var planClarificationNeeded by remember { mutableStateOf<String?>(null) }
 
@@ -695,6 +698,30 @@ private fun AiStateAgentChat(
         branchVisibilityByChat[chatId] = true
         branchNames[branchNumber] = name
         return messages
+    }
+
+    fun createAutoStateBranch(chatId: Long, name: String): Pair<Int, SnapshotStateList<AiAgentMessage>> {
+        val nextBranchNumber = (branchCounterByChat[chatId] ?: 0) + 1
+        return nextBranchNumber to createStateBranch(chatId, nextBranchNumber, name)
+    }
+
+    fun appendValidationRecoveryHistory(
+        chatId: Long,
+        text: String,
+        paramsInfo: String
+    ) {
+        val branchNumber = validationRecoveryBranchNumber ?: return
+        val messages = branchesByChat[chatId]?.firstOrNull { it.number == branchNumber }?.messages ?: return
+        val message = AiAgentMessage(
+            text = text,
+            isUser = false,
+            paramsInfo = paramsInfo,
+            stream = AiAgentStream.Raw,
+            epoch = 0,
+            createdAt = System.currentTimeMillis()
+        )
+        messages += message
+        appendMessageToBranch(chatId, branchNumber, message)
     }
 
     suspend fun callPlanningApi(userQuery: String): String {
@@ -948,6 +975,26 @@ private fun AiStateAgentChat(
             ?.toIntOrNull()
     }
 
+    fun findStepIdByDescriptionMatch(vararg texts: String?): Int? {
+        val haystack = texts.filterNotNull().joinToString(" ").lowercase()
+        if (haystack.isBlank()) return null
+
+        return executionSteps
+            .map { step ->
+                val descriptionWords = Regex("""\p{L}[\p{L}\p{N}_-]*""")
+                    .findAll(step.description.lowercase())
+                    .map { it.value }
+                    .filter { it.length >= 4 }
+                    .distinct()
+                    .toList()
+                val matches = descriptionWords.count { haystack.contains(it) }
+                step.stepId to matches
+            }
+            .filter { it.second > 0 }
+            .maxByOrNull { it.second }
+            ?.first
+    }
+
     fun parseValidationFailure(response: String): ValidationFailureInfo? {
         val json = try { lenientJson.parseToJsonElement(response).jsonObject } catch (_: Exception) { return null }
         val overallPassed = json["overall_passed"]?.jsonPrimitive?.booleanOrNull
@@ -983,23 +1030,54 @@ private fun AiStateAgentChat(
             ).trim()
         val solution = directSolution.ifBlank { fallbackSolution }
 
-        val failedStepId = json["failed_step_id"]?.jsonPrimitive?.contentOrNull?.toIntOrNull()
+        val issuesText = json["issues"]?.jsonArray?.joinToString(" ") { it.jsonPrimitive.contentOrNull.orEmpty() }.orEmpty()
+        val feedbackText = json["feedback_for_planning"]?.jsonPrimitive?.contentOrNull.orEmpty()
+        val recommendationText = json["recommendation"]?.jsonPrimitive?.contentOrNull.orEmpty()
+
+        val explicitFailedStepId = json["failed_step_id"]?.jsonPrimitive?.contentOrNull?.toIntOrNull()
             ?: json["failed_step_id"]?.jsonPrimitive?.intOrNull
-            ?: extractStepId(problem)
+        val explicitRetryStepId = json["retry_from_step_id"]?.jsonPrimitive?.contentOrNull?.toIntOrNull()
+            ?: json["retry_from_step_id"]?.jsonPrimitive?.intOrNull
+        val parsedFromTextStepId = extractStepId(problem)
             ?: extractStepId(solution)
+            ?: extractStepId(issuesText)
+            ?: extractStepId(feedbackText)
+            ?: extractStepId(recommendationText)
+        val matchedByDescriptionStepId = findStepIdByDescriptionMatch(
+            problem,
+            solution,
+            issuesText,
+            feedbackText,
+            recommendationText
+        )
+        val lastExecutedStepId = executionResults.keys.maxOrNull()
             ?: executionSteps.getOrNull(executionCurrentStepIndex)?.stepId
             ?: executionSteps.lastOrNull()?.stepId
-            ?: 1
+        val fallbackFirstStepId = executionSteps.firstOrNull()?.stepId ?: 1
 
-        val retryFromStepId = json["retry_from_step_id"]?.jsonPrimitive?.contentOrNull?.toIntOrNull()
-            ?: json["retry_from_step_id"]?.jsonPrimitive?.intOrNull
-            ?: failedStepId
+        val failedStepId = explicitFailedStepId
+            ?: explicitRetryStepId
+            ?: parsedFromTextStepId
+            ?: matchedByDescriptionStepId
+            ?: lastExecutedStepId
+            ?: fallbackFirstStepId
+
+        val retryFromStepId = explicitRetryStepId ?: failedStepId
+        val stepDetectionSource = when {
+            explicitFailedStepId != null -> "model.failed_step_id"
+            explicitRetryStepId != null -> "model.retry_from_step_id"
+            parsedFromTextStepId != null -> "parsed_from_text"
+            matchedByDescriptionStepId != null -> "matched_step_description"
+            lastExecutedStepId != null -> "last_executed_step"
+            else -> "first_plan_step"
+        }
 
         return ValidationFailureInfo(
             problem = problem,
             failedStepId = failedStepId,
             retryFromStepId = retryFromStepId,
-            proposedSolution = solution
+            proposedSolution = solution,
+            stepDetectionSource = stepDetectionSource
         )
     }
 
@@ -1104,6 +1182,31 @@ private fun AiStateAgentChat(
 
             parseValidationFailure(result1)?.let {
                 validationFailure = it
+                if (validationRecoveryBranchNumber == null) {
+                    validationRecoveryAttempt += 1
+                    val (branchNumber, messages) = createAutoStateBranch(
+                        chatId,
+                        "Проверка: исправление #$validationRecoveryAttempt"
+                    )
+                    validationRecoveryBranchNumber = branchNumber
+                    val failureMsg = AiAgentMessage(
+                        text = buildString {
+                            appendLine("Найдена проблема по итогам проверки")
+                            appendLine("Попытка исправления: #$validationRecoveryAttempt")
+                            appendLine("Проблема: ${it.problem}")
+                            appendLine("Проблемный шаг: ${it.failedStepId}")
+                            appendLine("Источник определения шага: ${it.stepDetectionSource}")
+                            append("Предложенное решение: ${it.proposedSolution}")
+                        },
+                        isUser = false,
+                        paramsInfo = "stage=checking|recovery|failure|phase=1",
+                        stream = AiAgentStream.Raw,
+                        epoch = 0,
+                        createdAt = System.currentTimeMillis()
+                    )
+                    messages += failureMsg
+                    appendMessageToBranch(chatId, branchNumber, failureMsg)
+                }
                 isLoading = false
                 return
             }
@@ -1159,6 +1262,41 @@ private fun AiStateAgentChat(
         }
 
         validationFailure = parseValidationFailure(result2)
+        if (validationFailure != null) {
+            val failure = validationFailure!!
+            if (validationRecoveryBranchNumber == null) {
+                validationRecoveryAttempt += 1
+                val (branchNumber, messages) = createAutoStateBranch(
+                    chatId,
+                    "Проверка: исправление #$validationRecoveryAttempt"
+                )
+                validationRecoveryBranchNumber = branchNumber
+                val failureMsg = AiAgentMessage(
+                    text = buildString {
+                        appendLine("Найдена проблема по итогам проверки")
+                        appendLine("Попытка исправления: #$validationRecoveryAttempt")
+                        appendLine("Проблема: ${failure.problem}")
+                        appendLine("Проблемный шаг: ${failure.failedStepId}")
+                        appendLine("Источник определения шага: ${failure.stepDetectionSource}")
+                        append("Предложенное решение: ${failure.proposedSolution}")
+                    },
+                    isUser = false,
+                    paramsInfo = "stage=checking|recovery|failure|phase=2",
+                    stream = AiAgentStream.Raw,
+                    epoch = 0,
+                    createdAt = System.currentTimeMillis()
+                )
+                messages += failureMsg
+                appendMessageToBranch(chatId, branchNumber, failureMsg)
+            }
+        } else if (validationRecoveryBranchNumber != null) {
+            appendValidationRecoveryHistory(
+                chatId = chatId,
+                text = "Проверка после исправления завершилась успешно.",
+                paramsInfo = "stage=checking|recovery|resolved"
+            )
+            validationRecoveryBranchNumber = null
+        }
 
         isLoading = false
     }
@@ -1354,6 +1492,7 @@ private fun AiStateAgentChat(
         executionResults.clear()
         executionRecoveryInstruction = null
         validationFailure = null
+        validationRecoveryBranchNumber = null
 
         scope.launch {
             val sessionId = chatSessionId
@@ -1581,6 +1720,8 @@ private fun AiStateAgentChat(
         executionResults.clear()
         executionRecoveryInstruction = null
         validationFailure = null
+        validationRecoveryBranchNumber = null
+        validationRecoveryAttempt = 0
         executionText = ""
         planningMessages.clear()
         agentState = AgentState.Planning
@@ -1789,6 +1930,8 @@ private fun AiStateAgentChat(
         executionResults.clear()
         executionRecoveryInstruction = null
         validationFailure = null
+        validationRecoveryBranchNumber = null
+        validationRecoveryAttempt = 0
         validationPhase = 1
         isPaused = false
         planClarificationNeeded = null
@@ -2317,6 +2460,11 @@ private fun AiStateAgentChat(
                             )
                             Text(
                                 "Проблемный шаг плана: ${failure.failedStepId}",
+                                color = MaterialTheme.colorScheme.onErrorContainer,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                            Text(
+                                "Источник определения шага: ${failure.stepDetectionSource}",
                                 color = MaterialTheme.colorScheme.onErrorContainer,
                                 style = MaterialTheme.typography.bodySmall
                             )
@@ -2865,6 +3013,9 @@ private fun AiAgentBubble(
         }
     }
 }
+
+
+
 
 
 
