@@ -27,7 +27,9 @@ kotlin {
             implementation(libs.ktor.client.core)
             implementation(libs.ktor.client.content.negotiation)
             implementation(libs.ktor.client.logging)
+            implementation(libs.ktor.sse)
             implementation(libs.ktor.serialization.kotlinx.json)
+            implementation(libs.mcp.kotlin.sdk)
             implementation(libs.sqldelight.runtime)
             implementation(libs.sqldelight.coroutines.extensions)
         }
@@ -92,6 +94,7 @@ val generateBuildSecrets by tasks.registering {
         val openAi = escapeForKotlin(readSecret("OPENAI_API_KEY"))
         val gigaChat = escapeForKotlin(readSecret("GIGACHAT_ACCESS_TOKEN"))
         val proxyApi = escapeForKotlin(readSecret("PROXYAPI_API_KEY"))
+        val githubPat = escapeForKotlin(readSecret("GITHUB_PERSONAL_ACCESS_TOKEN"))
 
         val content = """
             package com.example.aiadventchalengetestllmapi
@@ -101,12 +104,14 @@ val generateBuildSecrets by tasks.registering {
                 private const val OPENAI_API_KEY: String = "$openAi"
                 private const val GIGACHAT_ACCESS_TOKEN: String = "$gigaChat"
                 private const val PROXYAPI_API_KEY: String = "$proxyApi"
+                private const val GITHUB_PERSONAL_ACCESS_TOKEN: String = "$githubPat"
 
                 fun apiKeyFor(envVar: String): String = when (envVar) {
                     "DEEPSEEK_API_KEY" -> DEEPSEEK_API_KEY
                     "OPENAI_API_KEY" -> OPENAI_API_KEY
                     "GIGACHAT_ACCESS_TOKEN" -> GIGACHAT_ACCESS_TOKEN
                     "PROXYAPI_API_KEY" -> PROXYAPI_API_KEY
+                    "GITHUB_PERSONAL_ACCESS_TOKEN" -> GITHUB_PERSONAL_ACCESS_TOKEN
                     else -> ""
                 }
             }

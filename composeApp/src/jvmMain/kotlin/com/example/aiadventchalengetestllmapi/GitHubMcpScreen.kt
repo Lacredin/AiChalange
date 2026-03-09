@@ -1,0 +1,397 @@
+package com.example.aiadventchalengetestllmapi.githubmcp
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.lightColorScheme
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.dp
+import com.example.aiadventchalengetestllmapi.RootScreen
+import com.example.aiadventchalengetestllmapi.mcp.McpToolInfo
+import com.example.aiadventchalengetestllmapi.mcp.RemoteMcpService
+import kotlinx.coroutines.launch
+
+internal object GitHubMcpScreenTheme {
+    val primary = Color(0xFF1F6F50)
+    val onPrimary = Color(0xFFFFFFFF)
+    val primaryContainer = Color(0xFFCFECDD)
+    val onPrimaryContainer = Color(0xFF0B2E21)
+
+    val secondary = Color(0xFF4B8E74)
+    val onSecondary = Color(0xFFFFFFFF)
+    val secondaryContainer = Color(0xFFE3F4EA)
+    val onSecondaryContainer = Color(0xFF123D2E)
+
+    val background = Color(0xFFF4FBF6)
+    val onBackground = Color(0xFF102019)
+    val surface = Color(0xFFFFFFFF)
+    val onSurface = Color(0xFF14221B)
+    val surfaceVariant = Color(0xFFE8F3EC)
+    val onSurfaceVariant = Color(0xFF385246)
+    val outline = Color(0xFF9AB8A9)
+
+    val accent = Color(0xFF8FCB9B)
+    val accentSoft = Color(0xFFDDF1E2)
+    val success = Color(0xFF2A7A57)
+    val errorSoft = Color(0xFFF5E5E7)
+    val divider = Color(0xFFD4E6DA)
+
+    fun colorScheme() = lightColorScheme(
+        primary = primary,
+        onPrimary = onPrimary,
+        primaryContainer = primaryContainer,
+        onPrimaryContainer = onPrimaryContainer,
+        secondary = secondary,
+        onSecondary = onSecondary,
+        secondaryContainer = secondaryContainer,
+        onSecondaryContainer = onSecondaryContainer,
+        background = background,
+        onBackground = onBackground,
+        surface = surface,
+        onSurface = onSurface,
+        surfaceVariant = surfaceVariant,
+        onSurfaceVariant = onSurfaceVariant,
+        outline = outline,
+        error = Color(0xFFB3261E),
+        onError = Color(0xFFFFFFFF),
+        errorContainer = errorSoft,
+        onErrorContainer = Color(0xFF601410)
+    )
+}
+
+@Composable
+private fun SelectableText(
+    text: String,
+    modifier: Modifier = Modifier,
+    color: Color = MaterialTheme.colorScheme.onSurface,
+    style: androidx.compose.ui.text.TextStyle = MaterialTheme.typography.bodyMedium
+) {
+    SelectionContainer {
+        Text(
+            text = text,
+            modifier = modifier,
+            color = color,
+            style = style
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun GitHubMcpScreen(
+    currentScreen: RootScreen,
+    onSelectScreen: (RootScreen) -> Unit
+) {
+    MaterialTheme(colorScheme = GitHubMcpScreenTheme.colorScheme()) {
+        GitHubMcpScreenContent(
+            currentScreen = currentScreen,
+            onSelectScreen = onSelectScreen
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun GitHubMcpScreenContent(
+    currentScreen: RootScreen,
+    onSelectScreen: (RootScreen) -> Unit
+) {
+    val scope = rememberCoroutineScope()
+    val remoteMcpService = remember { RemoteMcpService() }
+    val tools = remember { mutableStateListOf<McpToolInfo>() }
+    var screensMenuExpanded by remember { mutableStateOf(false) }
+    var isLoading by remember { mutableStateOf(false) }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
+    var statusText by remember { mutableStateOf("Готово к загрузке инструментов Microsoft Learn MCP.") }
+
+    fun loadTools() {
+        if (isLoading) return
+        scope.launch {
+            isLoading = true
+            errorMessage = null
+            statusText = "Запрашиваю список инструментов у Microsoft Learn MCP..."
+            runCatching {
+                remoteMcpService.listAvailableTools()
+            }.onSuccess { loadedTools ->
+                tools.clear()
+                tools += loadedTools
+                statusText = if (loadedTools.isEmpty()) {
+                    "Microsoft Learn MCP ответил, но список инструментов пуст."
+                } else {
+                    "Получено инструментов: ${loadedTools.size}"
+                }
+            }.onFailure { error ->
+                errorMessage = error.message ?: error::class.simpleName ?: "Неизвестная ошибка"
+                statusText = "Не удалось получить инструменты."
+            }
+            isLoading = false
+        }
+    }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = {
+                    Box {
+                        TextButton(
+                            onClick = { screensMenuExpanded = true },
+                            enabled = !isLoading
+                        ) {
+                            SelectionContainer {
+                                Text("Microsoft Learn MCP")
+                            }
+                        }
+                        DropdownMenu(
+                            expanded = screensMenuExpanded,
+                            onDismissRequest = { screensMenuExpanded = false }
+                        ) {
+                            DropdownMenuItem(
+                                text = {
+                                    SelectableText(if (currentScreen == RootScreen.GitHubMcp) "Microsoft Learn MCP ✓" else "Microsoft Learn MCP")
+                                },
+                                onClick = {
+                                    screensMenuExpanded = false
+                                    onSelectScreen(RootScreen.GitHubMcp)
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = {
+                                    SelectableText(if (currentScreen == RootScreen.AiStateAgent) "AiStateAgent ✓" else "AiStateAgent")
+                                },
+                                onClick = {
+                                    screensMenuExpanded = false
+                                    onSelectScreen(RootScreen.AiStateAgent)
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = {
+                                    SelectableText(if (currentScreen == RootScreen.AiWeek3) "Ai неделя 3 ✓" else "Ai неделя 3")
+                                },
+                                onClick = {
+                                    screensMenuExpanded = false
+                                    onSelectScreen(RootScreen.AiWeek3)
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = {
+                                    SelectableText(if (currentScreen == RootScreen.AiAgent) "AiAgent ✓" else "AiAgent")
+                                },
+                                onClick = {
+                                    screensMenuExpanded = false
+                                    onSelectScreen(RootScreen.AiAgent)
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = {
+                                    SelectableText(if (currentScreen == RootScreen.App) "App ✓" else "App")
+                                },
+                                onClick = {
+                                    screensMenuExpanded = false
+                                    onSelectScreen(RootScreen.App)
+                                }
+                            )
+                        }
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = GitHubMcpScreenTheme.secondaryContainer,
+                    titleContentColor = GitHubMcpScreenTheme.onSecondaryContainer,
+                    actionIconContentColor = GitHubMcpScreenTheme.onSecondaryContainer
+                )
+            )
+        }
+    ) { innerPadding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(MaterialTheme.colorScheme.background)
+                .padding(innerPadding)
+                .padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(
+                        color = GitHubMcpScreenTheme.primaryContainer,
+                        shape = RoundedCornerShape(24.dp)
+                    )
+                    .padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                SelectableText(
+                    text = "Новый стартовый экран для Microsoft Learn MCP",
+                    style = MaterialTheme.typography.headlineSmall,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                )
+                SelectableText(
+                    text = "Экран подключается к готовому remote endpoint Microsoft Learn MCP и показывает доступные инструменты без локального запуска сервера и без токена.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .background(GitHubMcpScreenTheme.accent, RoundedCornerShape(999.dp))
+                            .padding(horizontal = 12.dp, vertical = 6.dp)
+                    ) {
+                        SelectableText(
+                            text = "MCP over HTTP",
+                            color = GitHubMcpScreenTheme.onPrimaryContainer,
+                            style = MaterialTheme.typography.labelMedium
+                        )
+                    }
+                    Box(
+                        modifier = Modifier
+                            .background(GitHubMcpScreenTheme.accentSoft, RoundedCornerShape(999.dp))
+                            .padding(horizontal = 12.dp, vertical = 6.dp)
+                    ) {
+                        SelectableText(
+                            text = "Endpoint: https://learn.microsoft.com/api/mcp",
+                            color = GitHubMcpScreenTheme.onPrimaryContainer,
+                            style = MaterialTheme.typography.labelMedium
+                        )
+                    }
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Button(
+                    onClick = ::loadTools,
+                    enabled = !isLoading
+                ) {
+                    if (isLoading) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.onPrimary
+                        )
+                    } else {
+                        SelectionContainer {
+                            Text("Получить инструменты Microsoft Learn")
+                        }
+                    }
+                }
+                SelectableText(
+                    text = statusText,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            if (errorMessage != null) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(MaterialTheme.colorScheme.errorContainer, RoundedCornerShape(20.dp))
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    SelectableText(
+                        text = "Ошибка подключения",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer
+                    )
+                    SelectableText(
+                        text = errorMessage.orEmpty(),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer
+                    )
+                }
+            }
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(24.dp))
+                    .border(1.dp, GitHubMcpScreenTheme.divider, RoundedCornerShape(24.dp))
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                SelectableText(
+                    text = "Доступные инструменты",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                if (tools.isEmpty() && !isLoading) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(GitHubMcpScreenTheme.accentSoft, RoundedCornerShape(20.dp))
+                            .padding(20.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        SelectableText(
+                            text = "Нажмите кнопку выше, чтобы запросить `tools/list` у Microsoft Learn MCP.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        items(tools, key = { it.name }) { tool ->
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(GitHubMcpScreenTheme.surfaceVariant, RoundedCornerShape(18.dp))
+                                    .border(1.dp, GitHubMcpScreenTheme.divider, RoundedCornerShape(18.dp))
+                                    .padding(14.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                SelectableText(
+                                    text = tool.name,
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = GitHubMcpScreenTheme.success
+                                )
+                                SelectableText(
+                                    text = if (tool.description.isBlank()) "Описание не передано сервером." else tool.description,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

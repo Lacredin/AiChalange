@@ -1219,6 +1219,17 @@ private fun AiAgentChat(
                             DropdownMenuItem(
                                 text = {
                                     Text(
+                                        if (currentScreen == RootScreen.GitHubMcp) "GitHub MCP ✓" else "GitHub MCP"
+                                    )
+                                },
+                                onClick = {
+                                    screensMenuExpanded = false
+                                    onSelectScreen(RootScreen.GitHubMcp)
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
                                         if (currentScreen == RootScreen.AiWeek3) "Ai неделя 3 ✓" else "Ai неделя 3"
                                     )
                                 },

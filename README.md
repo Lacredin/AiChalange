@@ -37,5 +37,6 @@ This file is ignored by git and consumed during build to generate `BuildSecrets`
    - `OPENAI_API_KEY`
    - `GIGACHAT_ACCESS_TOKEN`
    - `PROXYAPI_API_KEY`
+   - `GITHUB_PERSONAL_ACCESS_TOKEN`
 
 Environment variables with the same names are still supported as fallback.
