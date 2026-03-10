@@ -1,4 +1,4 @@
-package com.example.aiadventchalengetestllmapi.githubmcp
+package com.example.aiadventchalengetestllmapi.aiagentmcp
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -58,7 +58,7 @@ private val mcpServerOptions = listOf(
     )
 )
 
-internal object GitHubMcpScreenTheme {
+internal object AiAgentMCPScreenTheme {
     val primary = Color(0xFF1F6F50)
     val onPrimary = Color(0xFFFFFFFF)
     val primaryContainer = Color(0xFFCFECDD)
@@ -125,12 +125,12 @@ private fun SelectableText(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun GitHubMcpScreen(
+fun AiAgentMCPScreen(
     currentScreen: RootScreen,
     onSelectScreen: (RootScreen) -> Unit
 ) {
-    MaterialTheme(colorScheme = GitHubMcpScreenTheme.colorScheme()) {
-        GitHubMcpScreenContent(
+    MaterialTheme(colorScheme = AiAgentMCPScreenTheme.colorScheme()) {
+        AiAgentMCPScreenContent(
             currentScreen = currentScreen,
             onSelectScreen = onSelectScreen
         )
@@ -139,7 +139,7 @@ fun GitHubMcpScreen(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun GitHubMcpScreenContent(
+private fun AiAgentMCPScreenContent(
     currentScreen: RootScreen,
     onSelectScreen: (RootScreen) -> Unit
 ) {
@@ -196,11 +196,11 @@ private fun GitHubMcpScreenContent(
                         ) {
                             DropdownMenuItem(
                                 text = {
-                                    SelectableText(if (currentScreen == RootScreen.GitHubMcp) "Microsoft Learn MCP ✓" else "Microsoft Learn MCP")
+                                    SelectableText(if (currentScreen == RootScreen.AiAgentMCP) "Microsoft Learn MCP ✓" else "Microsoft Learn MCP")
                                 },
                                 onClick = {
                                     screensMenuExpanded = false
-                                    onSelectScreen(RootScreen.GitHubMcp)
+                                    onSelectScreen(RootScreen.AiAgentMCP)
                                 }
                             )
                             DropdownMenuItem(
@@ -243,9 +243,9 @@ private fun GitHubMcpScreenContent(
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = GitHubMcpScreenTheme.secondaryContainer,
-                    titleContentColor = GitHubMcpScreenTheme.onSecondaryContainer,
-                    actionIconContentColor = GitHubMcpScreenTheme.onSecondaryContainer
+                    containerColor = AiAgentMCPScreenTheme.secondaryContainer,
+                    titleContentColor = AiAgentMCPScreenTheme.onSecondaryContainer,
+                    actionIconContentColor = AiAgentMCPScreenTheme.onSecondaryContainer
                 )
             )
         }
@@ -262,7 +262,7 @@ private fun GitHubMcpScreenContent(
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(
-                        color = GitHubMcpScreenTheme.primaryContainer,
+                        color = AiAgentMCPScreenTheme.primaryContainer,
                         shape = RoundedCornerShape(24.dp)
                     )
                     .padding(20.dp),
@@ -281,23 +281,23 @@ private fun GitHubMcpScreenContent(
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
                     Box(
                         modifier = Modifier
-                            .background(GitHubMcpScreenTheme.accent, RoundedCornerShape(999.dp))
+                            .background(AiAgentMCPScreenTheme.accent, RoundedCornerShape(999.dp))
                             .padding(horizontal = 12.dp, vertical = 6.dp)
                     ) {
                         SelectableText(
                             text = "MCP over HTTP",
-                            color = GitHubMcpScreenTheme.onPrimaryContainer,
+                            color = AiAgentMCPScreenTheme.onPrimaryContainer,
                             style = MaterialTheme.typography.labelMedium
                         )
                     }
                     Box(
                         modifier = Modifier
-                            .background(GitHubMcpScreenTheme.accentSoft, RoundedCornerShape(999.dp))
+                            .background(AiAgentMCPScreenTheme.accentSoft, RoundedCornerShape(999.dp))
                             .padding(horizontal = 12.dp, vertical = 6.dp)
                     ) {
                         SelectableText(
                             text = "Endpoint: ${selectedServer.url}",
-                            color = GitHubMcpScreenTheme.onPrimaryContainer,
+                            color = AiAgentMCPScreenTheme.onPrimaryContainer,
                             style = MaterialTheme.typography.labelMedium
                         )
                     }
@@ -390,7 +390,7 @@ private fun GitHubMcpScreenContent(
                     .fillMaxWidth()
                     .weight(1f)
                     .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(24.dp))
-                    .border(1.dp, GitHubMcpScreenTheme.divider, RoundedCornerShape(24.dp))
+                    .border(1.dp, AiAgentMCPScreenTheme.divider, RoundedCornerShape(24.dp))
                     .padding(16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
@@ -403,7 +403,7 @@ private fun GitHubMcpScreenContent(
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
-                            .background(GitHubMcpScreenTheme.accentSoft, RoundedCornerShape(20.dp))
+                            .background(AiAgentMCPScreenTheme.accentSoft, RoundedCornerShape(20.dp))
                             .padding(20.dp),
                         contentAlignment = Alignment.Center
                     ) {
@@ -422,15 +422,15 @@ private fun GitHubMcpScreenContent(
                             Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .background(GitHubMcpScreenTheme.surfaceVariant, RoundedCornerShape(18.dp))
-                                    .border(1.dp, GitHubMcpScreenTheme.divider, RoundedCornerShape(18.dp))
+                                    .background(AiAgentMCPScreenTheme.surfaceVariant, RoundedCornerShape(18.dp))
+                                    .border(1.dp, AiAgentMCPScreenTheme.divider, RoundedCornerShape(18.dp))
                                     .padding(14.dp),
                                 verticalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
                                 SelectableText(
                                     text = tool.name,
                                     style = MaterialTheme.typography.titleSmall,
-                                    color = GitHubMcpScreenTheme.success
+                                    color = AiAgentMCPScreenTheme.success
                                 )
                                 SelectableText(
                                     text = if (tool.description.isBlank()) "Описание не передано сервером." else tool.description,

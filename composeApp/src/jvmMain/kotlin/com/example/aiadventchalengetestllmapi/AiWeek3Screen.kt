@@ -1573,12 +1573,12 @@ private fun AiWeek3Chat(
                             DropdownMenuItem(
                                 text = {
                                     Text(
-                                        if (currentScreen == RootScreen.GitHubMcp) "GitHub MCP ?" else "GitHub MCP"
+                                        if (currentScreen == RootScreen.AiAgentMCP) "AiAgentMCP ?" else "AiAgentMCP"
                                     )
                                 },
                                 onClick = {
                                     screensMenuExpanded = false
-                                    onSelectScreen(RootScreen.GitHubMcp)
+                                    onSelectScreen(RootScreen.AiAgentMCP)
                                 }
                             )
                             DropdownMenuItem(

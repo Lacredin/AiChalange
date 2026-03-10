@@ -7,10 +7,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import com.example.aiadventchalengetestllmapi.aiweek3.AiWeek3Screen
 import com.example.aiadventchalengetestllmapi.aistateagent.AiStateAgentScreen
-import com.example.aiadventchalengetestllmapi.githubmcp.GitHubMcpScreen
+import com.example.aiadventchalengetestllmapi.aiagentmcp.AiAgentMCPScreen
 
 enum class RootScreen {
-    GitHubMcp,
+    AiAgentMCP,
     AiStateAgent,
     AiWeek3,
     AiAgent,
@@ -19,10 +19,10 @@ enum class RootScreen {
 
 @Composable
 fun RootApp() {
-    var currentScreen by remember { mutableStateOf(RootScreen.GitHubMcp) }
+    var currentScreen by remember { mutableStateOf(RootScreen.AiAgentMCP) }
 
     when (currentScreen) {
-        RootScreen.GitHubMcp -> GitHubMcpScreen(
+        RootScreen.AiAgentMCP -> AiAgentMCPScreen(
             currentScreen = currentScreen,
             onSelectScreen = { selectedScreen -> currentScreen = selectedScreen }
         )
@@ -43,7 +43,7 @@ fun RootApp() {
         )
 
         RootScreen.App -> App(
-            onBackClick = { currentScreen = RootScreen.GitHubMcp }
+            onBackClick = { currentScreen = RootScreen.AiAgentMCP }
         )
     }
 }

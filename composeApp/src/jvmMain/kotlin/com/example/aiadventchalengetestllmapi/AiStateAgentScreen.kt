@@ -2103,8 +2103,8 @@ private fun AiStateAgentChat(
                             onDismissRequest = { screensMenuExpanded = false }
                         ) {
                             DropdownMenuItem(
-                                text = { Text(if (currentScreen == RootScreen.GitHubMcp) "GitHub MCP ✓" else "GitHub MCP") },
-                                onClick = { screensMenuExpanded = false; onSelectScreen(RootScreen.GitHubMcp) }
+                                text = { Text(if (currentScreen == RootScreen.AiAgentMCP) "AiAgentMCP ✓" else "AiAgentMCP") },
+                                onClick = { screensMenuExpanded = false; onSelectScreen(RootScreen.AiAgentMCP) }
                             )
                             DropdownMenuItem(
                                 text = { Text(if (currentScreen == RootScreen.AiStateAgent) "AiStateAgent ✓" else "AiStateAgent") },
