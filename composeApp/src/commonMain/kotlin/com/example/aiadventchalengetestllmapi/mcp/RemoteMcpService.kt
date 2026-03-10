@@ -13,7 +13,7 @@ data class McpToolInfo(
 )
 
 class RemoteMcpService {
-    suspend fun listAvailableTools(): List<McpToolInfo> {
+    suspend fun listAvailableTools(serverUrl: String = MICROSOFT_LEARN_MCP_URL): List<McpToolInfo> {
         val client = Client(
             clientInfo = Implementation(
                 name = "microsoft-learn-mcp-screen",
@@ -22,7 +22,7 @@ class RemoteMcpService {
         )
         val transport = StreamableHttpClientTransport(
             client = NetworkClient.httpClient,
-            url = MICROSOFT_LEARN_MCP_URL
+            url = serverUrl
         )
 
         client.connect(transport)

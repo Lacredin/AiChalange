@@ -42,6 +42,22 @@ import com.example.aiadventchalengetestllmapi.mcp.McpToolInfo
 import com.example.aiadventchalengetestllmapi.mcp.RemoteMcpService
 import kotlinx.coroutines.launch
 
+private data class McpServerOption(
+    val title: String,
+    val url: String
+)
+
+private val mcpServerOptions = listOf(
+    McpServerOption(
+        title = "Microsoft Learn MCP",
+        url = "https://learn.microsoft.com/api/mcp"
+    ),
+    McpServerOption(
+        title = "Local MCP (127.0.0.1)",
+        url = "http://127.0.0.1:8080/mcp"
+    )
+)
+
 internal object GitHubMcpScreenTheme {
     val primary = Color(0xFF1F6F50)
     val onPrimary = Color(0xFFFFFFFF)
@@ -131,6 +147,8 @@ private fun GitHubMcpScreenContent(
     val remoteMcpService = remember { RemoteMcpService() }
     val tools = remember { mutableStateListOf<McpToolInfo>() }
     var screensMenuExpanded by remember { mutableStateOf(false) }
+    var serverMenuExpanded by remember { mutableStateOf(false) }
+    var selectedServer by remember { mutableStateOf(mcpServerOptions.first()) }
     var isLoading by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var statusText by remember { mutableStateOf("Готово к загрузке инструментов Microsoft Learn MCP.") }
@@ -142,7 +160,7 @@ private fun GitHubMcpScreenContent(
             errorMessage = null
             statusText = "Запрашиваю список инструментов у Microsoft Learn MCP..."
             runCatching {
-                remoteMcpService.listAvailableTools()
+                remoteMcpService.listAvailableTools(selectedServer.url)
             }.onSuccess { loadedTools ->
                 tools.clear()
                 tools += loadedTools
@@ -278,10 +296,41 @@ private fun GitHubMcpScreenContent(
                             .padding(horizontal = 12.dp, vertical = 6.dp)
                     ) {
                         SelectableText(
-                            text = "Endpoint: https://learn.microsoft.com/api/mcp",
+                            text = "Endpoint: ${selectedServer.url}",
                             color = GitHubMcpScreenTheme.onPrimaryContainer,
                             style = MaterialTheme.typography.labelMedium
                         )
+                    }
+                }
+                Box {
+                    TextButton(
+                        onClick = { serverMenuExpanded = true },
+                        enabled = !isLoading
+                    ) {
+                        SelectableText(
+                            text = "MCP server: ${selectedServer.title}",
+                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                    }
+                    DropdownMenu(
+                        expanded = serverMenuExpanded,
+                        onDismissRequest = { serverMenuExpanded = false }
+                    ) {
+                        mcpServerOptions.forEach { server ->
+                            DropdownMenuItem(
+                                text = {
+                                    SelectableText(
+                                        if (selectedServer.url == server.url) "${server.title} [selected]" else server.title
+                                    )
+                                },
+                                onClick = {
+                                    selectedServer = server
+                                    serverMenuExpanded = false
+                                    tools.clear()
+                                    errorMessage = null
+                                }
+                            )
+                        }
                     }
                 }
             }
