@@ -151,21 +151,21 @@ private fun GitHubMcpScreenContent(
     var selectedServer by remember { mutableStateOf(mcpServerOptions.first()) }
     var isLoading by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
-    var statusText by remember { mutableStateOf("Готово к загрузке инструментов Microsoft Learn MCP.") }
+    var statusText by remember { mutableStateOf("Готово к загрузке инструментов ${selectedServer.title}.") }
 
     fun loadTools() {
         if (isLoading) return
         scope.launch {
             isLoading = true
             errorMessage = null
-            statusText = "Запрашиваю список инструментов у Microsoft Learn MCP..."
+            statusText = "Запрашиваю список инструментов у ${selectedServer.title}..."
             runCatching {
                 remoteMcpService.listAvailableTools(selectedServer.url)
             }.onSuccess { loadedTools ->
                 tools.clear()
                 tools += loadedTools
                 statusText = if (loadedTools.isEmpty()) {
-                    "Microsoft Learn MCP ответил, но список инструментов пуст."
+                    "${selectedServer.title} ответил, но список инструментов пуст."
                 } else {
                     "Получено инструментов: ${loadedTools.size}"
                 }
@@ -269,12 +269,12 @@ private fun GitHubMcpScreenContent(
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 SelectableText(
-                    text = "Новый стартовый экран для Microsoft Learn MCP",
+                    text = "Новый экран для ${selectedServer.title}",
                     style = MaterialTheme.typography.headlineSmall,
                     color = MaterialTheme.colorScheme.onPrimaryContainer
                 )
                 SelectableText(
-                    text = "Экран подключается к готовому remote endpoint Microsoft Learn MCP и показывает доступные инструменты без локального запуска сервера и без токена.",
+                    text = "Экран подключается к выбранному remote endpoint и показывает доступные инструменты этого MCP-сервера.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onPrimaryContainer
                 )
@@ -328,6 +328,7 @@ private fun GitHubMcpScreenContent(
                                     serverMenuExpanded = false
                                     tools.clear()
                                     errorMessage = null
+                                    statusText = "Выбран сервер: ${server.title}"
                                 }
                             )
                         }
@@ -352,7 +353,7 @@ private fun GitHubMcpScreenContent(
                         )
                     } else {
                         SelectionContainer {
-                            Text("Получить инструменты Microsoft Learn")
+                            Text("Получить инструменты: ${selectedServer.title}")
                         }
                     }
                 }
@@ -407,7 +408,7 @@ private fun GitHubMcpScreenContent(
                         contentAlignment = Alignment.Center
                     ) {
                         SelectableText(
-                            text = "Нажмите кнопку выше, чтобы запросить `tools/list` у Microsoft Learn MCP.",
+                            text = "Нажмите кнопку выше, чтобы запросить `tools/list` у ${selectedServer.title}.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
