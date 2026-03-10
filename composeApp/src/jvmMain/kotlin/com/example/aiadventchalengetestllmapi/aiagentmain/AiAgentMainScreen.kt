@@ -107,6 +107,23 @@ private fun tryParseJson(text: String): JsonElement? {
     }
 }
 
+private fun tryParseJsonExecution(text: String): JsonElement? {
+    tryParseJson(text)?.let { return it }
+
+    val codeBlock = Regex("```(?:json)?\\s*([\\s\\S]*?)\\s*```", RegexOption.IGNORE_CASE)
+        .find(text)
+        ?.groupValues
+        ?.getOrNull(1)
+        ?.trim()
+    if (!codeBlock.isNullOrBlank()) {
+        tryParseJson(codeBlock)?.let { return it }
+    }
+
+    val start = text.indexOf('{').takeIf { it >= 0 } ?: return null
+    val end = text.lastIndexOf('}').takeIf { it > start } ?: return null
+    return tryParseJson(text.substring(start, end + 1))
+}
+
 @Composable
 private fun JsonTreeView(element: JsonElement, indent: Int = 0) {
     val pad = (indent * 16).dp
@@ -2300,6 +2317,13 @@ private fun AiAgentMainChat(
                 ?: emptyList()
         else emptyList()
 
+    val latestExecutionAssistantMessage = displayMessages.lastOrNull { message ->
+        !message.isUser && message.paramsInfo.startsWith("stage=execution|step=")
+    }
+    val parsedExecutionJson = remember(latestExecutionAssistantMessage?.text) {
+        latestExecutionAssistantMessage?.text?.let(::tryParseJsonExecution)
+    }
+
     LaunchedEffect(displayMessages.size, isLoading) {
         if (displayMessages.isNotEmpty()) listState.animateScrollToItem(displayMessages.lastIndex)
     }
@@ -2614,6 +2638,27 @@ private fun AiAgentMainChat(
                     items(displayMessages) { message ->
                         AiAgentBubble(message = message)
                     }
+                    if (agentState == AgentState.Execution && parsedExecutionJson != null) {
+                        item {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(12.dp))
+                                    .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.35f), RoundedCornerShape(12.dp))
+                                    .padding(12.dp)
+                            ) {
+                                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Text(
+                                        text = "JSON ответа ИИ (Execution)",
+                                        style = MaterialTheme.typography.labelMedium
+                                    )
+                                    SelectionContainer {
+                                        JsonTreeView(parsedExecutionJson)
+                                    }
+                                }
+                            }
+                        }
+                    }
                     if (isLoading && !isPaused) {
                         item {
                             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
@@ -2664,6 +2709,26 @@ private fun AiAgentMainChat(
                                         color = MaterialTheme.colorScheme.onErrorContainer
                                     )
                                 }
+                            }
+                        }
+                    }
+                }
+
+                if (false && agentState == AgentState.Execution && parsedExecutionJson != null) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(12.dp))
+                            .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.35f), RoundedCornerShape(12.dp))
+                            .padding(12.dp)
+                    ) {
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text(
+                                text = "JSON ответа ИИ (Execution)",
+                                style = MaterialTheme.typography.labelMedium
+                            )
+                            SelectionContainer {
+                                JsonTreeView(parsedExecutionJson)
                             }
                         }
                     }
