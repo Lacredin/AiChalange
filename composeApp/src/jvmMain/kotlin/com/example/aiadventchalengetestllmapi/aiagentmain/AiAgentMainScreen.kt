@@ -426,6 +426,16 @@ private fun AiAgentMainChat(
             mcpServerOptions.forEach { put(it.url, false) }
         }
     }
+    val mcpServerTools = remember {
+        mutableStateMapOf<String, List<String>>().apply {
+            mcpServerOptions.forEach { put(it.url, emptyList()) }
+        }
+    }
+    val mcpServerErrors = remember {
+        mutableStateMapOf<String, String?>().apply {
+            mcpServerOptions.forEach { put(it.url, null) }
+        }
+    }
     var mcpToolsSummary by remember { mutableStateOf("MCP выключен") }
 
     // Branching
@@ -687,6 +697,116 @@ private fun AiAgentMainChat(
         )
     }
 
+    fun enabledMcpServers(): List<McpServerOption> =
+        mcpServerOptions.filter { mcpServerEnabled[it.url] == true }
+
+    fun updateMcpSummaryFast() {
+        if (!isMcpEnabled) {
+            mcpToolsSummary = "MCP disabled"
+            return
+        }
+        val enabledServers = enabledMcpServers()
+        if (enabledServers.isEmpty()) {
+            mcpToolsSummary = "MCP enabled, no servers selected"
+            return
+        }
+        mcpToolsSummary = enabledServers.joinToString("\n\n") { server ->
+            val tools = mcpServerTools[server.url].orEmpty()
+            val error = mcpServerErrors[server.url]
+            val body = when {
+                error != null -> "connection error: $error"
+                tools.isEmpty() -> "no tools found"
+                else -> tools.joinToString("\n") { "- $it" }
+            }
+            "Server: ${server.title}\n$body"
+        }
+    }
+
+    suspend fun refreshMcpServerTools(serverUrl: String) {
+        val server = mcpServerOptions.firstOrNull { it.url == serverUrl } ?: return
+        runCatching { remoteMcpService.listAvailableTools(server.url) }
+            .onSuccess { tools ->
+                mcpServerTools[server.url] = tools.map { it.name }
+                mcpServerErrors[server.url] = null
+            }
+            .onFailure { error ->
+                mcpServerTools[server.url] = emptyList()
+                mcpServerErrors[server.url] = error.message ?: error::class.simpleName ?: "unknown"
+            }
+        updateMcpSummaryFast()
+    }
+
+    suspend fun refreshEnabledMcpServerTools() {
+        enabledMcpServers().forEach { server ->
+            refreshMcpServerTools(server.url)
+        }
+        updateMcpSummaryFast()
+    }
+
+    fun updateMcpToolsSummaryCached() {
+        if (!isMcpEnabled) {
+            mcpToolsSummary = "MCP выключен"
+            return
+        }
+        val enabledServers = enabledMcpServers()
+        if (enabledServers.isEmpty()) {
+            mcpToolsSummary = "MCP включен, серверы не выбраны"
+            return
+        }
+        mcpToolsSummary = enabledServers.joinToString("\n\n") { server ->
+            val tools = mcpServerTools[server.url].orEmpty()
+            val error = mcpServerErrors[server.url]
+            val body = when {
+                error != null -> "ошибка подключения: $error"
+                tools.isEmpty() -> "инструменты не найдены"
+                else -> tools.joinToString("\n") { "- $it" }
+            }
+            "Сервер: ${server.title}\n$body"
+        }
+    }
+
+    fun buildMcpToolsContextCached(): String {
+        updateMcpSummaryFast()
+        return mcpToolsSummary
+    }
+
+    suspend fun buildMcpSystemMessageCached(): DeepSeekMessage? {
+        if (!isMcpEnabled) return null
+        val context = buildMcpToolsContextCached().trim()
+        if (context.isBlank()) return null
+        return DeepSeekMessage(
+            role = "system",
+            content = "Контекст MCP-серверов (кэш инструментов):\n$context"
+        )
+    }
+
+    suspend fun runMcpToolForExecution(
+        step: PlanStepJson,
+        taskContext: String,
+        previousResultsFormatted: String
+    ): String? {
+        if (!isMcpEnabled) return null
+        val toolName = step.tool?.trim().orEmpty()
+        if (toolName.isEmpty()) return null
+
+        val enabledServers = enabledMcpServers()
+        val targetServer = enabledServers.firstOrNull { server ->
+            mcpServerTools[server.url].orEmpty().any { it.equals(toolName, ignoreCase = true) }
+        } ?: return "MCP tool '$toolName' не найден среди активных серверов."
+
+        val arguments = mapOf(
+            "step_id" to step.stepId,
+            "step_description" to step.description,
+            "task_context" to taskContext,
+            "previous_results" to previousResultsFormatted
+        )
+        return runCatching { remoteMcpService.callTool(targetServer.url, toolName, arguments) }
+            .fold(
+                onSuccess = { output -> "MCP tool '$toolName' (${targetServer.title}) output:\n$output" },
+                onFailure = { error -> "MCP tool '$toolName' (${targetServer.title}) error: ${error.message ?: error::class.simpleName ?: "unknown"}" }
+            )
+    }
+
     fun buildInvariantsPromptSuffix(): String {
         if (!isInvariantsEnabled || invariants.isEmpty()) return ""
         return buildString {
@@ -803,7 +923,7 @@ private fun AiAgentMainChat(
         val promptText = PLANNING_PROMPT_TEMPLATE.replace("{user_query}", userQuery)
         val messages = buildList {
             buildLtmSystemMessage()?.let { add(it) }
-            buildMcpSystemMessage()?.let { add(it) }
+            buildMcpSystemMessageCached()?.let { add(it) }
             add(DeepSeekMessage(role = "user", content = promptText))
         }
         val request = DeepSeekChatRequest(
@@ -839,12 +959,10 @@ private fun AiAgentMainChat(
             .replace("{original_user_query}", originalUserQuery)
             .replace("{clarification_question}", clarificationQuestion)
             .replace("{user_clarification_response}", userClarificationResponse)
-            .replace("{available_tools_formatted}", buildMcpToolsContext())
-            .replace("{available_tools_formatted}", buildMcpToolsContext())
-            .replace("{available_tools_formatted}", "нет доступных инструментов")
+            .replace("{available_tools_formatted}", buildMcpToolsContextCached())
         val messages = buildList {
             buildLtmSystemMessage()?.let { add(it) }
-            buildMcpSystemMessage()?.let { add(it) }
+            buildMcpSystemMessageCached()?.let { add(it) }
             add(DeepSeekMessage(role = "user", content = promptText))
         }
         val request = DeepSeekChatRequest(
@@ -896,7 +1014,7 @@ private fun AiAgentMainChat(
             .replace("{user_edit_text}", userEditText)
         val messages = buildList {
             buildLtmSystemMessage()?.let { add(it) }
-            buildMcpSystemMessage()?.let { add(it) }
+            buildMcpSystemMessageCached()?.let { add(it) }
             add(DeepSeekMessage(role = "user", content = promptText))
         }
         val request = DeepSeekChatRequest(
@@ -926,7 +1044,7 @@ private fun AiAgentMainChat(
         if (apiKey.isBlank()) error("Нет API ключа. Проверьте ${requestApi.envVar}")
         val messages = buildList {
             buildLtmSystemMessage()?.let { add(it) }
-            buildMcpSystemMessage()?.let { add(it) }
+            buildMcpSystemMessageCached()?.let { add(it) }
             add(DeepSeekMessage(role = "user", content = userMessageText))
         }
         val request = DeepSeekChatRequest(model = model, messages = messages)
@@ -959,7 +1077,7 @@ private fun AiAgentMainChat(
             .replace("{previous_results_formatted}", previousResultsFormatted)
         val messages = buildList {
             buildLtmSystemMessage()?.let { add(it) }
-            buildMcpSystemMessage()?.let { add(it) }
+            buildMcpSystemMessageCached()?.let { add(it) }
             buildInvariantsSystemMessage()?.let { add(it) }
             add(DeepSeekMessage(role = "user", content = promptText))
         }
@@ -993,7 +1111,7 @@ private fun AiAgentMainChat(
             .replace("{user_edit_request}", userEditRequest.ifBlank { "(отсутствует — план создан ИИ)" })
         val messages = buildList {
             buildLtmSystemMessage()?.let { add(it) }
-            buildMcpSystemMessage()?.let { add(it) }
+            buildMcpSystemMessageCached()?.let { add(it) }
             add(DeepSeekMessage(role = "user", content = promptText))
         }
         val request = DeepSeekChatRequest(
@@ -1176,7 +1294,7 @@ private fun AiAgentMainChat(
         if (apiKey.isBlank()) error("Нет API ключа. Проверьте ${requestApi.envVar}")
         val messages = buildList {
             buildLtmSystemMessage()?.let { add(it) }
-            buildMcpSystemMessage()?.let { add(it) }
+            buildMcpSystemMessageCached()?.let { add(it) }
             add(DeepSeekMessage(role = "user", content = promptText))
         }
         val request = DeepSeekChatRequest(
@@ -1429,12 +1547,36 @@ private fun AiAgentMainChat(
             execMessages += stepUserMsg
             appendMessageToBranch(chatId, 3, stepUserMsg)
 
+            val mcpToolOutput = runMcpToolForExecution(
+                step = step,
+                taskContext = taskContext,
+                previousResultsFormatted = previousResultsFormatted
+            )
+            if (!mcpToolOutput.isNullOrBlank()) {
+                val mcpMsg = AiAgentMessage(
+                    text = mcpToolOutput,
+                    isUser = false,
+                    paramsInfo = "stage=execution|mcp|step=${step.stepId}",
+                    stream = AiAgentStream.Raw,
+                    epoch = 0,
+                    createdAt = System.currentTimeMillis()
+                )
+                execMessages += mcpMsg
+                appendMessageToBranch(chatId, 3, mcpMsg)
+            }
+
+            val previousResultsWithMcp = if (mcpToolOutput.isNullOrBlank()) {
+                previousResultsFormatted
+            } else {
+                "$previousResultsFormatted\n\n$mcpToolOutput"
+            }
+
             val result = try {
                 val r = callExecutionStepApi(
                     taskContext = taskContext,
                     stepId = step.stepId,
                     stepDescription = step.description,
-                    previousResultsFormatted = previousResultsFormatted
+                    previousResultsFormatted = previousResultsWithMcp
                 )
                 isErrorState = false
                 r
@@ -2145,6 +2287,7 @@ private fun AiAgentMainChat(
         chats.clear()
         chats += storedChats
         if (chats.isEmpty()) createNewChatAndOpen() else openChat(chats.last().id)
+        mcpServerOptions.forEach { server -> refreshMcpServerTools(server.url) }
     }
 
     LaunchedEffect(isLoading) {
@@ -3053,7 +3196,14 @@ private fun AiAgentMainChat(
                     ) {
                         Checkbox(
                             checked = isMcpEnabled,
-                            onCheckedChange = { checked -> isMcpEnabled = checked },
+                            onCheckedChange = { checked ->
+                                isMcpEnabled = checked
+                                if (checked) {
+                                    scope.launch { refreshEnabledMcpServerTools() }
+                                } else {
+                                    updateMcpSummaryFast()
+                                }
+                            },
                             enabled = !isLoading
                         )
                         Text(
@@ -3070,7 +3220,14 @@ private fun AiAgentMainChat(
                         ) {
                             Checkbox(
                                 checked = mcpServerEnabled[server.url] == true,
-                                onCheckedChange = { checked -> mcpServerEnabled[server.url] = checked },
+                                onCheckedChange = { checked ->
+                                    mcpServerEnabled[server.url] = checked
+                                    if (isMcpEnabled && checked) {
+                                        scope.launch { refreshMcpServerTools(server.url) }
+                                    } else {
+                                        updateMcpSummaryFast()
+                                    }
+                                },
                                 enabled = !isLoading && isMcpEnabled
                             )
                             Text(
@@ -3083,7 +3240,7 @@ private fun AiAgentMainChat(
                     TextButton(
                         onClick = {
                             scope.launch {
-                                mcpToolsSummary = buildMcpToolsContext()
+                                refreshEnabledMcpServerTools()
                             }
                         },
                         enabled = !isLoading && isMcpEnabled
