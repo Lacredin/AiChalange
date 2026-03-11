@@ -548,6 +548,24 @@ private fun AiAgentMainChat(
     fun loadChatsFromDb(): List<AiAgentChatItem> =
         queries.selectChats().executeAsList().map { AiAgentChatItem(id = it.id, title = it.title) }
 
+    fun appSettingBool(key: String, default: Boolean): Boolean {
+        val row = queries.selectAppSettingByKey(setting_key = key).executeAsOneOrNull()
+        return when (row?.setting_value?.trim()?.lowercase()) {
+            "1", "true", "yes", "on" -> true
+            "0", "false", "no", "off" -> false
+            else -> default
+        }
+    }
+
+    fun saveAppSettingBool(key: String, value: Boolean) {
+        queries.upsertAppSetting(
+            setting_key = key,
+            setting_value = if (value) "1" else "0"
+        )
+    }
+
+    fun mcpServerSettingKey(url: String): String = "mcp_server_enabled::$url"
+
     fun loadBranchesForChat(chatId: Long): SnapshotStateList<AiAgentBranchItem> {
         val branchMap = linkedMapOf<Int, SnapshotStateList<AiAgentMessage>>()
         queries.selectBranchMessagesByChat(chatId).executeAsList().forEach { row ->
@@ -2656,6 +2674,14 @@ private fun AiAgentMainChat(
 
     LaunchedEffect(Unit) {
         ensureProfileAndLtm()
+        isMcpEnabled = appSettingBool("mcp_enabled", default = false)
+        isInvariantsEnabled = appSettingBool("invariants_enabled", default = true)
+        mcpServerOptions.forEach { server ->
+            mcpServerEnabled[server.url] = appSettingBool(
+                key = mcpServerSettingKey(server.url),
+                default = false
+            )
+        }
         val storedChats = loadChatsFromDb()
         chats.clear()
         chats += storedChats
@@ -3395,7 +3421,13 @@ private fun AiAgentMainChat(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
-                        Checkbox(checked = isInvariantsEnabled, onCheckedChange = { isInvariantsEnabled = it })
+                        Checkbox(
+                            checked = isInvariantsEnabled,
+                            onCheckedChange = { checked ->
+                                isInvariantsEnabled = checked
+                                saveAppSettingBool("invariants_enabled", checked)
+                            }
+                        )
                         Text("Включить", style = MaterialTheme.typography.labelSmall)
                     }
 
@@ -3619,6 +3651,7 @@ private fun AiAgentMainChat(
                             checked = isMcpEnabled,
                             onCheckedChange = { checked ->
                                 isMcpEnabled = checked
+                                saveAppSettingBool("mcp_enabled", checked)
                                 if (checked) {
                                     scope.launch { refreshEnabledMcpServerTools() }
                                 } else {
@@ -3643,6 +3676,10 @@ private fun AiAgentMainChat(
                                 checked = mcpServerEnabled[server.url] == true,
                                 onCheckedChange = { checked ->
                                     mcpServerEnabled[server.url] = checked
+                                    saveAppSettingBool(
+                                        key = mcpServerSettingKey(server.url),
+                                        value = checked
+                                    )
                                     if (isMcpEnabled && checked) {
                                         scope.launch { refreshMcpServerTools(server.url) }
                                     } else {

@@ -247,6 +247,27 @@ deleteAllMemoryEntriesByProfile:
 DELETE FROM memory_entries
 WHERE profile_id = ?;
 
+CREATE TABLE app_settings (
+    setting_key TEXT NOT NULL PRIMARY KEY,
+    setting_value TEXT NOT NULL
+);
+
+selectAppSettingByKey:
+SELECT *
+FROM app_settings
+WHERE setting_key = ?;
+
+upsertAppSetting:
+INSERT OR REPLACE INTO app_settings(setting_key, setting_value)
+VALUES (?, ?);
+
+deleteAppSettingByKey:
+DELETE FROM app_settings
+WHERE setting_key = ?;
+
+deleteAllAppSettings:
+DELETE FROM app_settings;
+
 CREATE TABLE invariant_entries (
     id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
     entry_key TEXT NOT NULL,

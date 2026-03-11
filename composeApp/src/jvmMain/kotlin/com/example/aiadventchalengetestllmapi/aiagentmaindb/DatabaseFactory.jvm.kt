@@ -11,6 +11,7 @@ actual class AiAgentMainDatabaseDriverFactory {
     actual fun createDriver(): SqlDriver {
         val dbPath = defaultDatabasePath()
         recreateDatabaseIfSchemaMismatch(dbPath)
+        ensureAppSettingsTable(dbPath)
         var driver = openDriver(dbPath)
         if (!hasCompatibleSchema(dbPath)) {
             runCatching { AiAgentMainDatabase.Schema.create(driver) }
@@ -109,6 +110,22 @@ actual class AiAgentMainDatabaseDriverFactory {
             }
         }
         return true
+    }
+
+    private fun ensureAppSettingsTable(dbPath: Path) {
+        val connectionUrl = "jdbc:sqlite:$dbPath"
+        DriverManager.getConnection(connectionUrl).use { connection ->
+            connection.createStatement().use { statement ->
+                statement.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS app_settings (
+                        setting_key TEXT NOT NULL PRIMARY KEY,
+                        setting_value TEXT NOT NULL
+                    );
+                    """.trimIndent()
+                )
+            }
+        }
     }
 
     private fun deleteDatabaseFiles(dbPath: Path) {
