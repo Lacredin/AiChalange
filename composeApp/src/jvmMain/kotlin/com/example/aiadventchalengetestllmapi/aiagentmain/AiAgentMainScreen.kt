@@ -70,6 +70,7 @@ import com.example.aiadventchalengetestllmapi.BuildSecrets
 import com.example.aiadventchalengetestllmapi.RootScreen
 import com.example.aiadventchalengetestllmapi.aiagentmaindb.AiAgentMainDatabaseDriverFactory
 import com.example.aiadventchalengetestllmapi.aiagentmaindb.createAiAgentMainDatabase
+import com.example.aiadventchalengetestllmapi.mcp.McpToolInfo
 import com.example.aiadventchalengetestllmapi.mcp.RemoteMcpService
 import com.example.aiadventchalengetestllmapi.network.DeepSeekApi
 import com.example.aiadventchalengetestllmapi.network.DeepSeekChatRequest
@@ -86,12 +87,18 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.double
+import kotlinx.serialization.json.doubleOrNull
+import kotlinx.serialization.json.int
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.long
+import kotlinx.serialization.json.longOrNull
 
 private val streamStripRegex = Regex("""\s*\|\s*stream=(real|raw)""")
 private val epochStripRegex = Regex("""\s*\|\s*epoch=\d+""")
@@ -122,6 +129,19 @@ private fun tryParseJsonExecution(text: String): JsonElement? {
     val start = text.indexOf('{').takeIf { it >= 0 } ?: return null
     val end = text.lastIndexOf('}').takeIf { it > start } ?: return null
     return tryParseJson(text.substring(start, end + 1))
+}
+
+private fun jsonElementToAny(value: JsonElement): Any? = when (value) {
+    JsonNull -> null
+    is JsonPrimitive -> when {
+        value.booleanOrNull != null -> value.boolean
+        value.intOrNull != null -> value.int
+        value.longOrNull != null -> value.long
+        value.doubleOrNull != null -> value.double
+        else -> value.contentOrNull
+    }
+    is JsonObject -> value.mapValues { (_, v) -> jsonElementToAny(v) }
+    is JsonArray -> value.map { jsonElementToAny(it) }
 }
 
 @Composable
@@ -286,6 +306,13 @@ private data class ValidationFailureInfo(
     val stepDetectionSource: String
 )
 
+private data class ExecutionToolRequest(
+    val toolName: String,
+    val endpoint: String?,
+    val reason: String,
+    val arguments: Map<String, Any?>
+)
+
 private data class AiAgentMessage(
     val text: String,
     val isUser: Boolean,
@@ -448,12 +475,23 @@ private fun AiAgentMainChat(
             mcpServerOptions.forEach { put(it.url, emptyList()) }
         }
     }
+    val mcpServerToolInfos = remember {
+        mutableStateMapOf<String, List<McpToolInfo>>().apply {
+            mcpServerOptions.forEach { put(it.url, emptyList()) }
+        }
+    }
+    val mcpServerWebSocketTools = remember {
+        mutableStateMapOf<String, Set<String>>().apply {
+            mcpServerOptions.forEach { put(it.url, emptySet()) }
+        }
+    }
     val mcpServerErrors = remember {
         mutableStateMapOf<String, String?>().apply {
             mcpServerOptions.forEach { put(it.url, null) }
         }
     }
     var mcpToolsSummary by remember { mutableStateOf("MCP выключен") }
+    val websocketChatIdsByKey = remember { mutableStateMapOf<String, Long>() }
 
     // Branching
     val branchesByChat = remember { mutableStateMapOf<Long, SnapshotStateList<AiAgentBranchItem>>() }
@@ -542,6 +580,84 @@ private fun AiAgentMainChat(
             epoch = message.epoch.toLong(),
             created_at = message.createdAt
         )
+    }
+
+    fun websocketChatKey(serverUrl: String, toolName: String): String =
+        "${serverUrl.trim().lowercase()}::${toolName.trim().lowercase()}"
+
+    fun websocketChatTitle(serverTitle: String, toolName: String): String =
+        "WebSocket • $serverTitle • $toolName"
+
+    fun ensureWebSocketLogChatId(server: McpServerOption, toolName: String): Long {
+        val key = websocketChatKey(server.url, toolName)
+        val existing = websocketChatIdsByKey[key]
+        if (existing != null) {
+            val stillExists = queries.selectChatById(existing).executeAsOneOrNull() != null
+            if (stillExists) return existing
+            websocketChatIdsByKey.remove(key)
+        }
+
+        val title = websocketChatTitle(server.title, toolName)
+        val existingByTitle = loadChatsFromDb().firstOrNull { it.title == title }?.id
+        if (existingByTitle != null) {
+            websocketChatIdsByKey[key] = existingByTitle
+            return existingByTitle
+        }
+
+        queries.insertChat(
+            title = title,
+            created_at = System.currentTimeMillis(),
+            selected_profile_id = null
+        )
+        val chatId = queries.selectLastInsertedChatId().executeAsOne()
+        websocketChatIdsByKey[key] = chatId
+        chats.clear()
+        chats += loadChatsFromDb()
+        return chatId
+    }
+
+    fun ensureWebSocketLogBranch(chatId: Long): SnapshotStateList<AiAgentMessage> {
+        val existing = branchesByChat[chatId]?.firstOrNull { it.number == 1 }?.messages
+        if (existing != null) return existing
+
+        val fromDb = loadBranchesForChat(chatId)
+        if (fromDb.isNotEmpty()) {
+            branchesByChat[chatId] = fromDb
+            branchCounterByChat[chatId] = fromDb.maxOfOrNull { it.number } ?: 1
+            branchVisibilityByChat.putIfAbsent(chatId, true)
+            return fromDb.firstOrNull { it.number == 1 }?.messages ?: mutableStateListOf<AiAgentMessage>().also { fallback ->
+                val items = mutableStateListOf(AiAgentBranchItem(number = 1, messages = fallback))
+                branchesByChat[chatId] = items
+                branchCounterByChat[chatId] = 1
+                branchVisibilityByChat.putIfAbsent(chatId, true)
+            }
+        }
+
+        val messages = mutableStateListOf<AiAgentMessage>()
+        branchesByChat[chatId] = mutableStateListOf(AiAgentBranchItem(number = 1, messages = messages))
+        branchCounterByChat[chatId] = 1
+        branchVisibilityByChat.putIfAbsent(chatId, true)
+        return messages
+    }
+
+    fun appendWebSocketLog(
+        server: McpServerOption,
+        toolName: String,
+        direction: String,
+        payload: String
+    ) {
+        val chatId = ensureWebSocketLogChatId(server, toolName)
+        val messages = ensureWebSocketLogBranch(chatId)
+        val message = AiAgentMessage(
+            text = "[$direction] $payload",
+            isUser = direction == "SEND",
+            paramsInfo = "stage=websocket|server=${server.url}|tool=$toolName|direction=$direction",
+            stream = AiAgentStream.Raw,
+            epoch = 0,
+            createdAt = System.currentTimeMillis()
+        )
+        messages += message
+        appendMessageToBranch(chatId, 1, message)
     }
 
     // ─── Long-term memory ──────────────────────────────────────────────────────
@@ -685,12 +801,20 @@ private fun AiAgentMainChat(
         enabledServers.forEach { server ->
             runCatching { remoteMcpService.listAvailableTools(server.url) }
                 .onSuccess { tools ->
+                    mcpServerToolInfos[server.url] = tools
+                    mcpServerTools[server.url] = tools.map { it.name }
+                    mcpServerWebSocketTools[server.url] = tools
+                        .filter { it.supportsWebSocket }
+                        .map { it.name.lowercase() }
+                        .toSet()
+                    mcpServerErrors[server.url] = null
                     val toolsText = if (tools.isEmpty()) {
                         "инструменты не найдены"
                     } else {
                         tools.joinToString("\n") { tool ->
                             val description = tool.description.ifBlank { "без описания" }
-                            "- ${tool.name}: $description"
+                            val wsSuffix = if (tool.supportsWebSocket) " [WebSocket]" else ""
+                            "- ${tool.name}$wsSuffix: $description"
                         }
                     }
                     blocks += "Сервер: ${server.title}\n$toolsText"
@@ -729,11 +853,15 @@ private fun AiAgentMainChat(
         }
         mcpToolsSummary = enabledServers.joinToString("\n\n") { server ->
             val tools = mcpServerTools[server.url].orEmpty()
+            val wsTools = mcpServerWebSocketTools[server.url].orEmpty()
             val error = mcpServerErrors[server.url]
             val body = when {
                 error != null -> "connection error: $error"
                 tools.isEmpty() -> "no tools found"
-                else -> tools.joinToString("\n") { "- $it" }
+                else -> tools.joinToString("\n") { name ->
+                    val wsSuffix = if (wsTools.contains(name.lowercase())) " [WebSocket]" else ""
+                    "- $name$wsSuffix"
+                }
             }
             "Server: ${server.title}\n$body"
         }
@@ -743,11 +871,18 @@ private fun AiAgentMainChat(
         val server = mcpServerOptions.firstOrNull { it.url == serverUrl } ?: return
         runCatching { remoteMcpService.listAvailableTools(server.url) }
             .onSuccess { tools ->
+                mcpServerToolInfos[server.url] = tools
                 mcpServerTools[server.url] = tools.map { it.name }
+                mcpServerWebSocketTools[server.url] = tools
+                    .filter { it.supportsWebSocket }
+                    .map { it.name.lowercase() }
+                    .toSet()
                 mcpServerErrors[server.url] = null
             }
             .onFailure { error ->
+                mcpServerToolInfos[server.url] = emptyList()
                 mcpServerTools[server.url] = emptyList()
+                mcpServerWebSocketTools[server.url] = emptySet()
                 mcpServerErrors[server.url] = error.message ?: error::class.simpleName ?: "unknown"
             }
         updateMcpSummaryFast()
@@ -772,11 +907,15 @@ private fun AiAgentMainChat(
         }
         mcpToolsSummary = enabledServers.joinToString("\n\n") { server ->
             val tools = mcpServerTools[server.url].orEmpty()
+            val wsTools = mcpServerWebSocketTools[server.url].orEmpty()
             val error = mcpServerErrors[server.url]
             val body = when {
                 error != null -> "ошибка подключения: $error"
                 tools.isEmpty() -> "инструменты не найдены"
-                else -> tools.joinToString("\n") { "- $it" }
+                else -> tools.joinToString("\n") { name ->
+                    val wsSuffix = if (wsTools.contains(name.lowercase())) " [WebSocket]" else ""
+                    "- $name$wsSuffix"
+                }
             }
             "Сервер: ${server.title}\n$body"
         }
@@ -785,6 +924,35 @@ private fun AiAgentMainChat(
     fun buildMcpToolsContextCached(): String {
         updateMcpSummaryFast()
         return mcpToolsSummary
+    }
+
+    fun buildMcpToolsContextForPrompt(): String {
+        if (!isMcpEnabled) return "MCP отключен."
+        val enabledServers = enabledMcpServers()
+        if (enabledServers.isEmpty()) return "MCP включен, но серверы не выбраны."
+
+        return enabledServers.joinToString("\n\n") { server ->
+            val toolInfos = mcpServerToolInfos[server.url].orEmpty()
+            val error = mcpServerErrors[server.url]
+            val body = when {
+                error != null -> "ошибка подключения: $error"
+                toolInfos.isEmpty() -> {
+                    val names = mcpServerTools[server.url].orEmpty()
+                    if (names.isEmpty()) "инструменты не найдены"
+                    else names.joinToString("\n") { "- $it" }
+                }
+                else -> toolInfos.joinToString("\n\n") { tool ->
+                    val wsSuffix = if (tool.supportsWebSocket) " [WebSocket]" else ""
+                    val description = tool.description.ifBlank { "без описания" }
+                    buildString {
+                        appendLine("- ${tool.name}$wsSuffix")
+                        appendLine("  description: $description")
+                        append("  input_schema: ${tool.inputSchema}")
+                    }
+                }
+            }
+            "Server: ${server.title}\n$body"
+        }
     }
 
     suspend fun buildMcpSystemMessageCached(): DeepSeekMessage? {
@@ -797,31 +965,154 @@ private fun AiAgentMainChat(
         )
     }
 
+    fun endpointMatchesServer(endpoint: String, serverUrl: String): Boolean {
+        val endpointTrimmed = endpoint.trim()
+        if (endpointTrimmed.equals(serverUrl, ignoreCase = true)) return true
+        if (endpointTrimmed.equals(serverUrl.replace("http://", "ws://"), ignoreCase = true)) return true
+        if (endpointTrimmed.equals(serverUrl.replace("https://", "wss://"), ignoreCase = true)) return true
+
+        return if (endpointTrimmed.contains("://")) {
+            runCatching {
+                val endpointUri = java.net.URI(endpointTrimmed)
+                val serverUri = java.net.URI(serverUrl)
+                val endpointHost = endpointUri.host?.lowercase().orEmpty()
+                val serverHost = serverUri.host?.lowercase().orEmpty()
+                val endpointPort = if (endpointUri.port >= 0) endpointUri.port else endpointUri.toURL().defaultPort
+                val serverPort = if (serverUri.port >= 0) serverUri.port else serverUri.toURL().defaultPort
+                endpointHost == serverHost && endpointPort == serverPort
+            }.getOrDefault(false)
+        } else {
+            true
+        }
+    }
+
+    fun isMcpTransportEndpoint(endpoint: String, serverUrl: String): Boolean {
+        val endpointTrimmed = endpoint.trim()
+        return endpointTrimmed.equals(serverUrl, ignoreCase = true) ||
+            endpointTrimmed.equals(serverUrl.replace("http://", "ws://"), ignoreCase = true) ||
+            endpointTrimmed.equals(serverUrl.replace("https://", "wss://"), ignoreCase = true)
+    }
+
     suspend fun runMcpToolForExecution(
         step: PlanStepJson,
         taskContext: String,
-        previousResultsFormatted: String
+        previousResultsFormatted: String,
+        requestedToolName: String? = null,
+        requestedEndpoint: String? = null,
+        requestedArguments: Map<String, Any?> = emptyMap()
     ): String? {
         if (!isMcpEnabled) return null
-        val toolName = step.tool?.trim().orEmpty()
+        val toolName = requestedToolName?.trim().orEmpty().ifEmpty { step.tool?.trim().orEmpty() }
         if (toolName.isEmpty()) return null
 
+        val endpointNormalized = requestedEndpoint?.trim()?.takeIf { it.isNotBlank() }
         val enabledServers = enabledMcpServers()
         val targetServer = enabledServers.firstOrNull { server ->
-            mcpServerTools[server.url].orEmpty().any { it.equals(toolName, ignoreCase = true) }
+            val hasTool = mcpServerTools[server.url].orEmpty().any { it.equals(toolName, ignoreCase = true) }
+            if (!hasTool) return@firstOrNull false
+            if (endpointNormalized == null) return@firstOrNull true
+            endpointMatchesServer(endpointNormalized, server.url)
         } ?: return "MCP tool '$toolName' не найден среди активных серверов."
 
-        val arguments = mapOf(
+        val baseArguments = mapOf(
             "step_id" to step.stepId,
             "step_description" to step.description,
             "task_context" to taskContext,
             "previous_results" to previousResultsFormatted
         )
-        return runCatching { remoteMcpService.callTool(targetServer.url, toolName, arguments) }
+        val arguments = baseArguments + requestedArguments
+        val isWebSocketTool = mcpServerWebSocketTools[targetServer.url]
+            .orEmpty()
+            .contains(toolName.lowercase())
+        val useAuxWebSocket = isWebSocketTool &&
+            endpointNormalized != null &&
+            !isMcpTransportEndpoint(endpointNormalized, targetServer.url)
+
+        return runCatching {
+            if (useAuxWebSocket) {
+                remoteMcpService.callToolWithAuxWebSocket(
+                    serverUrl = targetServer.url,
+                    webSocketEndpoint = endpointNormalized ?: targetServer.url,
+                    toolName = toolName,
+                    arguments = arguments,
+                    onWebSocketLog = { direction, payload ->
+                        appendWebSocketLog(
+                            server = targetServer,
+                            toolName = toolName,
+                            direction = direction,
+                            payload = payload
+                        )
+                    }
+                )
+            } else if (isWebSocketTool) {
+                remoteMcpService.callToolViaWebSocket(
+                    serverUrl = targetServer.url,
+                    webSocketEndpoint = endpointNormalized,
+                    toolName = toolName,
+                    arguments = arguments,
+                    onWebSocketLog = { direction, payload ->
+                        appendWebSocketLog(
+                            server = targetServer,
+                            toolName = toolName,
+                            direction = direction,
+                            payload = payload
+                        )
+                    }
+                )
+            } else {
+                remoteMcpService.callTool(targetServer.url, toolName, arguments)
+            }
+        }
             .fold(
-                onSuccess = { output -> "MCP tool '$toolName' (${targetServer.title}) output:\n$output" },
+                onSuccess = { output ->
+                    val transport = when {
+                        useAuxWebSocket -> "HTTP+AuxWebSocket"
+                        isWebSocketTool -> "WebSocket"
+                        else -> "HTTP"
+                    }
+                    val endpointSuffix = endpointNormalized?.let { ", endpoint=$it" }.orEmpty()
+                    "MCP tool '$toolName' (${targetServer.title}, $transport$endpointSuffix) output:\n$output"
+                },
                 onFailure = { error -> "MCP tool '$toolName' (${targetServer.title}) error: ${error.message ?: error::class.simpleName ?: "unknown"}" }
             )
+    }
+
+    fun parseExecutionToolRequest(
+        response: String,
+        fallbackToolName: String?
+    ): ExecutionToolRequest? {
+        val root = tryParseJsonExecution(response)?.jsonObject ?: return null
+        val requestObj = root["tool_request"]?.jsonObject ?: return null
+        val shouldCall = requestObj["should_call"]?.jsonPrimitive?.booleanOrNull ?: false
+        if (!shouldCall) return null
+
+        val toolName = requestObj["tool_name"]?.jsonPrimitive?.contentOrNull
+            ?.trim()
+            .orEmpty()
+            .ifEmpty { fallbackToolName?.trim().orEmpty() }
+        if (toolName.isBlank()) return null
+
+        val endpoint = requestObj["endpoint"]?.jsonPrimitive?.contentOrNull
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+            ?: (requestObj["connection"] as? JsonObject)
+                ?.get("endpoint")
+                ?.jsonPrimitive
+                ?.contentOrNull
+                ?.trim()
+                ?.takeIf { it.isNotBlank() }
+
+        val reason = requestObj["reason"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+        val arguments = requestObj["arguments"]?.jsonObject
+            ?.mapValues { (_, value) -> jsonElementToAny(value) }
+            ?: emptyMap()
+
+        return ExecutionToolRequest(
+            toolName = toolName,
+            endpoint = endpoint,
+            reason = reason,
+            arguments = arguments
+        )
     }
 
     fun buildInvariantsPromptSuffix(): String {
@@ -1080,6 +1371,7 @@ private fun AiAgentMainChat(
         stepId: Int,
         stepDescription: String,
         previousResultsFormatted: String,
+        stepToolName: String? = null,
         recoveryContext: String? = null
     ): String {
         val requestApi = selectedApi
@@ -1091,6 +1383,8 @@ private fun AiAgentMainChat(
             .replace("{recovery_context}", recoveryContext?.ifBlank { "нет" } ?: "нет")
             .replace("{step_id}", stepId.toString())
             .replace("{step_description}", stepDescription)
+            .replace("{step_tool_name}", stepToolName ?: "null")
+            .replace("{available_tools_formatted}", buildMcpToolsContextForPrompt())
             .replace("{previous_results_formatted}", previousResultsFormatted)
         val messages = buildList {
             buildLtmSystemMessage()?.let { add(it) }
@@ -1564,36 +1858,13 @@ private fun AiAgentMainChat(
             execMessages += stepUserMsg
             appendMessageToBranch(chatId, 3, stepUserMsg)
 
-            val mcpToolOutput = runMcpToolForExecution(
-                step = step,
-                taskContext = taskContext,
-                previousResultsFormatted = previousResultsFormatted
-            )
-            if (!mcpToolOutput.isNullOrBlank()) {
-                val mcpMsg = AiAgentMessage(
-                    text = mcpToolOutput,
-                    isUser = false,
-                    paramsInfo = "stage=execution|mcp|step=${step.stepId}",
-                    stream = AiAgentStream.Raw,
-                    epoch = 0,
-                    createdAt = System.currentTimeMillis()
-                )
-                execMessages += mcpMsg
-                appendMessageToBranch(chatId, 3, mcpMsg)
-            }
-
-            val previousResultsWithMcp = if (mcpToolOutput.isNullOrBlank()) {
-                previousResultsFormatted
-            } else {
-                "$previousResultsFormatted\n\n$mcpToolOutput"
-            }
-
-            val result = try {
+            val firstResult = try {
                 val r = callExecutionStepApi(
                     taskContext = taskContext,
                     stepId = step.stepId,
                     stepDescription = step.description,
-                    previousResultsFormatted = previousResultsWithMcp
+                    previousResultsFormatted = previousResultsFormatted,
+                    stepToolName = step.tool
                 )
                 isErrorState = false
                 r
@@ -1605,13 +1876,96 @@ private fun AiAgentMainChat(
             if (sessionId != chatSessionId) { isLoading = false; return }
 
             val stepRespMsg = AiAgentMessage(
-                text = result, isUser = false,
+                text = firstResult, isUser = false,
                 paramsInfo = "stage=execution|step=${step.stepId}",
                 stream = AiAgentStream.Raw, epoch = 0,
                 createdAt = System.currentTimeMillis()
             )
             execMessages += stepRespMsg
             appendMessageToBranch(chatId, 3, stepRespMsg)
+
+            if (isErrorState) { isLoading = false; return }
+
+            val toolRequest = parseExecutionToolRequest(
+                response = firstResult,
+                fallbackToolName = step.tool
+            )
+            val result = if (toolRequest != null) {
+                val toolRequestMsg = AiAgentMessage(
+                    text = buildString {
+                        appendLine("Модель запросила вызов MCP-инструмента.")
+                        appendLine("tool_name: ${toolRequest.toolName}")
+                        toolRequest.endpoint?.let { appendLine("endpoint: $it") }
+                        if (toolRequest.reason.isNotBlank()) appendLine("reason: ${toolRequest.reason}")
+                        append("arguments: ${toolRequest.arguments}")
+                    },
+                    isUser = false,
+                    paramsInfo = "stage=execution|mcp|request|step=${step.stepId}",
+                    stream = AiAgentStream.Raw,
+                    epoch = 0,
+                    createdAt = System.currentTimeMillis()
+                )
+                execMessages += toolRequestMsg
+                appendMessageToBranch(chatId, 3, toolRequestMsg)
+
+                val mcpToolOutput = runMcpToolForExecution(
+                    step = step,
+                    taskContext = taskContext,
+                    previousResultsFormatted = previousResultsFormatted,
+                    requestedToolName = toolRequest.toolName,
+                    requestedEndpoint = toolRequest.endpoint,
+                    requestedArguments = toolRequest.arguments
+                )
+
+                val mcpOutputText = mcpToolOutput.orEmpty()
+                val mcpMsg = AiAgentMessage(
+                    text = mcpOutputText,
+                    isUser = false,
+                    paramsInfo = "stage=execution|mcp|step=${step.stepId}",
+                    stream = AiAgentStream.Raw,
+                    epoch = 0,
+                    createdAt = System.currentTimeMillis()
+                )
+                execMessages += mcpMsg
+                appendMessageToBranch(chatId, 3, mcpMsg)
+
+                val secondResult = try {
+                    val secondCallContext = buildString {
+                        append(previousResultsFormatted)
+                        appendLine()
+                        appendLine()
+                        appendLine("MCP_TOOL_OUTPUT:")
+                        append(mcpOutputText.ifBlank { "Пустой ответ инструмента." })
+                    }
+                    val r = callExecutionStepApi(
+                        taskContext = taskContext,
+                        stepId = step.stepId,
+                        stepDescription = step.description,
+                        previousResultsFormatted = secondCallContext,
+                        stepToolName = step.tool
+                    )
+                    isErrorState = false
+                    r
+                } catch (e: Exception) {
+                    isErrorState = true
+                    "Request failed: ${e.message ?: "unknown error"}"
+                }
+
+                if (sessionId != chatSessionId) { isLoading = false; return }
+
+                val secondRespMsg = AiAgentMessage(
+                    text = secondResult, isUser = false,
+                    paramsInfo = "stage=execution|step=${step.stepId}|after_mcp",
+                    stream = AiAgentStream.Raw, epoch = 0,
+                    createdAt = System.currentTimeMillis()
+                )
+                execMessages += secondRespMsg
+                appendMessageToBranch(chatId, 3, secondRespMsg)
+
+                secondResult
+            } else {
+                firstResult
+            }
 
             if (isErrorState) { isLoading = false; return }
 
@@ -2275,6 +2629,7 @@ private fun AiAgentMainChat(
         branchesByChat.remove(chatId)
         branchVisibilityByChat.remove(chatId)
         branchCounterByChat.remove(chatId)
+        websocketChatIdsByKey.entries.removeAll { it.value == chatId }
         val updatedChats = loadChatsFromDb()
         chats.clear()
         chats += updatedChats
@@ -2292,6 +2647,7 @@ private fun AiAgentMainChat(
         branchesByChat.clear()
         branchVisibilityByChat.clear()
         branchCounterByChat.clear()
+        websocketChatIdsByKey.clear()
         chats.clear()
         clearChatSelection()
     }
