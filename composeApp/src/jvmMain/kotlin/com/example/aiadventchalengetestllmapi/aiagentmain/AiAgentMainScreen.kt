@@ -354,8 +354,8 @@ private data class McpServerOption(
 
 private val mcpServerOptions = listOf(
     McpServerOption(
-        title = "Microsoft Learn MCP",
-        url = "https://learn.microsoft.com/api/mcp"
+        title = "Exa MCP",
+        url = "https://mcp.exa.ai/mcp"
     ),
     McpServerOption(
         title = "Local MCP (127.0.0.1)",
