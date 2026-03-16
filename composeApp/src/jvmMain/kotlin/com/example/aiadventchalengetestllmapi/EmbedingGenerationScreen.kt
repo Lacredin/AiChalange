@@ -16,6 +16,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
@@ -60,6 +62,7 @@ import kotlinx.serialization.json.Json
 import org.apache.pdfbox.Loader
 import org.apache.pdfbox.text.PDFTextStripper
 import java.io.File
+import java.util.prefs.Preferences
 import javax.swing.JFileChooser
 import javax.swing.filechooser.FileNameExtensionFilter
 
@@ -81,6 +84,9 @@ private enum class FileProcessingState(val label: String) {
     Completed("Обработка завершена")
 }
 
+private const val EMBEDDING_PREFS_NODE = "com.example.aiadventchalengetestllmapi.embedinggeneration"
+private const val SELECTED_STRATEGIES_KEY = "selected_chunk_strategies"
+
 private data class ProcessingFileItem(
     val id: Long,
     val source: String,
@@ -89,10 +95,29 @@ private data class ProcessingFileItem(
     val progress: Float = 0f
 )
 
+private data class TextSection(
+    val title: String,
+    val text: String
+)
+
 private fun readApiKey(envVar: String): String {
     val fromBuildSecrets = BuildSecrets.apiKeyFor(envVar).trim()
     if (fromBuildSecrets.isNotEmpty()) return fromBuildSecrets
     return System.getenv(envVar)?.trim().orEmpty()
+}
+
+private fun loadSelectedStrategies(): Set<ChunkStrategy> {
+    val prefs = Preferences.userRoot().node(EMBEDDING_PREFS_NODE)
+    val raw = prefs.get(SELECTED_STRATEGIES_KEY, "").trim()
+    if (raw.isEmpty()) return emptySet()
+    val names = raw.split(",").map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+    return ChunkStrategy.entries.filterTo(mutableSetOf()) { it.name in names }
+}
+
+private fun saveSelectedStrategies(strategies: Set<ChunkStrategy>) {
+    val prefs = Preferences.userRoot().node(EMBEDDING_PREFS_NODE)
+    val value = strategies.joinToString(",") { it.name }
+    prefs.put(SELECTED_STRATEGIES_KEY, value)
 }
 
 private fun chunkFixed(text: String, size: Int = 2000): List<String> {
@@ -237,6 +262,46 @@ private fun splitByStrategy(text: String, strategy: ChunkStrategy): List<String>
     ChunkStrategy.Semantic -> chunkSemantic(text, targetSize = 2000, similarityThreshold = 0.2)
 }
 
+private fun isHeadingLine(line: String): Boolean {
+    val trimmed = line.trim()
+    if (trimmed.isEmpty()) return false
+    if (trimmed.startsWith("#")) return true
+    if (trimmed.matches(Regex("^\\d+(\\.\\d+)*[.)]?\\s+.+$"))) return true
+    return false
+}
+
+private fun extractSections(text: String): List<TextSection> {
+    if (text.isBlank()) return emptyList()
+
+    val lines = text.lines()
+    val sections = mutableListOf<TextSection>()
+    var currentTitle = "Без секции"
+    val currentBody = StringBuilder()
+
+    fun flush() {
+        val body = currentBody.toString().trim()
+        if (body.isNotEmpty()) {
+            sections += TextSection(title = currentTitle, text = body)
+        }
+        currentBody.clear()
+    }
+
+    lines.forEach { line ->
+        if (isHeadingLine(line)) {
+            flush()
+            currentTitle = line.trim().removePrefix("#").trim().ifEmpty { "Без секции" }
+        } else {
+            currentBody.appendLine(line)
+        }
+    }
+    flush()
+
+    if (sections.isEmpty()) {
+        return listOf(TextSection(title = "Без секции", text = text.trim()))
+    }
+    return sections
+}
+
 private suspend fun readTextFromFile(path: String): String = withContext(Dispatchers.IO) {
     val file = File(path)
     when (file.extension.lowercase()) {
@@ -287,8 +352,9 @@ fun EmbedingGenerationScreen(
     val files = remember { mutableStateListOf<ProcessingFileItem>() }
     val selectedFileIds = remember { mutableStateMapOf<Long, Boolean>() }
     val selectedStrategies = remember {
+        val restored = loadSelectedStrategies()
         mutableStateMapOf<ChunkStrategy, Boolean>().apply {
-            ChunkStrategy.entries.forEach { put(it, true) }
+            ChunkStrategy.entries.forEach { put(it, it in restored) }
         }
     }
 
@@ -300,6 +366,7 @@ fun EmbedingGenerationScreen(
     var dbReloadCounter by remember { mutableIntStateOf(0) }
     var isGlobalProcessing by remember { mutableStateOf(false) }
     var logText by remember { mutableStateOf("Логи обработки появятся здесь.") }
+    val hasActiveStrategies = selectedStrategies.values.any { it }
 
     fun updateFile(id: Long, transform: (ProcessingFileItem) -> ProcessingFileItem) {
         val index = files.indexOfFirst { it.id == id }
@@ -338,14 +405,23 @@ fun EmbedingGenerationScreen(
             return
         }
 
-        val chunksByStrategy = strategies.associateWith { splitByStrategy(text, it) }
-        val totalChunks = chunksByStrategy.values.sumOf { it.size }.coerceAtLeast(1)
+        val sections = extractSections(text)
+        val chunksByStrategyAndSection = strategies.associateWith { strategy ->
+            sections.map { section ->
+                section to splitByStrategy(section.text, strategy)
+            }
+        }
+        val totalChunks = chunksByStrategyAndSection.values
+            .sumOf { sectionPairs -> sectionPairs.sumOf { it.second.size } }
+            .coerceAtLeast(1)
         var processedChunks = 0
 
         queries.deleteBySource(source = sourcePath)
 
-        chunksByStrategy.forEach { (strategy, chunks) ->
-            chunks.forEachIndexed { chunkIndex, chunkText ->
+        chunksByStrategyAndSection.forEach { (strategy, sectionPairs) ->
+            var strategyChunkId = 1L
+            sectionPairs.forEach { (section, chunks) ->
+                chunks.forEach { chunkText ->
                 val request = DeepSeekChatRequest(
                     model = selectedModel.modelLabel,
                     temperature = 0.0,
@@ -364,18 +440,19 @@ fun EmbedingGenerationScreen(
                     queries.insertChunk(
                         source = sourcePath,
                         title = fileName,
-                        section = "full_text",
-                        chunk_id = (chunkIndex + 1).toLong(),
+                        section = section.title,
+                        chunk_id = strategyChunkId,
                         strategy = strategy.dbValue,
                         chunk_text = chunkText,
                         embedding_json = embeddingJson,
                         created_at = System.currentTimeMillis()
                     )
+                    strategyChunkId += 1L
                     val responseJson = json.encodeToString(response)
                     println("[${fileName}] ${strategy.dbValue} request: $requestJson")
                     println("[${fileName}] ${strategy.dbValue} response: $responseJson")
                 } catch (e: Exception) {
-                    val errorText = "[${fileName}] ${strategy.dbValue} chunk ${chunkIndex + 1}: ${e.message ?: "unknown error"}"
+                    val errorText = "[${fileName}] ${strategy.dbValue} section '${section.title}': ${e.message ?: "unknown error"}"
                     logText += "\n$errorText"
                     println(errorText)
                 }
@@ -383,6 +460,7 @@ fun EmbedingGenerationScreen(
                 processedChunks += 1
                 val progress = (processedChunks.toFloat() / totalChunks.toFloat()).coerceIn(0f, 1f)
                 updateFile(fileItem.id) { it.copy(progress = progress) }
+            }
             }
         }
 
@@ -454,11 +532,25 @@ fun EmbedingGenerationScreen(
                 }
                 items(filteredOpenedFileRecords) { row ->
                     Card(modifier = Modifier.fillMaxWidth()) {
-                        Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             Text("Стратегия: ${row.strategy}")
                             Text("Chunk ID: ${row.chunk_id}")
                             Text("Section: ${row.section}")
-                            Text("Chunk: ${row.chunk_text.take(300)}")
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(
+                                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                        shape = RoundedCornerShape(8.dp)
+                                    )
+                                    .padding(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Text("Чанк")
+                                SelectionContainer {
+                                    Text(row.chunk_text)
+                                }
+                            }
                             Text("Embedding: ${row.embedding_json.take(300)}")
                         }
                     }
@@ -563,7 +655,12 @@ fun EmbedingGenerationScreen(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Checkbox(
                             checked = selectedStrategies[strategy] == true,
-                            onCheckedChange = { checked -> selectedStrategies[strategy] = checked },
+                            onCheckedChange = { checked ->
+                                selectedStrategies[strategy] = checked
+                                saveSelectedStrategies(
+                                    selectedStrategies.filterValues { it }.keys
+                                )
+                            },
                             enabled = !isGlobalProcessing
                         )
                         Text(strategy.label)
@@ -609,7 +706,7 @@ fun EmbedingGenerationScreen(
                             isGlobalProcessing = false
                         }
                     },
-                    enabled = files.isNotEmpty() && !isGlobalProcessing
+                    enabled = files.isNotEmpty() && hasActiveStrategies && !isGlobalProcessing
                 ) {
                     Text("Обработать")
                 }
