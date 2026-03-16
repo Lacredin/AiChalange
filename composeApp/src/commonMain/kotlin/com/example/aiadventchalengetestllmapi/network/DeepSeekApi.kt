@@ -24,7 +24,47 @@ class DeepSeekApi(
             setBody(request)
         }.body()
     }
+
+    suspend fun createEmbedding(
+        apiKey: String,
+        request: DeepSeekEmbeddingRequest
+    ): DeepSeekEmbeddingResponse {
+        return httpClient.post("$baseUrl/embeddings") {
+            bearerAuth(apiKey)
+            contentType(ContentType.Application.Json)
+            setBody(request)
+        }.body()
+    }
 }
+
+@Serializable
+data class DeepSeekEmbeddingRequest(
+    val model: String,
+    val input: String,
+    @SerialName("encoding_format")
+    val encodingFormat: String? = null
+)
+
+@Serializable
+data class DeepSeekEmbeddingResponse(
+    val data: List<DeepSeekEmbeddingData> = emptyList(),
+    val model: String? = null,
+    val usage: DeepSeekEmbeddingUsage? = null
+)
+
+@Serializable
+data class DeepSeekEmbeddingData(
+    val embedding: List<Double> = emptyList(),
+    val index: Int? = null
+)
+
+@Serializable
+data class DeepSeekEmbeddingUsage(
+    @SerialName("prompt_tokens")
+    val promptTokens: Int? = null,
+    @SerialName("total_tokens")
+    val totalTokens: Int? = null
+)
 
 @Serializable
 data class DeepSeekChatRequest(

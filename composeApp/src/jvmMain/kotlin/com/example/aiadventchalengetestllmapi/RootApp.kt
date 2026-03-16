@@ -1,6 +1,7 @@
 package com.example.aiadventchalengetestllmapi
 
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -10,9 +11,11 @@ import com.example.aiadventchalengetestllmapi.aiagentmain.AiAgentMainScreen
 import com.example.aiadventchalengetestllmapi.aiweek3.AiWeek3Screen
 import com.example.aiadventchalengetestllmapi.aistateagent.AiStateAgentScreen
 import com.example.aiadventchalengetestllmapi.aiagentmcp.AiAgentMCPScreen
+import java.util.prefs.Preferences
 
 enum class RootScreen {
     AiAgentRAG,
+    EmbedingGeneration,
     AiAgentMain,
     AiAgentMCP,
     AiStateAgent,
@@ -21,12 +24,34 @@ enum class RootScreen {
     App
 }
 
+private const val LAST_SCREEN_KEY = "last_opened_root_screen"
+
+private fun loadLastScreen(): RootScreen {
+    val prefs = Preferences.userRoot().node("com.example.aiadventchalengetestllmapi")
+    val saved = prefs.get(LAST_SCREEN_KEY, RootScreen.AiAgentRAG.name)
+    return RootScreen.entries.firstOrNull { it.name == saved } ?: RootScreen.AiAgentRAG
+}
+
+private fun saveLastScreen(screen: RootScreen) {
+    val prefs = Preferences.userRoot().node("com.example.aiadventchalengetestllmapi")
+    prefs.put(LAST_SCREEN_KEY, screen.name)
+}
+
 @Composable
 fun RootApp() {
-    var currentScreen by remember { mutableStateOf(RootScreen.AiAgentRAG) }
+    var currentScreen by remember { mutableStateOf(loadLastScreen()) }
+
+    LaunchedEffect(currentScreen) {
+        saveLastScreen(currentScreen)
+    }
 
     when (currentScreen) {
         RootScreen.AiAgentRAG -> AiAgentRAGScreen(
+            currentScreen = currentScreen,
+            onSelectScreen = { selectedScreen -> currentScreen = selectedScreen }
+        )
+
+        RootScreen.EmbedingGeneration -> EmbedingGenerationScreen(
             currentScreen = currentScreen,
             onSelectScreen = { selectedScreen -> currentScreen = selectedScreen }
         )

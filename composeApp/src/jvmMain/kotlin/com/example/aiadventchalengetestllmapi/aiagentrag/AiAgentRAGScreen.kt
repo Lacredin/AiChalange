@@ -235,6 +235,21 @@ fun AiAgentRAGScreen(
                                     onClick = { screensMenuExpanded = false; onSelectScreen(RootScreen.AiAgentRAG) }
                                 )
                                 DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            if (currentScreen == RootScreen.EmbedingGeneration) {
+                                                "EmbedingGeneration ✓"
+                                            } else {
+                                                "EmbedingGeneration"
+                                            }
+                                        )
+                                    },
+                                    onClick = {
+                                        screensMenuExpanded = false
+                                        onSelectScreen(RootScreen.EmbedingGeneration)
+                                    }
+                                )
+                                DropdownMenuItem(
                                     text = { Text(if (currentScreen == RootScreen.AiAgentMain) "AiAgentMain ✓" else "AiAgentMain") },
                                     onClick = { screensMenuExpanded = false; onSelectScreen(RootScreen.AiAgentMain) }
                                 )
