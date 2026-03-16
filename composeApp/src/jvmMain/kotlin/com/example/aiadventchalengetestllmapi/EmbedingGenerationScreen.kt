@@ -1,50 +1,93 @@
 package com.example.aiadventchalengetestllmapi
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
+import com.example.aiadventchalengetestllmapi.embedinggenerationdb.EmbedingGenerationDatabaseDriverFactory
+import com.example.aiadventchalengetestllmapi.embedinggenerationdb.createEmbedingGenerationDatabase
 import com.example.aiadventchalengetestllmapi.network.DeepSeekApi
 import com.example.aiadventchalengetestllmapi.network.DeepSeekChatRequest
 import com.example.aiadventchalengetestllmapi.network.DeepSeekMessage
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import org.apache.pdfbox.Loader
+import org.apache.pdfbox.text.PDFTextStripper
+import java.io.File
+import javax.swing.JFileChooser
+import javax.swing.filechooser.FileNameExtensionFilter
 
 private data class EmbeddingApiModel(
     val apiLabel: String,
     val modelLabel: String
 )
 
-private enum class ChunkStrategy(val label: String) {
-    Fixed500("Фиксированная (500)"),
-    Structured("По структуре текста"),
-    Semantic("Семантическая")
+private enum class ChunkStrategy(val dbValue: String, val label: String) {
+    Fixed500("fixed_500", "Фиксированная (500)"),
+    Structured("structured", "По структуре текста"),
+    Semantic("semantic", "Семантическая")
 }
+
+private enum class FileProcessingState(val label: String) {
+    Added("Добавлен"),
+    Queued("В очереди"),
+    Processing("Идёт обработка"),
+    Completed("Обработка завершена")
+}
+
+private data class ProcessingFileItem(
+    val id: Long,
+    val source: String,
+    val fileName: String,
+    val state: FileProcessingState = FileProcessingState.Added,
+    val progress: Float = 0f
+)
 
 private fun readApiKey(envVar: String): String {
     val fromBuildSecrets = BuildSecrets.apiKeyFor(envVar).trim()
@@ -80,7 +123,6 @@ private fun chunkStructured(text: String, targetSize: Int = 500): List<String> {
             chunks += paragraph.chunked(targetSize)
             return@forEach
         }
-
         if (current.isEmpty()) {
             current.append(paragraph)
         } else if (current.length + 2 + paragraph.length <= targetSize) {
@@ -119,7 +161,6 @@ private fun chunkSemantic(text: String, targetSize: Int = 500, similarityThresho
         .split(Regex("(?<=[.!?])\\s+"))
         .map { it.trim() }
         .filter { it.isNotEmpty() }
-
     if (sentences.isEmpty()) return emptyList()
 
     val chunks = mutableListOf<SemanticChunk>()
@@ -129,10 +170,7 @@ private fun chunkSemantic(text: String, targetSize: Int = 500, similarityThresho
     fun flush() {
         if (currentChunk.isNotBlank()) {
             val textValue = currentChunk.trim()
-            chunks += SemanticChunk(
-                text = textValue,
-                keywords = semanticKeywords(textValue)
-            )
+            chunks += SemanticChunk(text = textValue, keywords = semanticKeywords(textValue))
         }
     }
 
@@ -147,10 +185,7 @@ private fun chunkSemantic(text: String, targetSize: Int = 500, similarityThresho
         } else if (!fitsBySize && sentence.length > targetSize) {
             flush()
             sentence.chunked(targetSize).forEach { part ->
-                chunks += SemanticChunk(
-                    text = part,
-                    keywords = semanticKeywords(part)
-                )
+                chunks += SemanticChunk(text = part, keywords = semanticKeywords(part))
             }
             currentChunk = ""
             currentKeywords = emptySet()
@@ -163,21 +198,15 @@ private fun chunkSemantic(text: String, targetSize: Int = 500, similarityThresho
 
     if (currentChunk.isNotBlank()) {
         val textValue = currentChunk.trim()
-        chunks += SemanticChunk(
-            text = textValue,
-            keywords = semanticKeywords(textValue)
-        )
+        chunks += SemanticChunk(text = textValue, keywords = semanticKeywords(textValue))
     }
 
-    // Maximize chunk size without breaking semantic rule or size limit.
-    // Merge adjacent semantic chunks while they remain close in meaning.
     var optimized = chunks.toList()
     var changed = true
     while (changed) {
         changed = false
         val merged = mutableListOf<SemanticChunk>()
         var index = 0
-
         while (index < optimized.size) {
             var current = optimized[index]
             while (index + 1 < optimized.size) {
@@ -186,10 +215,7 @@ private fun chunkSemantic(text: String, targetSize: Int = 500, similarityThresho
                 val closeByMeaning = jaccard(current.keywords, next.keywords) >= similarityThreshold
                 if (combinedSize <= targetSize && closeByMeaning) {
                     val combinedText = "${current.text} ${next.text}".trim()
-                    current = SemanticChunk(
-                        text = combinedText,
-                        keywords = semanticKeywords(combinedText)
-                    )
+                    current = SemanticChunk(combinedText, semanticKeywords(combinedText))
                     index += 1
                     changed = true
                 } else {
@@ -199,7 +225,6 @@ private fun chunkSemantic(text: String, targetSize: Int = 500, similarityThresho
             merged += current
             index += 1
         }
-
         optimized = merged
     }
 
@@ -212,6 +237,32 @@ private fun splitByStrategy(text: String, strategy: ChunkStrategy): List<String>
     ChunkStrategy.Semantic -> chunkSemantic(text, targetSize = 500, similarityThreshold = 0.2)
 }
 
+private suspend fun readTextFromFile(path: String): String = withContext(Dispatchers.IO) {
+    val file = File(path)
+    when (file.extension.lowercase()) {
+        "txt", "md", "csv", "json", "xml", "log", "kt", "java" -> file.readText()
+        "pdf" -> {
+            Loader.loadPDF(file).use { doc ->
+                PDFTextStripper().getText(doc)
+            }
+        }
+        else -> file.readText()
+    }
+}
+
+private fun openFilesDialog(): List<File> {
+    val chooser = JFileChooser().apply {
+        isMultiSelectionEnabled = true
+        fileFilter = FileNameExtensionFilter(
+            "Text and PDF files",
+            "txt", "md", "csv", "json", "xml", "log", "pdf"
+        )
+    }
+    val result = chooser.showOpenDialog(null)
+    if (result != JFileChooser.APPROVE_OPTION) return emptyList()
+    return chooser.selectedFiles.toList()
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun EmbedingGenerationScreen(
@@ -220,6 +271,10 @@ fun EmbedingGenerationScreen(
 ) {
     val scope = rememberCoroutineScope()
     val deepSeekApi = remember { DeepSeekApi() }
+    val database = remember { createEmbedingGenerationDatabase(EmbedingGenerationDatabaseDriverFactory()) }
+    val queries = remember(database) { database.embeddingChunksQueries }
+    val json = remember { Json { prettyPrint = true; encodeDefaults = true } }
+
     val supportedModels = remember {
         listOf(
             EmbeddingApiModel(
@@ -228,24 +283,197 @@ fun EmbedingGenerationScreen(
             )
         )
     }
-    val json = remember { Json { prettyPrint = true; encodeDefaults = true } }
+
+    val files = remember { mutableStateListOf<ProcessingFileItem>() }
+    val selectedFileIds = remember { mutableStateMapOf<Long, Boolean>() }
+    val selectedStrategies = remember {
+        mutableStateMapOf<ChunkStrategy, Boolean>().apply {
+            ChunkStrategy.entries.forEach { put(it, true) }
+        }
+    }
 
     var selectedModel by remember { mutableStateOf(supportedModels.first()) }
-    var selectedChunkStrategy by remember { mutableStateOf(ChunkStrategy.Fixed500) }
-    var modelsMenuExpanded by remember { mutableStateOf(false) }
-    var strategyMenuExpanded by remember { mutableStateOf(false) }
     var screensMenuExpanded by remember { mutableStateOf(false) }
-    var inputText by remember { mutableStateOf("") }
-    var resultText by remember { mutableStateOf("Result will appear after pressing Send.") }
-    var logText by remember { mutableStateOf("Logs will appear after request.") }
-    var isLoading by remember { mutableStateOf(false) }
+    var openedFileSource by remember { mutableStateOf<String?>(null) }
+    var openedFileStrategyFilter by remember { mutableStateOf("all") }
+    var openedFileStrategyMenuExpanded by remember { mutableStateOf(false) }
+    var dbReloadCounter by remember { mutableIntStateOf(0) }
+    var isGlobalProcessing by remember { mutableStateOf(false) }
+    var logText by remember { mutableStateOf("Логи обработки появятся здесь.") }
+
+    fun updateFile(id: Long, transform: (ProcessingFileItem) -> ProcessingFileItem) {
+        val index = files.indexOfFirst { it.id == id }
+        if (index >= 0) {
+            files[index] = transform(files[index])
+        }
+    }
+
+    val openedFileRecords = remember(openedFileSource, dbReloadCounter) {
+        openedFileSource?.let { source ->
+            queries.selectBySource(source = source).executeAsList()
+        }.orEmpty()
+    }
+    val openedFileStrategies = remember(openedFileRecords) {
+        openedFileRecords.map { it.strategy }.distinct()
+    }
+    val filteredOpenedFileRecords = remember(openedFileRecords, openedFileStrategyFilter) {
+        if (openedFileStrategyFilter == "all") openedFileRecords
+        else openedFileRecords.filter { it.strategy == openedFileStrategyFilter }
+    }
+
+    suspend fun processSingleFile(fileItem: ProcessingFileItem, strategies: List<ChunkStrategy>, apiKey: String) {
+        updateFile(fileItem.id) { it.copy(state = FileProcessingState.Processing, progress = 0f) }
+        val sourcePath = fileItem.source
+        val fileName = fileItem.fileName
+
+        val text = runCatching { readTextFromFile(sourcePath) }.getOrElse { error ->
+            updateFile(fileItem.id) { it.copy(state = FileProcessingState.Added, progress = 0f) }
+            logText += "\n[${fileName}] Ошибка чтения: ${error.message}"
+            return
+        }.trim()
+
+        if (text.isBlank()) {
+            updateFile(fileItem.id) { it.copy(state = FileProcessingState.Added, progress = 0f) }
+            logText += "\n[${fileName}] Пустой текст после чтения."
+            return
+        }
+
+        val chunksByStrategy = strategies.associateWith { splitByStrategy(text, it) }
+        val totalChunks = chunksByStrategy.values.sumOf { it.size }.coerceAtLeast(1)
+        var processedChunks = 0
+
+        queries.deleteBySource(source = sourcePath)
+
+        chunksByStrategy.forEach { (strategy, chunks) ->
+            chunks.forEachIndexed { chunkIndex, chunkText ->
+                val request = DeepSeekChatRequest(
+                    model = selectedModel.modelLabel,
+                    temperature = 0.0,
+                    messages = listOf(
+                        DeepSeekMessage(
+                            role = "system",
+                            content = "Return valid JSON only: {\"embedding\":[float,...],\"dimensions\":64}. Build semantic vector for user text. Exactly 64 float values."
+                        ),
+                        DeepSeekMessage(role = "user", content = chunkText)
+                    )
+                )
+                val requestJson = json.encodeToString(request)
+                try {
+                    val response = deepSeekApi.createChatCompletion(apiKey = apiKey, request = request)
+                    val embeddingJson = response.choices.firstOrNull()?.message?.content.orEmpty()
+                    queries.insertChunk(
+                        source = sourcePath,
+                        title = fileName,
+                        section = "full_text",
+                        chunk_id = (chunkIndex + 1).toLong(),
+                        strategy = strategy.dbValue,
+                        chunk_text = chunkText,
+                        embedding_json = embeddingJson,
+                        created_at = System.currentTimeMillis()
+                    )
+                    val responseJson = json.encodeToString(response)
+                    println("[${fileName}] ${strategy.dbValue} request: $requestJson")
+                    println("[${fileName}] ${strategy.dbValue} response: $responseJson")
+                } catch (e: Exception) {
+                    val errorText = "[${fileName}] ${strategy.dbValue} chunk ${chunkIndex + 1}: ${e.message ?: "unknown error"}"
+                    logText += "\n$errorText"
+                    println(errorText)
+                }
+
+                processedChunks += 1
+                val progress = (processedChunks.toFloat() / totalChunks.toFloat()).coerceIn(0f, 1f)
+                updateFile(fileItem.id) { it.copy(progress = progress) }
+            }
+        }
+
+        updateFile(fileItem.id) { it.copy(state = FileProcessingState.Completed, progress = 1f) }
+        dbReloadCounter += 1
+    }
+
+    if (openedFileSource != null) {
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = { Text("Данные по файлу") },
+                    navigationIcon = {
+                        TextButton(onClick = { openedFileSource = null }) {
+                            Text("Назад")
+                        }
+                    }
+                )
+            }
+        ) { padding ->
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                item {
+                    Text("Source: $openedFileSource")
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Записей: ${filteredOpenedFileRecords.size}")
+                        Box {
+                            TextButton(onClick = { openedFileStrategyMenuExpanded = true }) {
+                                Text(
+                                    if (openedFileStrategyFilter == "all") {
+                                        "Стратегия: Все"
+                                    } else {
+                                        "Стратегия: $openedFileStrategyFilter"
+                                    }
+                                )
+                            }
+                            DropdownMenu(
+                                expanded = openedFileStrategyMenuExpanded,
+                                onDismissRequest = { openedFileStrategyMenuExpanded = false }
+                            ) {
+                                DropdownMenuItem(
+                                    text = { Text("Все") },
+                                    onClick = {
+                                        openedFileStrategyFilter = "all"
+                                        openedFileStrategyMenuExpanded = false
+                                    }
+                                )
+                                openedFileStrategies.forEach { strategy ->
+                                    DropdownMenuItem(
+                                        text = { Text(strategy) },
+                                        onClick = {
+                                            openedFileStrategyFilter = strategy
+                                            openedFileStrategyMenuExpanded = false
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+                items(filteredOpenedFileRecords) { row ->
+                    Card(modifier = Modifier.fillMaxWidth()) {
+                        Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text("Стратегия: ${row.strategy}")
+                            Text("Chunk ID: ${row.chunk_id}")
+                            Text("Section: ${row.section}")
+                            Text("Chunk: ${row.chunk_text.take(300)}")
+                            Text("Embedding: ${row.embedding_json.take(300)}")
+                        }
+                    }
+                }
+            }
+        }
+        return
+    }
 
     Scaffold(
         topBar = {
             TopAppBar(
                 title = { Text("EmbedingGeneration") },
                 actions = {
-                    TextButton(onClick = { screensMenuExpanded = true }, enabled = !isLoading) {
+                    TextButton(onClick = { screensMenuExpanded = true }, enabled = !isGlobalProcessing) {
                         Text("Screens")
                     }
                     DropdownMenu(
@@ -296,162 +524,186 @@ fun EmbedingGenerationScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .verticalScroll(rememberScrollState())
                 .background(MaterialTheme.colorScheme.background)
                 .padding(padding)
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            Text("Embedding API model selection")
-            TextButton(onClick = { modelsMenuExpanded = true }, enabled = !isLoading) {
-                Text("API/Model: ${selectedModel.apiLabel} / ${selectedModel.modelLabel}")
-            }
-            DropdownMenu(
-                expanded = modelsMenuExpanded,
-                onDismissRequest = { modelsMenuExpanded = false }
-            ) {
-                supportedModels.forEach { model ->
-                    DropdownMenuItem(
-                        text = { Text("${model.apiLabel} / ${model.modelLabel}") },
-                        onClick = {
-                            selectedModel = model
-                            modelsMenuExpanded = false
-                        }
-                    )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Button(
+                    onClick = {
+                        val selected = openFilesDialog()
+                        if (selected.isEmpty()) return@Button
+                        val existing = files.map { it.source }.toSet()
+                        selected
+                            .filter { it.exists() && it.path !in existing }
+                            .forEach { file ->
+                                val id = System.nanoTime() + files.size
+                                files += ProcessingFileItem(
+                                    id = id,
+                                    source = file.absolutePath,
+                                    fileName = file.name
+                                )
+                                selectedFileIds[id] = true
+                            }
+                    },
+                    enabled = !isGlobalProcessing
+                ) {
+                    Text("Выбрать файлы")
                 }
+                Text("Выбрано: ${files.size}")
             }
 
-            TextButton(onClick = { strategyMenuExpanded = true }, enabled = !isLoading) {
-                Text("Chunk strategy: ${selectedChunkStrategy.label}")
-            }
-            DropdownMenu(
-                expanded = strategyMenuExpanded,
-                onDismissRequest = { strategyMenuExpanded = false }
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 ChunkStrategy.entries.forEach { strategy ->
-                    DropdownMenuItem(
-                        text = { Text(strategy.label) },
-                        onClick = {
-                            selectedChunkStrategy = strategy
-                            strategyMenuExpanded = false
-                        }
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(
+                            checked = selectedStrategies[strategy] == true,
+                            onCheckedChange = { checked -> selectedStrategies[strategy] = checked },
+                            enabled = !isGlobalProcessing
+                        )
+                        Text(strategy.label)
+                    }
                 }
             }
 
-            OutlinedTextField(
-                value = inputText,
-                onValueChange = { inputText = it },
+            FlowRow(
                 modifier = Modifier.fillMaxWidth(),
-                label = { Text("Text for embedding") },
-                minLines = 4,
-                enabled = !isLoading
-            )
-
-            Button(
-                onClick = {
-                    val trimmed = inputText.trim()
-                    if (trimmed.isEmpty() || isLoading) return@Button
-
-                    val chunks = splitByStrategy(trimmed, selectedChunkStrategy)
-                    if (chunks.isEmpty()) {
-                        resultText = "No chunks generated."
-                        logText = "No chunks generated for selected strategy."
-                        return@Button
-                    }
-
-                    val apiKey = readApiKey("DEEPSEEK_API_KEY")
-                    if (apiKey.isBlank()) {
-                        resultText = "Error: missing DEEPSEEK_API_KEY."
-                        logText = "Missing DEEPSEEK_API_KEY"
-                        return@Button
-                    }
-
-                    scope.launch {
-                        isLoading = true
-                        val allLogs = StringBuilder()
-                        val allResults = StringBuilder()
-                        allResults.appendLine("Strategy: ${selectedChunkStrategy.label}")
-                        allResults.appendLine("Chunks: ${chunks.size}")
-                        allResults.appendLine()
-
-                        chunks.forEachIndexed { index, chunk ->
-                            val request = DeepSeekChatRequest(
-                                model = selectedModel.modelLabel,
-                                temperature = 0.0,
-                                messages = listOf(
-                                    DeepSeekMessage(
-                                        role = "system",
-                                        content = "Return valid JSON only: {\"embedding\":[float,...],\"dimensions\":64}. Build semantic vector for user text. Exactly 64 float values."
-                                    ),
-                                    DeepSeekMessage(
-                                        role = "user",
-                                        content = chunk
-                                    )
-                                )
-                            )
-                            val requestJson = json.encodeToString(request)
-                            allLogs.appendLine("CHUNK #${index + 1} REQUEST:")
-                            allLogs.appendLine(requestJson)
-                            allLogs.appendLine()
-
-                            try {
-                                val response = deepSeekApi.createChatCompletion(
-                                    apiKey = apiKey,
-                                    request = request
-                                )
-                                val responseJson = json.encodeToString(response)
-                                val answerText = response.choices.firstOrNull()?.message?.content.orEmpty()
-
-                                allResults.appendLine("Chunk #${index + 1} (${chunk.length} chars)")
-                                allResults.appendLine(answerText)
-                                allResults.appendLine()
-
-                                allLogs.appendLine("CHUNK #${index + 1} RESPONSE:")
-                                allLogs.appendLine(responseJson)
-                                allLogs.appendLine()
-
-                                println("Embedding chunk #${index + 1} request: $requestJson")
-                                println("Embedding chunk #${index + 1} response: $responseJson")
-                            } catch (e: Exception) {
-                                val errorText = "Request failed for chunk #${index + 1}: ${e.message ?: "unknown error"}"
-                                allResults.appendLine(errorText)
-                                allResults.appendLine()
-                                allLogs.appendLine("CHUNK #${index + 1} ERROR:")
-                                allLogs.appendLine(errorText)
-                                allLogs.appendLine()
-                                println("Embedding chunk #${index + 1} error: $errorText")
-                            }
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Button(
+                    onClick = {
+                        val activeStrategies = selectedStrategies.filterValues { it }.keys.toList()
+                        if (activeStrategies.isEmpty()) {
+                            logText += "\nВыберите хотя бы одну стратегию."
+                            return@Button
+                        }
+                        if (files.isEmpty()) {
+                            logText += "\nДобавьте файлы перед обработкой."
+                            return@Button
+                        }
+                        val apiKey = readApiKey("DEEPSEEK_API_KEY")
+                        if (apiKey.isBlank()) {
+                            logText += "\nОтсутствует DEEPSEEK_API_KEY."
+                            return@Button
                         }
 
-                        resultText = allResults.toString().trim()
-                        logText = allLogs.toString().trim()
-                        isLoading = false
-                    }
-                },
-                modifier = Modifier.fillMaxWidth(),
-                enabled = inputText.isNotBlank() && !isLoading
-            ) {
-                Text(if (isLoading) "Отправка..." else "Отправить")
+                        isGlobalProcessing = true
+                        files.forEach { file ->
+                            updateFile(file.id) { it.copy(state = FileProcessingState.Queued, progress = 0f) }
+                        }
+
+                        scope.launch {
+                            supervisorScope {
+                                files.map { file ->
+                                    async {
+                                        processSingleFile(file, activeStrategies, apiKey)
+                                    }
+                                }.awaitAll()
+                            }
+                            isGlobalProcessing = false
+                        }
+                    },
+                    enabled = files.isNotEmpty() && !isGlobalProcessing
+                ) {
+                    Text("Обработать")
+                }
+
+                Button(
+                    onClick = {
+                        val selectedIds = selectedFileIds.filterValues { it }.keys
+                        files.removeAll { it.id in selectedIds }
+                        selectedIds.forEach { selectedFileIds.remove(it) }
+                    },
+                    enabled = files.isNotEmpty() && !isGlobalProcessing
+                ) {
+                    Text("Удалить")
+                }
+
+                Button(
+                    onClick = {
+                        queries.deleteAll()
+                        dbReloadCounter += 1
+                        logText += "\nТаблица чанков очищена."
+                    },
+                    enabled = !isGlobalProcessing
+                ) {
+                    Text("Очистить БД")
+                }
+
+                Button(
+                    onClick = {
+                        files.clear()
+                        selectedFileIds.clear()
+                        queries.deleteAll()
+                        dbReloadCounter += 1
+                        logText += "\nФайлы и таблица чанков очищены."
+                    },
+                    enabled = !isGlobalProcessing
+                ) {
+                    Text("Очистить всё")
+                }
             }
 
-            OutlinedTextField(
-                value = resultText,
-                onValueChange = {},
-                modifier = Modifier.fillMaxWidth(),
-                label = { Text("Result") },
-                readOnly = true,
-                minLines = 6
-            )
+            LazyVerticalGrid(
+                columns = GridCells.Adaptive(minSize = 170.dp),
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                items(files, key = { it.id }) { file ->
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                if (file.state == FileProcessingState.Completed) {
+                                    openedFileSource = file.source
+                                } else {
+                                    selectedFileIds[file.id] = !(selectedFileIds[file.id] ?: false)
+                                }
+                            }
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Checkbox(
+                                    checked = selectedFileIds[file.id] == true,
+                                    onCheckedChange = { checked -> selectedFileIds[file.id] = checked },
+                                    enabled = !isGlobalProcessing
+                                )
+                                Text(file.state.label)
+                            }
 
-            OutlinedTextField(
-                value = logText,
-                onValueChange = {},
-                modifier = Modifier.fillMaxWidth(),
-                label = { Text("Request/Response log") },
-                readOnly = true,
-                minLines = 8
-            )
+                            when (file.state) {
+                                FileProcessingState.Added -> Text("•")
+                                FileProcessingState.Queued -> CircularProgressIndicator(modifier = Modifier.width(20.dp))
+                                FileProcessingState.Processing -> LinearProgressIndicator(progress = { file.progress })
+                                FileProcessingState.Completed -> Text("✓")
+                            }
+
+                            Text(file.fileName)
+                        }
+                    }
+                }
+            }
+
+            Text("Лог:")
+            Text(logText, style = MaterialTheme.typography.bodySmall)
         }
+    }
+
+    LaunchedEffect(Unit) {
+        dbReloadCounter += 1
     }
 }

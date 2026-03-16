@@ -11,6 +11,7 @@ material3 = "1.10.0-alpha05"
 mcp = "0.9.0"
 sqldelight = "2.2.1"
 slf4j = "2.0.17"
+pdfbox = "3.0.6"
 
 [libraries]
 kotlin-test = { module = "org.jetbrains.kotlin:kotlin-test", version.ref = "kotlin" }
@@ -38,6 +39,7 @@ sqldelight-runtime = { module = "app.cash.sqldelight:runtime", version.ref = "sq
 sqldelight-coroutines-extensions = { module = "app.cash.sqldelight:coroutines-extensions", version.ref = "sqldelight" }
 sqldelight-sqlite-driver = { module = "app.cash.sqldelight:sqlite-driver", version.ref = "sqldelight" }
 slf4j-simple = { module = "org.slf4j:slf4j-simple", version.ref = "slf4j" }
+pdfbox = { module = "org.apache.pdfbox:pdfbox", version.ref = "pdfbox" }
 
 [plugins]
 composeHotReload = { id = "org.jetbrains.compose.hot-reload", version.ref = "composeHotReload" }

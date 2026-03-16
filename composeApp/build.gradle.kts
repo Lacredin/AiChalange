@@ -43,6 +43,7 @@ kotlin {
             implementation(libs.ktor.client.cio)
             implementation(libs.sqldelight.sqlite.driver)
             implementation(libs.slf4j.simple)
+            implementation(libs.pdfbox)
         }
         jvmMain {
             kotlin.srcDir(layout.buildDirectory.dir("generated/sources/secrets/kotlin/jvmMain"))
@@ -70,6 +71,10 @@ sqldelight {
         create("AiAgentRagDatabase") {
             packageName.set("com.example.aiadventchalengetestllmapi.aiagentragdb")
             srcDirs.setFrom("src/commonMain/sqldelight_aiagentrag")
+        }
+        create("EmbedingGenerationDatabase") {
+            packageName.set("com.example.aiadventchalengetestllmapi.embedinggenerationdb")
+            srcDirs.setFrom("src/commonMain/sqldelight_embedinggeneration")
         }
     }
 }

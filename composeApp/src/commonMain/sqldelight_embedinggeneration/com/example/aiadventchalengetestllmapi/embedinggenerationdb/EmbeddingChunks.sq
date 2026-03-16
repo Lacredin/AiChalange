@@ -1,0 +1,42 @@
+CREATE TABLE embedding_chunks (
+    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    source TEXT NOT NULL,
+    title TEXT NOT NULL,
+    section TEXT NOT NULL,
+    chunk_id INTEGER NOT NULL,
+    strategy TEXT NOT NULL,
+    chunk_text TEXT NOT NULL,
+    embedding_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+
+selectBySource:
+SELECT *
+FROM embedding_chunks
+WHERE source = ?
+ORDER BY strategy ASC, chunk_id ASC;
+
+selectAll:
+SELECT *
+FROM embedding_chunks
+ORDER BY source ASC, strategy ASC, chunk_id ASC;
+
+insertChunk:
+INSERT INTO embedding_chunks(
+    source,
+    title,
+    section,
+    chunk_id,
+    strategy,
+    chunk_text,
+    embedding_json,
+    created_at
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+
+deleteBySource:
+DELETE FROM embedding_chunks
+WHERE source = ?;
+
+deleteAll:
+DELETE FROM embedding_chunks;
