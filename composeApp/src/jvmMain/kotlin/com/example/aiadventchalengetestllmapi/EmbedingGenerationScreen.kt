@@ -69,7 +69,7 @@ private data class EmbeddingApiModel(
 )
 
 private enum class ChunkStrategy(val dbValue: String, val label: String) {
-    Fixed500("fixed_500", "Фиксированная (500)"),
+    Fixed500("fixed_2000", "Фиксированная (2000)"),
     Structured("structured", "По структуре текста"),
     Semantic("semantic", "Семантическая")
 }
@@ -95,12 +95,12 @@ private fun readApiKey(envVar: String): String {
     return System.getenv(envVar)?.trim().orEmpty()
 }
 
-private fun chunkFixed(text: String, size: Int = 500): List<String> {
+private fun chunkFixed(text: String, size: Int = 2000): List<String> {
     if (text.isBlank()) return emptyList()
     return text.trim().chunked(size)
 }
 
-private fun chunkStructured(text: String, targetSize: Int = 500): List<String> {
+private fun chunkStructured(text: String, targetSize: Int = 2000): List<String> {
     if (text.isBlank()) return emptyList()
     val paragraphs = text
         .split(Regex("\\n\\s*\\n"))
@@ -155,7 +155,7 @@ private data class SemanticChunk(
     val keywords: Set<String>
 )
 
-private fun chunkSemantic(text: String, targetSize: Int = 500, similarityThreshold: Double = 0.2): List<String> {
+private fun chunkSemantic(text: String, targetSize: Int = 2000, similarityThreshold: Double = 0.2): List<String> {
     if (text.isBlank()) return emptyList()
     val sentences = text
         .split(Regex("(?<=[.!?])\\s+"))
@@ -232,9 +232,9 @@ private fun chunkSemantic(text: String, targetSize: Int = 500, similarityThresho
 }
 
 private fun splitByStrategy(text: String, strategy: ChunkStrategy): List<String> = when (strategy) {
-    ChunkStrategy.Fixed500 -> chunkFixed(text, size = 500)
-    ChunkStrategy.Structured -> chunkStructured(text, targetSize = 500)
-    ChunkStrategy.Semantic -> chunkSemantic(text, targetSize = 500, similarityThreshold = 0.2)
+    ChunkStrategy.Fixed500 -> chunkFixed(text, size = 2000)
+    ChunkStrategy.Structured -> chunkStructured(text, targetSize = 2000)
+    ChunkStrategy.Semantic -> chunkSemantic(text, targetSize = 2000, similarityThreshold = 0.2)
 }
 
 private suspend fun readTextFromFile(path: String): String = withContext(Dispatchers.IO) {
@@ -704,6 +704,21 @@ fun EmbedingGenerationScreen(
     }
 
     LaunchedEffect(Unit) {
+        val processedBySource = queries.selectAll()
+            .executeAsList()
+            .groupBy { it.source }
+        val existingSources = files.map { it.source }.toSet()
+        processedBySource.forEach { (source, rows) ->
+            if (source !in existingSources) {
+                files += ProcessingFileItem(
+                    id = System.nanoTime() + files.size,
+                    source = source,
+                    fileName = rows.firstOrNull()?.title ?: File(source).name,
+                    state = FileProcessingState.Completed,
+                    progress = 1f
+                )
+            }
+        }
         dbReloadCounter += 1
     }
 }
