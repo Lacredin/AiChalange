@@ -5,12 +5,14 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import com.example.aiadventchalengetestllmapi.aiagentrag.AiAgentRAGScreen
 import com.example.aiadventchalengetestllmapi.aiagentmain.AiAgentMainScreen
 import com.example.aiadventchalengetestllmapi.aiweek3.AiWeek3Screen
 import com.example.aiadventchalengetestllmapi.aistateagent.AiStateAgentScreen
 import com.example.aiadventchalengetestllmapi.aiagentmcp.AiAgentMCPScreen
 
 enum class RootScreen {
+    AiAgentRAG,
     AiAgentMain,
     AiAgentMCP,
     AiStateAgent,
@@ -21,9 +23,14 @@ enum class RootScreen {
 
 @Composable
 fun RootApp() {
-    var currentScreen by remember { mutableStateOf(RootScreen.AiAgentMain) }
+    var currentScreen by remember { mutableStateOf(RootScreen.AiAgentRAG) }
 
     when (currentScreen) {
+        RootScreen.AiAgentRAG -> AiAgentRAGScreen(
+            currentScreen = currentScreen,
+            onSelectScreen = { selectedScreen -> currentScreen = selectedScreen }
+        )
+
         RootScreen.AiAgentMain -> AiAgentMainScreen(
             currentScreen = currentScreen,
             onSelectScreen = { selectedScreen -> currentScreen = selectedScreen }
@@ -50,7 +57,7 @@ fun RootApp() {
         )
 
         RootScreen.App -> App(
-            onBackClick = { currentScreen = RootScreen.AiAgentMain }
+            onBackClick = { currentScreen = RootScreen.AiAgentRAG }
         )
     }
 }

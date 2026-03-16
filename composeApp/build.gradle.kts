@@ -67,6 +67,10 @@ sqldelight {
             packageName.set("com.example.aiadventchalengetestllmapi.aiagentmaindb")
             srcDirs.setFrom("src/commonMain/sqldelight_aiagentmain")
         }
+        create("AiAgentRagDatabase") {
+            packageName.set("com.example.aiadventchalengetestllmapi.aiagentragdb")
+            srcDirs.setFrom("src/commonMain/sqldelight_aiagentrag")
+        }
     }
 }
 
