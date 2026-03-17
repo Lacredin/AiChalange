@@ -23,7 +23,8 @@ object EmbeddingGeneratorStub {
                 setBody(
                     OllamaEmbeddingRequest(
                         model = EMBEDDING_MODEL,
-                        prompt = input
+                        prompt = input,
+                        input = input
                     )
                 )
             }.body()
@@ -40,7 +41,8 @@ object EmbeddingGeneratorStub {
 @Serializable
 private data class OllamaEmbeddingRequest(
     val model: String,
-    val prompt: String
+    val prompt: String,
+    val input: String
 )
 
 @Serializable

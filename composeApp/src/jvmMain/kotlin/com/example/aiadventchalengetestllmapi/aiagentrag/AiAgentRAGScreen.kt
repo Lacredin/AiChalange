@@ -92,7 +92,7 @@ private data class RagMessage(
 private const val PREF_NODE = "com.example.aiadventchalengetestllmapi.aiagentrag"
 private const val USE_RAG_KEY = "use_rag_enabled"
 private const val RAG_TOP_K = 5
-private const val MIN_SCORE = 0.05
+private const val MIN_SCORE = 0.3
 private const val RAG_SYSTEM = "Use only provided context. If insufficient, say so."
 private val ragJson = Json { ignoreUnknownKeys = true }
 

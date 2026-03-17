@@ -109,7 +109,7 @@ private fun saveSelectedStrategies(strategies: Set<ChunkStrategy>) {
 }
 
 
-private fun chunkFixed(text: String, size: Int = 2000): List<String> {
+private fun chunkFixed(text: String, size: Int = 10000): List<String> {
     if (text.isBlank()) return emptyList()
     return text.trim().chunked(size)
 }
@@ -230,8 +230,8 @@ private fun splitLongTextBySentences(text: String, hardLimit: Int): List<String>
 
 private fun chunkStructured(
     text: String,
-    targetSize: Int = 2000,
-    softLimit: Int = 1600,
+    targetSize: Int = 10000,
+    softLimit: Int = 8500,
     overlapChars: Int = 220
 ): List<String> {
     if (text.isBlank()) return emptyList()
@@ -325,7 +325,7 @@ private data class SemanticChunk(
     val keywords: Set<String>
 )
 
-private fun chunkSemantic(text: String, targetSize: Int = 2000, similarityThreshold: Double = 0.2): List<String> {
+private fun chunkSemantic(text: String, targetSize: Int = 10000, similarityThreshold: Double = 0.2): List<String> {
     if (text.isBlank()) return emptyList()
     val sentences = text
         .split(Regex("(?<=[.!?])\\s+"))
@@ -333,78 +333,94 @@ private fun chunkSemantic(text: String, targetSize: Int = 2000, similarityThresh
         .filter { it.isNotEmpty() }
     if (sentences.isEmpty()) return emptyList()
 
+    val minPreferredSize = (targetSize * 0.85).toInt().coerceAtLeast(600)
     val chunks = mutableListOf<SemanticChunk>()
-    var currentChunk = sentences.first()
-    var currentKeywords = semanticKeywords(currentChunk)
+    var currentChunk = ""
+    var currentKeywords = emptySet<String>()
 
     fun flush() {
-        if (currentChunk.isNotBlank()) {
-            val textValue = currentChunk.trim()
+        val textValue = currentChunk.trim()
+        if (textValue.isNotEmpty()) {
             chunks += SemanticChunk(text = textValue, keywords = semanticKeywords(textValue))
         }
+        currentChunk = ""
+        currentKeywords = emptySet()
     }
 
-    sentences.drop(1).forEach { sentence ->
-        val sentenceKeywords = semanticKeywords(sentence)
-        val closeByMeaning = jaccard(currentKeywords, sentenceKeywords) >= similarityThreshold
-        val fitsBySize = currentChunk.length + 1 + sentence.length <= targetSize
-
-        if (closeByMeaning && fitsBySize) {
-            currentChunk += " $sentence"
-            currentKeywords = semanticKeywords(currentChunk)
-        } else if (!fitsBySize && sentence.length > targetSize) {
+    sentences.forEach { sentence ->
+        if (sentence.length > targetSize) {
             flush()
             sentence.chunked(targetSize).forEach { part ->
-                chunks += SemanticChunk(text = part, keywords = semanticKeywords(part))
+                val partText = part.trim()
+                if (partText.isNotEmpty()) {
+                    chunks += SemanticChunk(text = partText, keywords = semanticKeywords(partText))
+                }
             }
-            currentChunk = ""
-            currentKeywords = emptySet()
+            return@forEach
+        }
+
+        if (currentChunk.isEmpty()) {
+            currentChunk = sentence
+            currentKeywords = semanticKeywords(sentence)
+            return@forEach
+        }
+
+        val sentenceKeywords = semanticKeywords(sentence)
+        val combinedSize = currentChunk.length + 1 + sentence.length
+        if (combinedSize <= targetSize) {
+            val closeByMeaning = jaccard(currentKeywords, sentenceKeywords) >= similarityThreshold
+            val shouldAttach = closeByMeaning || currentChunk.length < minPreferredSize
+            if (shouldAttach) {
+                currentChunk += " $sentence"
+                currentKeywords = semanticKeywords(currentChunk)
+            } else {
+                flush()
+                currentChunk = sentence
+                currentKeywords = sentenceKeywords
+            }
         } else {
             flush()
             currentChunk = sentence
             currentKeywords = sentenceKeywords
         }
     }
+    flush()
 
-    if (currentChunk.isNotBlank()) {
-        val textValue = currentChunk.trim()
-        chunks += SemanticChunk(text = textValue, keywords = semanticKeywords(textValue))
-    }
+    if (chunks.size <= 1) return chunks.map { it.text }
 
-    var optimized = chunks.toList()
-    var changed = true
-    while (changed) {
-        changed = false
-        val merged = mutableListOf<SemanticChunk>()
-        var index = 0
-        while (index < optimized.size) {
-            var current = optimized[index]
-            while (index + 1 < optimized.size) {
-                val next = optimized[index + 1]
-                val combinedSize = current.text.length + 1 + next.text.length
-                val closeByMeaning = jaccard(current.keywords, next.keywords) >= similarityThreshold
-                if (combinedSize <= targetSize && closeByMeaning) {
-                    val combinedText = "${current.text} ${next.text}".trim()
-                    current = SemanticChunk(combinedText, semanticKeywords(combinedText))
-                    index += 1
-                    changed = true
-                } else {
-                    break
-                }
+    // Secondary packing pass: maximize chunk size near target, while still preferring semantic proximity.
+    val packed = mutableListOf<SemanticChunk>()
+    var current = chunks.first()
+    chunks.drop(1).forEach { next ->
+        val combinedSize = current.text.length + 1 + next.text.length
+        if (combinedSize <= targetSize) {
+            val closeByMeaning = jaccard(current.keywords, next.keywords) >= similarityThreshold
+            val shouldAttach = closeByMeaning || current.text.length < minPreferredSize
+            if (shouldAttach) {
+                val combinedText = "${current.text} ${next.text}".trim()
+                current = SemanticChunk(combinedText, semanticKeywords(combinedText))
+            } else {
+                packed += current
+                current = next
             }
-            merged += current
-            index += 1
+        } else {
+            packed += current
+            current = next
         }
-        optimized = merged
     }
+    packed += current
 
-    return optimized.map { it.text }
+    return packed.map { it.text }
 }
 
 private fun splitByStrategy(text: String, strategy: ChunkStrategy): List<String> = when (strategy) {
-    ChunkStrategy.Fixed500 -> chunkFixed(text, size = 2000)
-    ChunkStrategy.Structured -> chunkStructured(text, targetSize = 2000)
-    ChunkStrategy.Semantic -> chunkSemantic(text, targetSize = 2000, similarityThreshold = 0.2)
+    ChunkStrategy.Fixed500 -> com.example.aiadventchalengetestllmapi.chunking.chunkFixed(text, size = 10000)
+    ChunkStrategy.Structured -> com.example.aiadventchalengetestllmapi.chunking.chunkStructured(text, targetSize = 10000)
+    ChunkStrategy.Semantic -> com.example.aiadventchalengetestllmapi.chunking.chunkSemantic(
+        text,
+        targetSize = 10000,
+        similarityThreshold = 0.2
+    )
 }
 
 private fun isHeadingLine(line: String): Boolean {
