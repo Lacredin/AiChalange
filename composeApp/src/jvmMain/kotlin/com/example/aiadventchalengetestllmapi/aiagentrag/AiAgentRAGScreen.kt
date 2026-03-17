@@ -168,6 +168,41 @@ fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> 
             selectedSourcesMessageId = null
         }
 
+        fun createChat(selectNew: Boolean) {
+            val nextIndex = (chats.maxOfOrNull { it.id } ?: 0L) + 1L
+            ragQueries.insertChat("Chat $nextIndex", System.currentTimeMillis(), null)
+            val newId = ragQueries.selectLastInsertedChatId().executeAsOne()
+            reloadChats()
+            if (selectNew) {
+                activeChatId = newId
+                loadMessages(newId)
+            }
+        }
+
+        fun deleteChat(chatId: Long) {
+            ragQueries.deleteChatById(chatId)
+            reloadChats()
+            if (activeChatId == chatId) {
+                if (chats.isEmpty()) {
+                    createChat(selectNew = true)
+                } else {
+                    val fallbackChatId = chats.first().id
+                    activeChatId = fallbackChatId
+                    loadMessages(fallbackChatId)
+                }
+            }
+        }
+
+        fun deleteAllChats() {
+            ragQueries.deleteAllBranchMessages()
+            ragQueries.deleteAllMessages()
+            ragQueries.deleteAllChats()
+            chats.clear()
+            messages.clear()
+            activeChatId = null
+            createChat(selectNew = true)
+        }
+
         fun sendMessage() {
             val chatId = activeChatId ?: return
             val text = inputText.trim()
@@ -229,8 +264,7 @@ fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> 
         LaunchedEffect(Unit) {
             reloadChats()
             if (chats.isEmpty()) {
-                ragQueries.insertChat("Chat 1", System.currentTimeMillis(), null)
-                reloadChats()
+                createChat(selectNew = true)
             }
             if (activeChatId == null && chats.isNotEmpty()) {
                 activeChatId = chats.first().id
@@ -260,12 +294,13 @@ fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> 
         }) { padding ->
             Row(Modifier.fillMaxSize().imePadding().padding(padding)) {
                 Column(Modifier.width(240.dp).fillMaxSize().padding(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = { ragQueries.insertChat("Chat ${System.currentTimeMillis()}", System.currentTimeMillis(), null); reloadChats() }, modifier = Modifier.fillMaxWidth(), enabled = !isLoading) { Text("+ New chat") }
-                    Button(onClick = { ragQueries.deleteAllBranchMessages(); ragQueries.deleteAllMessages(); ragQueries.deleteAllChats(); chats.clear(); messages.clear() }, modifier = Modifier.fillMaxWidth(), enabled = !isLoading) { Text("Delete all chats") }
+                    Button(onClick = { createChat(selectNew = true) }, modifier = Modifier.fillMaxWidth(), enabled = !isLoading) { Text("+ New chat") }
+                    Button(onClick = ::deleteAllChats, modifier = Modifier.fillMaxWidth(), enabled = chats.isNotEmpty() && !isLoading) { Text("Delete all chats") }
                     LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         items(chats, key = { it.id }) { chat ->
                             Row(Modifier.fillMaxWidth().background(if (chat.id == activeChatId) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface, RoundedCornerShape(10.dp)).clickable(enabled = !isLoading) { activeChatId = chat.id; loadMessages(chat.id) }.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
                                 Text(chat.title, modifier = Modifier.weight(1f))
+                                TextButton(onClick = { deleteChat(chat.id) }, enabled = !isLoading) { Text("X") }
                             }
                         }
                     }
