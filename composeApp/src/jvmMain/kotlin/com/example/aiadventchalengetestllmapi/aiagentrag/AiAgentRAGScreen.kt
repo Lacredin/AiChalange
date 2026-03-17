@@ -18,6 +18,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -153,6 +155,7 @@ fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> 
         var isLoading by remember { mutableStateOf(false) }
         var useRag by remember { mutableStateOf(loadUseRagState()) }
         var showSources by remember { mutableStateOf(false) }
+        var screensMenuExpanded by remember { mutableStateOf(false) }
 
         fun refreshSourceRows() {
             val scoreMap = retrieved.associateBy({ "${it.source}|${it.strategy}|${it.chunkId}" }, { it.score })
@@ -247,6 +250,50 @@ fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> 
         Scaffold(topBar = {
             TopAppBar(
                 title = { Text("AiAgentRAG") },
+                actions = {
+                    Box {
+                        TextButton(onClick = { screensMenuExpanded = true }, enabled = !isLoading) {
+                            Text("Screens")
+                        }
+                        DropdownMenu(
+                            expanded = screensMenuExpanded,
+                            onDismissRequest = { screensMenuExpanded = false }
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text(if (currentScreen == RootScreen.AiAgentRAG) "AiAgentRAG ✓" else "AiAgentRAG") },
+                                onClick = { screensMenuExpanded = false; onSelectScreen(RootScreen.AiAgentRAG) }
+                            )
+                            DropdownMenuItem(
+                                text = { Text(if (currentScreen == RootScreen.EmbedingGeneration) "EmbedingGeneration ✓" else "EmbedingGeneration") },
+                                onClick = { screensMenuExpanded = false; onSelectScreen(RootScreen.EmbedingGeneration) }
+                            )
+                            DropdownMenuItem(
+                                text = { Text(if (currentScreen == RootScreen.AiAgentMain) "AiAgentMain ✓" else "AiAgentMain") },
+                                onClick = { screensMenuExpanded = false; onSelectScreen(RootScreen.AiAgentMain) }
+                            )
+                            DropdownMenuItem(
+                                text = { Text(if (currentScreen == RootScreen.AiAgentMCP) "AiAgentMCP ✓" else "AiAgentMCP") },
+                                onClick = { screensMenuExpanded = false; onSelectScreen(RootScreen.AiAgentMCP) }
+                            )
+                            DropdownMenuItem(
+                                text = { Text(if (currentScreen == RootScreen.AiStateAgent) "AiStateAgent ✓" else "AiStateAgent") },
+                                onClick = { screensMenuExpanded = false; onSelectScreen(RootScreen.AiStateAgent) }
+                            )
+                            DropdownMenuItem(
+                                text = { Text(if (currentScreen == RootScreen.AiWeek3) "AiWeek3 ✓" else "AiWeek3") },
+                                onClick = { screensMenuExpanded = false; onSelectScreen(RootScreen.AiWeek3) }
+                            )
+                            DropdownMenuItem(
+                                text = { Text(if (currentScreen == RootScreen.AiAgent) "AiAgent ✓" else "AiAgent") },
+                                onClick = { screensMenuExpanded = false; onSelectScreen(RootScreen.AiAgent) }
+                            )
+                            DropdownMenuItem(
+                                text = { Text(if (currentScreen == RootScreen.App) "App ✓" else "App") },
+                                onClick = { screensMenuExpanded = false; onSelectScreen(RootScreen.App) }
+                            )
+                        }
+                    }
+                },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = Color(0xFFEFF6FF), titleContentColor = Color(0xFF1E3A8A))
             )
         }) { padding ->
@@ -304,6 +351,4 @@ fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> 
             }
         }
     }
-    @Suppress("UNUSED_PARAMETER")
-    fun _keepParamsUsed(_currentScreen: RootScreen = currentScreen, _onSelectScreen: (RootScreen) -> Unit = onSelectScreen) = Unit
 }
