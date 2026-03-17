@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -18,6 +19,8 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
@@ -48,28 +51,19 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.example.aiadventchalengetestllmapi.embedinggenerationdb.EmbedingGenerationDatabaseDriverFactory
 import com.example.aiadventchalengetestllmapi.embedinggenerationdb.createEmbedingGenerationDatabase
-import com.example.aiadventchalengetestllmapi.network.DeepSeekApi
-import com.example.aiadventchalengetestllmapi.network.DeepSeekChatRequest
-import com.example.aiadventchalengetestllmapi.network.DeepSeekMessage
+import com.example.aiadventchalengetestllmapi.embedding.EmbeddingGeneratorStub
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.encodeToString
-import kotlinx.serialization.json.Json
 import org.apache.pdfbox.Loader
 import org.apache.pdfbox.text.PDFTextStripper
 import java.io.File
 import java.util.prefs.Preferences
 import javax.swing.JFileChooser
 import javax.swing.filechooser.FileNameExtensionFilter
-
-private data class EmbeddingApiModel(
-    val apiLabel: String,
-    val modelLabel: String
-)
 
 private enum class ChunkStrategy(val dbValue: String, val label: String) {
     Fixed500("fixed_2000", "Фиксированная (2000)"),
@@ -100,12 +94,6 @@ private data class TextSection(
     val text: String
 )
 
-private fun readApiKey(envVar: String): String {
-    val fromBuildSecrets = BuildSecrets.apiKeyFor(envVar).trim()
-    if (fromBuildSecrets.isNotEmpty()) return fromBuildSecrets
-    return System.getenv(envVar)?.trim().orEmpty()
-}
-
 private fun loadSelectedStrategies(): Set<ChunkStrategy> {
     val prefs = Preferences.userRoot().node(EMBEDDING_PREFS_NODE)
     val raw = prefs.get(SELECTED_STRATEGIES_KEY, "").trim()
@@ -119,6 +107,7 @@ private fun saveSelectedStrategies(strategies: Set<ChunkStrategy>) {
     val value = strategies.joinToString(",") { it.name }
     prefs.put(SELECTED_STRATEGIES_KEY, value)
 }
+
 
 private fun chunkFixed(text: String, size: Int = 2000): List<String> {
     if (text.isBlank()) return emptyList()
@@ -491,19 +480,8 @@ fun EmbedingGenerationScreen(
     onSelectScreen: (RootScreen) -> Unit
 ) {
     val scope = rememberCoroutineScope()
-    val deepSeekApi = remember { DeepSeekApi() }
     val database = remember { createEmbedingGenerationDatabase(EmbedingGenerationDatabaseDriverFactory()) }
     val queries = remember(database) { database.embeddingChunksQueries }
-    val json = remember { Json { prettyPrint = true; encodeDefaults = true } }
-
-    val supportedModels = remember {
-        listOf(
-            EmbeddingApiModel(
-                apiLabel = "DeepSeek API",
-                modelLabel = "deepseek-chat"
-            )
-        )
-    }
 
     val files = remember { mutableStateListOf<ProcessingFileItem>() }
     val selectedFileIds = remember { mutableStateMapOf<Long, Boolean>() }
@@ -514,7 +492,6 @@ fun EmbedingGenerationScreen(
         }
     }
 
-    var selectedModel by remember { mutableStateOf(supportedModels.first()) }
     var screensMenuExpanded by remember { mutableStateOf(false) }
     var openedFileSource by remember { mutableStateOf<String?>(null) }
     var openedFileStrategyFilter by remember { mutableStateOf("all") }
@@ -544,7 +521,7 @@ fun EmbedingGenerationScreen(
         else openedFileRecords.filter { it.strategy == openedFileStrategyFilter }
     }
 
-    suspend fun processSingleFile(fileItem: ProcessingFileItem, strategies: List<ChunkStrategy>, apiKey: String) {
+    suspend fun processSingleFile(fileItem: ProcessingFileItem, strategies: List<ChunkStrategy>) {
         updateFile(fileItem.id) { it.copy(state = FileProcessingState.Processing, progress = 0f) }
         val sourcePath = fileItem.source
         val fileName = fileItem.fileName
@@ -571,6 +548,10 @@ fun EmbedingGenerationScreen(
             .sumOf { sectionPairs -> sectionPairs.sumOf { it.second.size } }
             .coerceAtLeast(1)
         var processedChunks = 0
+        
+        if (false) { /*
+            logText += "\n[$fileName] В API-моделях не найдены '$EMBEDDING_MODEL_PRIMARY'/'$EMBEDDING_MODEL_FALLBACK'. Используется fallback через chat/completions."
+        */ }
 
         queries.deleteBySource(source = sourcePath)
 
@@ -578,45 +559,102 @@ fun EmbedingGenerationScreen(
             var strategyChunkId = 1L
             sectionPairs.forEach { (section, chunks) ->
                 chunks.forEach { chunkText ->
-                val request = DeepSeekChatRequest(
-                    model = selectedModel.modelLabel,
-                    temperature = 0.0,
-                    messages = listOf(
-                        DeepSeekMessage(
-                            role = "system",
-                            content = "Return valid JSON only: {\"embedding\":[float,...],\"dimensions\":64}. Build semantic vector for user text. Exactly 64 float values."
-                        ),
-                        DeepSeekMessage(role = "user", content = chunkText)
-                    )
-                )
-                val requestJson = json.encodeToString(request)
-                try {
-                    val response = deepSeekApi.createChatCompletion(apiKey = apiKey, request = request)
-                    val embeddingJson = response.choices.firstOrNull()?.message?.content.orEmpty()
-                    queries.insertChunk(
-                        source = sourcePath,
-                        title = fileName,
-                        section = section.title,
-                        chunk_id = strategyChunkId,
-                        strategy = strategy.dbValue,
-                        chunk_text = chunkText,
-                        embedding_json = embeddingJson,
-                        created_at = System.currentTimeMillis()
-                    )
-                    strategyChunkId += 1L
-                    val responseJson = json.encodeToString(response)
-                    println("[${fileName}] ${strategy.dbValue} request: $requestJson")
-                    println("[${fileName}] ${strategy.dbValue} response: $responseJson")
-                } catch (e: Exception) {
-                    val errorText = "[${fileName}] ${strategy.dbValue} section '${section.title}': ${e.message ?: "unknown error"}"
-                    logText += "\n$errorText"
-                    println(errorText)
+                    val result = EmbeddingGeneratorStub.createEmbedding(chunkText)
+                    result.onSuccess { embeddingValues ->
+                        val embeddingJson = buildString {
+                            append("{\"embedding\":[")
+                            append(embeddingValues.joinToString(","))
+                            append("],\"dimensions\":")
+                            append(embeddingValues.size)
+                            append("}")
+                        }
+                        queries.insertChunk(
+                            source = sourcePath,
+                            title = fileName,
+                            section = section.title,
+                            chunk_id = strategyChunkId,
+                            strategy = strategy.dbValue,
+                            chunk_text = chunkText,
+                            embedding_json = embeddingJson,
+                            created_at = System.currentTimeMillis()
+                        )
+                        strategyChunkId += 1L
+                    }.onFailure { embeddingError ->
+                        val errorText = "[${fileName}] ${strategy.dbValue} section '${section.title}': ${embeddingError.message ?: "Создание эмбеддингов в разработке"}"
+                        logText += "\n$errorText"
+                        println(errorText)
+                    }
+                    /*
+                    try {
+                        val response = deepSeekApi.createEmbedding(apiKey = apiKey, request = request)
+                        val embeddingValues = response.data.firstOrNull()?.embedding.orEmpty()
+                        if (embeddingValues.isEmpty()) {
+                            throw IllegalStateException("Пустой embedding в ответе")
+                        }
+                        val embeddingJson = json.encodeToString(
+                            mapOf(
+                                "embedding" to embeddingValues,
+                                "dimensions" to embeddingValues.size
+                            )
+                        )
+                        queries.insertChunk(
+                            source = sourcePath,
+                            title = fileName,
+                            section = section.title,
+                            chunk_id = strategyChunkId,
+                            strategy = strategy.dbValue,
+                            chunk_text = chunkText,
+                            embedding_json = embeddingJson,
+                            created_at = System.currentTimeMillis()
+                        )
+                        strategyChunkId += 1L
+                        val responseJson = json.encodeToString(response)
+                        println("[${fileName}] ${strategy.dbValue} request: $requestJson")
+                        println("[${fileName}] ${strategy.dbValue} response: $responseJson")
+                    } catch (e: Exception) {
+                        val shouldFallbackToChat = (e.message ?: "").contains("404")
+                        if (shouldFallbackToChat) {
+                            try {
+                                val fallbackRequest = DeepSeekChatRequest(
+                                    model = "deepseek-chat",
+                                    temperature = 0.0,
+                                    messages = listOf(
+                                        DeepSeekMessage(role = "system", content = CHAT_EMBEDDING_FALLBACK_PROMPT),
+                                        DeepSeekMessage(role = "user", content = chunkText)
+                                    )
+                                )
+                                val fallbackResponse = deepSeekApi.createChatCompletion(apiKey = apiKey, request = fallbackRequest)
+                                val fallbackEmbedding = fallbackResponse.choices.firstOrNull()?.message?.content.orEmpty()
+                                if (fallbackEmbedding.isBlank()) error("empty fallback embedding")
+                                queries.insertChunk(
+                                    source = sourcePath,
+                                    title = fileName,
+                                    section = section.title,
+                                    chunk_id = strategyChunkId,
+                                    strategy = strategy.dbValue,
+                                    chunk_text = chunkText,
+                                    embedding_json = fallbackEmbedding,
+                                    created_at = System.currentTimeMillis()
+                                )
+                                strategyChunkId += 1L
+                                logText += "\n[$fileName] ${strategy.dbValue}: применен fallback через chat/completions."
+                            } catch (fallbackError: Exception) {
+                                val fallbackText =
+                                    "[${fileName}] ${strategy.dbValue} section '${section.title}' fallback: ${fallbackError.message ?: "unknown error"}"
+                                logText += "\n$fallbackText"
+                                println(fallbackText)
+                            }
+                        } else {
+                            val errorText = "[${fileName}] ${strategy.dbValue} section '${section.title}': ${e.message ?: "unknown error"}"
+                            logText += "\n$errorText"
+                            println(errorText)
+                        }
+                    }
+                    */
+                    processedChunks += 1
+                    val progress = (processedChunks.toFloat() / totalChunks.toFloat()).coerceIn(0f, 1f)
+                    updateFile(fileItem.id) { it.copy(progress = progress) }
                 }
-
-                processedChunks += 1
-                val progress = (processedChunks.toFloat() / totalChunks.toFloat()).coerceIn(0f, 1f)
-                updateFile(fileItem.id) { it.copy(progress = progress) }
-            }
             }
         }
 
@@ -774,7 +812,8 @@ fun EmbedingGenerationScreen(
                 .fillMaxSize()
                 .background(MaterialTheme.colorScheme.background)
                 .padding(padding)
-                .padding(12.dp),
+                .padding(12.dp)
+                .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -840,8 +879,8 @@ fun EmbedingGenerationScreen(
                             logText += "\nДобавьте файлы перед обработкой."
                             return@Button
                         }
-                        val apiKey = readApiKey("DEEPSEEK_API_KEY")
-                        if (apiKey.isBlank()) {
+                        
+                        if (false) {
                             logText += "\nОтсутствует DEEPSEEK_API_KEY."
                             return@Button
                         }
@@ -855,7 +894,7 @@ fun EmbedingGenerationScreen(
                             supervisorScope {
                                 files.map { file ->
                                     async {
-                                        processSingleFile(file, activeStrategies, apiKey)
+                                        processSingleFile(file, activeStrategies)
                                     }
                                 }.awaitAll()
                             }
@@ -906,8 +945,8 @@ fun EmbedingGenerationScreen(
             LazyVerticalGrid(
                 columns = GridCells.Adaptive(minSize = 170.dp),
                 modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth(),
+                    .fillMaxWidth()
+                    .heightIn(min = 220.dp, max = 420.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {

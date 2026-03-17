@@ -1572,6 +1572,37 @@ private fun AiWeek3Chat(
                         ) {
                             DropdownMenuItem(
                                 text = {
+                                    Text(if (currentScreen == RootScreen.AiAgentRAG) "AiAgentRAG ✓" else "AiAgentRAG")
+                                },
+                                onClick = {
+                                    screensMenuExpanded = false
+                                    onSelectScreen(RootScreen.AiAgentRAG)
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        if (currentScreen == RootScreen.EmbedingGeneration) "EmbedingGeneration ✓" else "EmbedingGeneration"
+                                    )
+                                },
+                                onClick = {
+                                    screensMenuExpanded = false
+                                    onSelectScreen(RootScreen.EmbedingGeneration)
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        if (currentScreen == RootScreen.AiAgentMain) "AiAgentMain ✓" else "AiAgentMain"
+                                    )
+                                },
+                                onClick = {
+                                    screensMenuExpanded = false
+                                    onSelectScreen(RootScreen.AiAgentMain)
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = {
                                     Text(
                                         if (currentScreen == RootScreen.AiAgentMCP) "AiAgentMCP ?" else "AiAgentMCP"
                                     )

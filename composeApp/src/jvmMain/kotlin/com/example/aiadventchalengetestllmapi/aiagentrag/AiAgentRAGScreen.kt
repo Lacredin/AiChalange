@@ -24,6 +24,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -45,6 +46,9 @@ import com.example.aiadventchalengetestllmapi.BuildSecrets
 import com.example.aiadventchalengetestllmapi.RootScreen
 import com.example.aiadventchalengetestllmapi.aiagentragdb.AiAgentRagDatabaseDriverFactory
 import com.example.aiadventchalengetestllmapi.aiagentragdb.createAiAgentRagDatabase
+import com.example.aiadventchalengetestllmapi.embedding.EmbeddingGeneratorStub
+import com.example.aiadventchalengetestllmapi.embedinggenerationdb.EmbedingGenerationDatabaseDriverFactory
+import com.example.aiadventchalengetestllmapi.embedinggenerationdb.createEmbedingGenerationDatabase
 import com.example.aiadventchalengetestllmapi.network.DeepSeekApi
 import com.example.aiadventchalengetestllmapi.network.DeepSeekChatRequest
 import com.example.aiadventchalengetestllmapi.network.DeepSeekMessage
@@ -52,6 +56,11 @@ import com.example.aiadventchalengetestllmapi.network.GigaChatApi
 import com.example.aiadventchalengetestllmapi.network.OpenAiApi
 import com.example.aiadventchalengetestllmapi.network.ProxyOpenAiApi
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import java.util.prefs.Preferences
 
 private enum class RagApi(val label: String, val envVar: String, val defaultModel: String) {
     DeepSeek("DeepSeek", "DEEPSEEK_API_KEY", "deepseek-chat"),
@@ -62,11 +71,89 @@ private enum class RagApi(val label: String, val envVar: String, val defaultMode
 
 private data class RagChatItem(val id: Long, val title: String)
 private data class RagMessage(val text: String, val isUser: Boolean, val paramsInfo: String)
+private data class RetrievedChunk(
+    val source: String,
+    val title: String,
+    val section: String,
+    val chunkText: String,
+    val score: Double
+)
+
+private const val RAG_PREFS_NODE = "com.example.aiadventchalengetestllmapi.aiagentrag"
+private const val USE_RAG_KEY = "use_rag_enabled"
+private const val RAG_TOP_K = 5
+private const val RAG_SYSTEM_INSTRUCTION =
+    "Используй только предоставленный контекст. Если информации недостаточно — напиши \"Недостаточно данных\". Укажи источники."
+private val ragJson = Json { ignoreUnknownKeys = true }
 
 private fun ragReadApiKey(envVar: String): String {
     val fromBuildSecrets = BuildSecrets.apiKeyFor(envVar).trim()
     if (fromBuildSecrets.isNotEmpty()) return fromBuildSecrets
     return System.getenv(envVar)?.trim().orEmpty()
+}
+
+private fun loadUseRagState(): Boolean {
+    val prefs = Preferences.userRoot().node(RAG_PREFS_NODE)
+    return prefs.getBoolean(USE_RAG_KEY, true)
+}
+
+private fun saveUseRagState(enabled: Boolean) {
+    val prefs = Preferences.userRoot().node(RAG_PREFS_NODE)
+    prefs.putBoolean(USE_RAG_KEY, enabled)
+}
+
+private fun parseEmbeddingVector(raw: String): List<Double> {
+    val trimmed = raw.trim()
+    if (trimmed.isEmpty()) return emptyList()
+
+    val jsonText = when {
+        trimmed.startsWith("{") -> trimmed
+        trimmed.contains("```") -> {
+            val fenced = Regex("```(?:json)?\\s*(\\{[\\s\\S]*?\\})\\s*```").find(trimmed)
+            fenced?.groupValues?.getOrNull(1) ?: trimmed
+        }
+        else -> trimmed
+    }
+
+    val parsed = runCatching { ragJson.parseToJsonElement(jsonText) }.getOrNull()
+    val array = when (parsed) {
+        is JsonObject -> parsed["embedding"] as? JsonArray
+        is JsonArray -> parsed
+        else -> null
+    } ?: return emptyList()
+
+    return array.mapNotNull { element ->
+        val primitive = element as? JsonPrimitive ?: return@mapNotNull null
+        primitive.content.toDoubleOrNull()
+    }
+}
+
+private fun cosineSimilarity(left: List<Double>, right: List<Double>): Double {
+    if (left.isEmpty() || right.isEmpty() || left.size != right.size) return 0.0
+    var dot = 0.0
+    var leftNorm = 0.0
+    var rightNorm = 0.0
+    for (i in left.indices) {
+        val l = left[i]
+        val r = right[i]
+        dot += l * r
+        leftNorm += l * l
+        rightNorm += r * r
+    }
+    if (leftNorm == 0.0 || rightNorm == 0.0) return 0.0
+    return dot / (kotlin.math.sqrt(leftNorm) * kotlin.math.sqrt(rightNorm))
+}
+
+private fun formatRagSources(chunks: List<RetrievedChunk>): String {
+    if (chunks.isEmpty()) return "Источники: не найдены"
+    val unique = LinkedHashSet<String>()
+    chunks.forEach { chunk ->
+        unique += "- ${chunk.title} | раздел: ${chunk.section} | путь: ${chunk.source}"
+    }
+    return buildString {
+        appendLine("Источники:")
+        unique.forEach { appendLine(it) }
+    }.trim()
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -94,6 +181,8 @@ fun AiAgentRAGScreen(
         val proxyOpenAiApi = remember { ProxyOpenAiApi() }
         val database = remember { createAiAgentRagDatabase(AiAgentRagDatabaseDriverFactory()) }
         val queries = remember(database) { database.chatHistoryQueries }
+        val embeddingDatabase = remember { createEmbedingGenerationDatabase(EmbedingGenerationDatabaseDriverFactory()) }
+        val embeddingQueries = remember(embeddingDatabase) { embeddingDatabase.embeddingChunksQueries }
 
         val chats = remember { mutableStateListOf<RagChatItem>() }
         val messages = remember { mutableStateListOf<RagMessage>() }
@@ -105,6 +194,7 @@ fun AiAgentRAGScreen(
         var apiSelectorExpanded by remember { mutableStateOf(false) }
         var screensMenuExpanded by remember { mutableStateOf(false) }
         var isLoading by remember { mutableStateOf(false) }
+        var useRag by remember { mutableStateOf(loadUseRagState()) }
 
         fun reloadChats() {
             chats.clear()
@@ -155,7 +245,7 @@ fun AiAgentRAGScreen(
             if (text.isEmpty() || isLoading) return
 
             val model = selectedApi.defaultModel
-            val paramsInfo = "api=${selectedApi.label} | model=$model"
+            val paramsInfo = "api=${selectedApi.label} | model=$model | rag=${if (useRag) "on" else "off"}"
             queries.insertMessage(
                 chat_id = chatId,
                 api = selectedApi.label,
@@ -173,19 +263,118 @@ fun AiAgentRAGScreen(
                 val answer = try {
                     val apiKey = ragReadApiKey(selectedApi.envVar)
                     if (apiKey.isBlank()) error("Missing API key: ${selectedApi.envVar}")
-                    val history = buildList {
-                        queries.selectMessagesByChat(chat_id = chatId).executeAsList().forEach { dbMessage ->
-                            add(DeepSeekMessage(role = dbMessage.role, content = dbMessage.message))
+
+                    val requestMessages = if (useRag) {
+                        val queryEmbedding = EmbeddingGeneratorStub.createEmbedding(text).getOrElse { embeddingError ->
+                            throw IllegalStateException(embeddingError.message ?: "Создание эмбеддингов в разработке")
                         }
+                        /*
+                        val embeddingApiKey = ragReadApiKey("DEEPSEEK_API_KEY")
+                        if (embeddingApiKey.isBlank()) {
+                            error("Missing API key: DEEPSEEK_API_KEY")
+                        }
+                        val embeddingRequest = DeepSeekEmbeddingRequest(
+                            model = RAG_EMBEDDING_MODEL,
+                            input = text
+                        )
+                        val queryEmbedding = runCatching {
+                            val embeddingResponse = deepSeekApi.createEmbedding(
+                                apiKey = embeddingApiKey,
+                                request = embeddingRequest
+                            )
+                            embeddingResponse.data.firstOrNull()?.embedding.orEmpty()
+                        }.getOrElse { embeddingError ->
+                            val shouldFallbackToChat = (embeddingError.message ?: "").contains("404")
+                            if (!shouldFallbackToChat) throw embeddingError
+                            val fallbackResponse = deepSeekApi.createChatCompletion(
+                                apiKey = embeddingApiKey,
+                                request = DeepSeekChatRequest(
+                                    model = "deepseek-chat",
+                                    temperature = 0.0,
+                                    messages = listOf(
+                                        DeepSeekMessage(role = "system", content = RAG_CHAT_EMBEDDING_FALLBACK_PROMPT),
+                                        DeepSeekMessage(role = "user", content = text)
+                                    )
+                                )
+                            )
+                            parseEmbeddingVector(fallbackResponse.choices.firstOrNull()?.message?.content.orEmpty())
+                        }
+                        */
+                        if (queryEmbedding.isEmpty()) {
+                            error("Не удалось получить эмбеддинг вопроса")
+                        }
+
+                        val topChunks = embeddingQueries.selectAll()
+                            .executeAsList()
+                            .mapNotNull { row ->
+                                val chunkEmbedding = parseEmbeddingVector(row.embedding_json)
+                                if (chunkEmbedding.isEmpty()) return@mapNotNull null
+                                RetrievedChunk(
+                                    source = row.source,
+                                    title = row.title,
+                                    section = row.section,
+                                    chunkText = row.chunk_text,
+                                    score = cosineSimilarity(queryEmbedding, chunkEmbedding)
+                                )
+                            }
+                            .sortedByDescending { it.score }
+                            .take(RAG_TOP_K)
+
+                        val contextBlock = if (topChunks.isEmpty()) {
+                            "Контекст не найден."
+                        } else {
+                            topChunks.mapIndexed { index, chunk ->
+                                buildString {
+                                    appendLine("[$index] Документ: ${chunk.title}")
+                                    appendLine("Раздел: ${chunk.section}")
+                                    appendLine("Путь: ${chunk.source}")
+                                    appendLine("Фрагмент: ${chunk.chunkText}")
+                                }.trim()
+                            }.joinToString("\n\n")
+                        }
+
+                        listOf(
+                            DeepSeekMessage(role = "system", content = RAG_SYSTEM_INSTRUCTION),
+                            DeepSeekMessage(
+                                role = "user",
+                                content = buildString {
+                                    appendLine("Вопрос пользователя:")
+                                    appendLine(text)
+                                    appendLine()
+                                    appendLine("Контекст:")
+                                    appendLine(contextBlock)
+                                    appendLine()
+                                    appendLine("Отвечай только по контексту.")
+                                }.trim()
+                            )
+                        ) to topChunks
+                    } else {
+                        val history = buildList {
+                            queries.selectMessagesByChat(chat_id = chatId).executeAsList().forEach { dbMessage ->
+                                add(DeepSeekMessage(role = dbMessage.role, content = dbMessage.message))
+                            }
+                        }
+                        history to emptyList()
                     }
-                    val request = DeepSeekChatRequest(model = model, messages = history)
+
+                    val request = DeepSeekChatRequest(model = model, messages = requestMessages.first)
                     val response = when (selectedApi) {
                         RagApi.DeepSeek -> deepSeekApi.createChatCompletion(apiKey = apiKey, request = request)
                         RagApi.OpenAI -> openAiApi.createChatCompletion(apiKey = apiKey, request = request)
                         RagApi.GigaChat -> gigaChatApi.createChatCompletion(accessToken = apiKey, request = request)
                         RagApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletion(apiKey = apiKey, request = request)
                     }
-                    response.choices.firstOrNull()?.message?.content?.trim().orEmpty().ifEmpty { "Empty response" }
+                    val modelAnswer = response.choices.firstOrNull()?.message?.content?.trim().orEmpty()
+                    if (useRag) {
+                        val sourcesText = formatRagSources(requestMessages.second)
+                        buildString {
+                            appendLine(if (modelAnswer.isNotEmpty()) modelAnswer else "Недостаточно данных")
+                            appendLine()
+                            append(sourcesText)
+                        }.trim()
+                    } else {
+                        modelAnswer.ifEmpty { "Empty response" }
+                    }
                 } catch (e: Exception) {
                     "Request failed: ${e.message ?: "unknown error"}"
                 }
@@ -367,6 +556,21 @@ fun AiAgentRAGScreen(
                                 )
                             }
                         }
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Использовать RAG")
+                        Switch(
+                            checked = useRag,
+                            onCheckedChange = {
+                                useRag = it
+                                saveUseRagState(it)
+                            },
+                            enabled = !isLoading
+                        )
                     }
 
                     LazyColumn(modifier = Modifier.weight(1f), state = listState, verticalArrangement = Arrangement.spacedBy(8.dp)) {

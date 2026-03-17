@@ -3,6 +3,7 @@ package com.example.aiadventchalengetestllmapi.network
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.request.bearerAuth
+import io.ktor.client.request.get
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
 import io.ktor.http.ContentType
@@ -35,7 +36,27 @@ class DeepSeekApi(
             setBody(request)
         }.body()
     }
+
+    suspend fun listModels(apiKey: String): DeepSeekModelsResponse {
+        return httpClient.get("$baseUrl/models") {
+            bearerAuth(apiKey)
+        }.body()
+    }
 }
+
+@Serializable
+data class DeepSeekModelsResponse(
+    val `object`: String? = null,
+    val data: List<DeepSeekModelData> = emptyList()
+)
+
+@Serializable
+data class DeepSeekModelData(
+    val id: String,
+    val `object`: String? = null,
+    @SerialName("owned_by")
+    val ownedBy: String? = null
+)
 
 @Serializable
 data class DeepSeekEmbeddingRequest(

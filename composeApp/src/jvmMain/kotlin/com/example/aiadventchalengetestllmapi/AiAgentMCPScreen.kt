@@ -196,6 +196,35 @@ private fun AiAgentMCPScreenContent(
                         ) {
                             DropdownMenuItem(
                                 text = {
+                                    SelectableText(if (currentScreen == RootScreen.AiAgentRAG) "AiAgentRAG ✓" else "AiAgentRAG")
+                                },
+                                onClick = {
+                                    screensMenuExpanded = false
+                                    onSelectScreen(RootScreen.AiAgentRAG)
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = {
+                                    SelectableText(
+                                        if (currentScreen == RootScreen.EmbedingGeneration) "EmbedingGeneration ✓" else "EmbedingGeneration"
+                                    )
+                                },
+                                onClick = {
+                                    screensMenuExpanded = false
+                                    onSelectScreen(RootScreen.EmbedingGeneration)
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = {
+                                    SelectableText(if (currentScreen == RootScreen.AiAgentMain) "AiAgentMain ✓" else "AiAgentMain")
+                                },
+                                onClick = {
+                                    screensMenuExpanded = false
+                                    onSelectScreen(RootScreen.AiAgentMain)
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = {
                                     SelectableText(if (currentScreen == RootScreen.AiAgentMCP) "Microsoft Learn MCP ✓" else "Microsoft Learn MCP")
                                 },
                                 onClick = {
