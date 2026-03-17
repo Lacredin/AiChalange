@@ -17,6 +17,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.Button
+import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -70,7 +71,6 @@ private enum class RagApi(val label: String, val envVar: String, val defaultMode
 }
 
 private data class RagChatItem(val id: Long, val title: String)
-private data class RagMessage(val text: String, val isUser: Boolean, val paramsInfo: String)
 private data class RetrievedChunk(
     val source: String,
     val title: String,
@@ -79,6 +79,14 @@ private data class RetrievedChunk(
     val strategy: String,
     val chunkText: String,
     val score: Double
+)
+
+private data class RagMessage(
+    val id: Long,
+    val text: String,
+    val isUser: Boolean,
+    val paramsInfo: String,
+    val sources: List<RetrievedChunk> = emptyList()
 )
 
 private const val PREF_NODE = "com.example.aiadventchalengetestllmapi.aiagentrag"
@@ -98,9 +106,7 @@ private fun loadUseRagState(): Boolean = Preferences.userRoot().node(PREF_NODE).
 private fun saveUseRagState(enabled: Boolean) = Preferences.userRoot().node(PREF_NODE).putBoolean(USE_RAG_KEY, enabled)
 
 private fun parseEmbeddingVector(raw: String): List<Double> {
-    val trimmed = raw.trim()
-    if (trimmed.isEmpty()) return emptyList()
-    val parsed = runCatching { ragJson.parseToJsonElement(trimmed) }.getOrNull()
+    val parsed = runCatching { ragJson.parseToJsonElement(raw.trim()) }.getOrNull()
     val array = when (parsed) {
         is JsonObject -> parsed["embedding"] as? JsonArray
         is JsonArray -> parsed
@@ -115,11 +121,9 @@ private fun cosineSimilarity(left: List<Double>, right: List<Double>): Double {
     var l2 = 0.0
     var r2 = 0.0
     for (i in left.indices) {
-        val l = left[i]
-        val r = right[i]
-        dot += l * r
-        l2 += l * l
-        r2 += r * r
+        dot += left[i] * right[i]
+        l2 += left[i] * left[i]
+        r2 += right[i] * right[i]
     }
     if (l2 == 0.0 || r2 == 0.0) return 0.0
     return dot / (kotlin.math.sqrt(l2) * kotlin.math.sqrt(r2))
@@ -128,13 +132,7 @@ private fun cosineSimilarity(left: List<Double>, right: List<Double>): Double {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> Unit) {
-    MaterialTheme(
-        colorScheme = lightColorScheme(
-            primary = Color(0xFF1D4ED8), onPrimary = Color.White, primaryContainer = Color(0xFFDBEAFE),
-            onPrimaryContainer = Color(0xFF1E3A8A), background = Color(0xFFF8FAFC), onBackground = Color(0xFF0F172A),
-            surface = Color.White, onSurface = Color(0xFF0F172A)
-        )
-    ) {
+    MaterialTheme(colorScheme = lightColorScheme(primary = Color(0xFF1D4ED8), background = Color(0xFFF8FAFC), surface = Color.White)) {
         val scope = rememberCoroutineScope()
         val deepSeekApi = remember { DeepSeekApi() }
         val openAiApi = remember { OpenAiApi() }
@@ -146,26 +144,15 @@ fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> 
         val embQueries = remember(embDb) { embDb.embeddingChunksQueries }
         val chats = remember { mutableStateListOf<RagChatItem>() }
         val messages = remember { mutableStateListOf<RagMessage>() }
-        val retrieved = remember { mutableStateListOf<RetrievedChunk>() }
-        val sourceRows = remember { mutableStateListOf<String>() }
         val listState = rememberLazyListState()
         var activeChatId by remember { mutableStateOf<Long?>(null) }
         var inputText by remember { mutableStateOf("") }
         var selectedApi by remember { mutableStateOf(RagApi.DeepSeek) }
         var isLoading by remember { mutableStateOf(false) }
         var useRag by remember { mutableStateOf(loadUseRagState()) }
-        var showSources by remember { mutableStateOf(false) }
         var screensMenuExpanded by remember { mutableStateOf(false) }
-
-        fun refreshSourceRows() {
-            val scoreMap = retrieved.associateBy({ "${it.source}|${it.strategy}|${it.chunkId}" }, { it.score })
-            sourceRows.clear()
-            sourceRows.addAll(embQueries.selectAll().executeAsList().map { row ->
-                val key = "${row.source}|${row.strategy}|${row.chunk_id}"
-                val score = scoreMap[key]?.let { " score=${"%.4f".format(it)}" }.orEmpty()
-                "[${row.title}] ${row.section} | ${row.strategy}#${row.chunk_id}$score\n${row.chunk_text}"
-            })
-        }
+        var nextMessageId by remember { mutableStateOf(1L) }
+        var selectedSourcesMessageId by remember { mutableStateOf<Long?>(null) }
 
         fun reloadChats() {
             chats.clear()
@@ -174,9 +161,11 @@ fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> 
 
         fun loadMessages(chatId: Long) {
             messages.clear()
-            messages.addAll(ragQueries.selectMessagesByChat(chat_id = chatId).executeAsList().map {
-                RagMessage(it.message, it.role == "user", it.params_info)
+            messages.addAll(ragQueries.selectMessagesByChat(chat_id = chatId).executeAsList().mapIndexed { i, it ->
+                RagMessage(id = (i + 1).toLong(), text = it.message, isUser = it.role == "user", paramsInfo = it.params_info)
             })
+            nextMessageId = (messages.maxOfOrNull { it.id } ?: 0L) + 1L
+            selectedSourcesMessageId = null
         }
 
         fun sendMessage() {
@@ -186,13 +175,15 @@ fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> 
             val model = selectedApi.defaultModel
             val paramsInfo = "api=${selectedApi.label} | model=$model | rag=${if (useRag) "on" else "off"}"
             ragQueries.insertMessage(chatId, selectedApi.label, model, "user", text, paramsInfo, System.currentTimeMillis())
-            messages += RagMessage(text, true, paramsInfo)
+            messages += RagMessage(nextMessageId++, text, true, paramsInfo)
             inputText = ""
+
             scope.launch {
                 isLoading = true
-                val answer = try {
+                val (answer, sources) = try {
                     val apiKey = ragReadApiKey(selectedApi.envVar)
                     if (apiKey.isBlank()) error("Missing API key: ${selectedApi.envVar}")
+
                     val (requestMessages, topChunks) = if (useRag) {
                         val queryEmb = EmbeddingGeneratorStub.createEmbedding(text).getOrElse { throw it }
                         val chunks = embQueries.selectAll().executeAsList().mapNotNull { row ->
@@ -216,20 +207,21 @@ fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> 
                             }
                         } to emptyList()
                     }
+
                     val response = when (selectedApi) {
                         RagApi.DeepSeek -> deepSeekApi.createChatCompletion(apiKey, DeepSeekChatRequest(model, requestMessages))
                         RagApi.OpenAI -> openAiApi.createChatCompletion(apiKey, DeepSeekChatRequest(model, requestMessages))
                         RagApi.GigaChat -> gigaChatApi.createChatCompletion(apiKey, DeepSeekChatRequest(model, requestMessages))
                         RagApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletion(apiKey, DeepSeekChatRequest(model, requestMessages))
                     }
-                    retrieved.clear(); retrieved.addAll(topChunks)
-                    if (showSources) refreshSourceRows()
-                    response.choices.firstOrNull()?.message?.content?.trim().orEmpty().ifEmpty { "Empty response" }
+                    response.choices.firstOrNull()?.message?.content?.trim().orEmpty().ifEmpty { "Empty response" } to topChunks
                 } catch (e: Exception) {
-                    "Request failed: ${e.message ?: "unknown error"}"
+                    "Request failed: ${e.message ?: "unknown error"}" to emptyList()
                 }
+
                 ragQueries.insertMessage(chatId, selectedApi.label, model, "assistant", answer, paramsInfo, System.currentTimeMillis())
-                messages += RagMessage(answer, false, paramsInfo)
+                val answerId = nextMessageId++
+                messages += RagMessage(id = answerId, text = answer, isUser = false, paramsInfo = paramsInfo, sources = sources)
                 isLoading = false
             }
         }
@@ -252,45 +244,14 @@ fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> 
                 title = { Text("AiAgentRAG") },
                 actions = {
                     Box {
-                        TextButton(onClick = { screensMenuExpanded = true }, enabled = !isLoading) {
-                            Text("Screens")
-                        }
-                        DropdownMenu(
-                            expanded = screensMenuExpanded,
-                            onDismissRequest = { screensMenuExpanded = false }
-                        ) {
-                            DropdownMenuItem(
-                                text = { Text(if (currentScreen == RootScreen.AiAgentRAG) "AiAgentRAG ✓" else "AiAgentRAG") },
-                                onClick = { screensMenuExpanded = false; onSelectScreen(RootScreen.AiAgentRAG) }
-                            )
-                            DropdownMenuItem(
-                                text = { Text(if (currentScreen == RootScreen.EmbedingGeneration) "EmbedingGeneration ✓" else "EmbedingGeneration") },
-                                onClick = { screensMenuExpanded = false; onSelectScreen(RootScreen.EmbedingGeneration) }
-                            )
-                            DropdownMenuItem(
-                                text = { Text(if (currentScreen == RootScreen.AiAgentMain) "AiAgentMain ✓" else "AiAgentMain") },
-                                onClick = { screensMenuExpanded = false; onSelectScreen(RootScreen.AiAgentMain) }
-                            )
-                            DropdownMenuItem(
-                                text = { Text(if (currentScreen == RootScreen.AiAgentMCP) "AiAgentMCP ✓" else "AiAgentMCP") },
-                                onClick = { screensMenuExpanded = false; onSelectScreen(RootScreen.AiAgentMCP) }
-                            )
-                            DropdownMenuItem(
-                                text = { Text(if (currentScreen == RootScreen.AiStateAgent) "AiStateAgent ✓" else "AiStateAgent") },
-                                onClick = { screensMenuExpanded = false; onSelectScreen(RootScreen.AiStateAgent) }
-                            )
-                            DropdownMenuItem(
-                                text = { Text(if (currentScreen == RootScreen.AiWeek3) "AiWeek3 ✓" else "AiWeek3") },
-                                onClick = { screensMenuExpanded = false; onSelectScreen(RootScreen.AiWeek3) }
-                            )
-                            DropdownMenuItem(
-                                text = { Text(if (currentScreen == RootScreen.AiAgent) "AiAgent ✓" else "AiAgent") },
-                                onClick = { screensMenuExpanded = false; onSelectScreen(RootScreen.AiAgent) }
-                            )
-                            DropdownMenuItem(
-                                text = { Text(if (currentScreen == RootScreen.App) "App ✓" else "App") },
-                                onClick = { screensMenuExpanded = false; onSelectScreen(RootScreen.App) }
-                            )
+                        TextButton(onClick = { screensMenuExpanded = true }, enabled = !isLoading) { Text("Screens") }
+                        DropdownMenu(expanded = screensMenuExpanded, onDismissRequest = { screensMenuExpanded = false }) {
+                            RootScreen.entries.forEach { screen ->
+                                DropdownMenuItem(
+                                    text = { Text(if (currentScreen == screen) "${screen.name} ✓" else screen.name) },
+                                    onClick = { screensMenuExpanded = false; onSelectScreen(screen) }
+                                )
+                            }
                         }
                     }
                 },
@@ -311,22 +272,27 @@ fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> 
                 }
                 Box(Modifier.width(1.dp).fillMaxSize().background(Color(0xFFDBEAFE)))
                 Column(Modifier.weight(1f).fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text("API: ${selectedApi.label}", modifier = Modifier.weight(1f))
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                        Text("API: ${selectedApi.label}")
                         TextButton(onClick = { selectedApi = RagApi.entries[(RagApi.entries.indexOf(selectedApi) + 1) % RagApi.entries.size] }, enabled = !isLoading) { Text("Сменить API") }
-                        Button(onClick = { showSources = !showSources; if (showSources) refreshSourceRows() }, enabled = !isLoading) { Text(if (showSources) "Скрыть источники" else "Посмотреть источники") }
                     }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                         Text("Использовать RAG")
                         Switch(checked = useRag, onCheckedChange = { useRag = it; saveUseRagState(it) }, enabled = !isLoading)
                     }
                     LazyColumn(modifier = Modifier.weight(1f), state = listState, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        items(messages) { message ->
+                        items(messages, key = { it.id }) { message ->
                             Row(Modifier.fillMaxWidth(), horizontalArrangement = if (message.isUser) Arrangement.Start else Arrangement.End) {
                                 Box(Modifier.fillMaxWidth(0.8f).background(if (message.isUser) Color(0xFF1D4ED8) else Color(0xFFE2E8F0), RoundedCornerShape(16.dp)).padding(12.dp)) {
                                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                         SelectionContainer { Text(message.text, color = if (message.isUser) Color.White else Color(0xFF0F172A)) }
                                         Text(message.paramsInfo, style = MaterialTheme.typography.labelSmall, color = if (message.isUser) Color.White.copy(alpha = 0.7f) else Color(0xFF0F172A).copy(alpha = 0.7f))
+                                        if (!message.isUser && message.sources.isNotEmpty()) {
+                                            val isSelected = selectedSourcesMessageId == message.id
+                                            TextButton(onClick = { selectedSourcesMessageId = if (isSelected) null else message.id }) {
+                                                Text(if (isSelected) "Скрыть источники" else "Посмотреть источники")
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -338,13 +304,57 @@ fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> 
                         Button(onClick = ::sendMessage, enabled = inputText.isNotBlank() && !isLoading && activeChatId != null) { Text("Send") }
                     }
                 }
-                if (showSources) {
+
+                val selectedSources = messages.firstOrNull { it.id == selectedSourcesMessageId }?.sources.orEmpty()
+                if (selectedSourcesMessageId != null) {
                     Box(Modifier.width(1.dp).fillMaxSize().background(Color(0xFFDBEAFE)))
-                    Column(Modifier.width(420.dp).fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("Источники (записи БД)")
-                        Text("Всего: ${sourceRows.size} | В ответе: ${retrieved.size}", style = MaterialTheme.typography.labelSmall)
+                    Column(
+                        modifier = Modifier.width(420.dp).fillMaxSize().padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("Источники ответа")
+                            TextButton(onClick = { selectedSourcesMessageId = null }) { Text("Закрыть") }
+                        }
+                        Text("Использовано источников: ${selectedSources.size}", style = MaterialTheme.typography.labelSmall)
                         LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            items(sourceRows) { row -> SelectionContainer { Text(row) } }
+                            items(selectedSources) { src ->
+                                Card(modifier = Modifier.fillMaxWidth()) {
+                                    Column(
+                                        modifier = Modifier.fillMaxWidth().padding(10.dp),
+                                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Text(src.title, style = MaterialTheme.typography.titleSmall, color = Color(0xFF0F172A))
+                                        Text(
+                                            "Раздел: ${src.section}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = Color(0xFF334155)
+                                        )
+                                        Text(
+                                            "Путь: ${src.source}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = Color(0xFF334155)
+                                        )
+                                        Text(
+                                            "Стратегия: ${src.strategy} | Чанк: ${src.chunkId} | score=${"%.4f".format(src.score)}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = Color(0xFF334155)
+                                        )
+                                        Text("Чанк", style = MaterialTheme.typography.labelMedium, color = Color(0xFF0F172A))
+                                        SelectionContainer {
+                                            Text(
+                                                text = src.chunkText,
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = Color(0xFF0F172A)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
