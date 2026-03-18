@@ -124,8 +124,8 @@ private fun splitLongTextBySentences(text: String, hardLimit: Int): List<String>
 
 internal fun chunkStructured(
     text: String,
-    targetSize: Int = 10000,
-    softLimit: Int = 8500,
+    targetSize: Int = 500,
+    softLimit: Int = 425,
     overlapChars: Int = 220
 ): List<String> {
     if (text.isBlank()) return emptyList()

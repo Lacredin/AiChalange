@@ -21,7 +21,7 @@ private data class SemanticChunk(
 
 internal fun chunkSemantic(
     text: String,
-    targetSize: Int = 10000,
+    targetSize: Int = 500,
     similarityThreshold: Double = 0.2
 ): List<String> {
     if (text.isBlank()) return emptyList()

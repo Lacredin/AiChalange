@@ -414,11 +414,11 @@ private fun chunkSemantic(text: String, targetSize: Int = 10000, similarityThres
 }
 
 private fun splitByStrategy(text: String, strategy: ChunkStrategy): List<String> = when (strategy) {
-    ChunkStrategy.Fixed500 -> com.example.aiadventchalengetestllmapi.chunking.chunkFixed(text, size = 10000)
-    ChunkStrategy.Structured -> com.example.aiadventchalengetestllmapi.chunking.chunkStructured(text, targetSize = 10000)
+    ChunkStrategy.Fixed500 -> com.example.aiadventchalengetestllmapi.chunking.chunkFixed(text, size = 500)
+    ChunkStrategy.Structured -> com.example.aiadventchalengetestllmapi.chunking.chunkStructured(text, targetSize = 500)
     ChunkStrategy.Semantic -> com.example.aiadventchalengetestllmapi.chunking.chunkSemantic(
         text,
-        targetSize = 10000,
+        targetSize = 500,
         similarityThreshold = 0.2
     )
 }
@@ -461,6 +461,71 @@ private fun extractSections(text: String): List<TextSection> {
         return listOf(TextSection(title = "Без секции", text = text.trim()))
     }
     return sections
+}
+
+private data class SectionSpan(
+    val title: String,
+    val start: Int,
+    val end: Int
+)
+
+private fun buildChunkingTextAndSpans(sections: List<TextSection>): Pair<String, List<SectionSpan>> {
+    val builder = StringBuilder()
+    val spans = mutableListOf<SectionSpan>()
+    sections.forEach { section ->
+        val sectionText = section.text.trim()
+        if (sectionText.isEmpty()) return@forEach
+        if (builder.isNotEmpty()) {
+            builder.append("\n\n")
+        }
+        val start = builder.length
+        builder.append(sectionText)
+        val end = builder.length
+        spans += SectionSpan(
+            title = section.title.ifBlank { "Без секции" },
+            start = start,
+            end = end
+        )
+    }
+    return builder.toString() to spans
+}
+
+private fun overlapLength(startA: Int, endA: Int, startB: Int, endB: Int): Int {
+    val left = maxOf(startA, startB)
+    val right = minOf(endA, endB)
+    return (right - left).coerceAtLeast(0)
+}
+
+private fun resolveChunkSectionTitle(
+    chunkText: String,
+    chunkingText: String,
+    spans: List<SectionSpan>,
+    searchFrom: Int
+): Pair<String, Int> {
+    if (spans.isEmpty()) return "Без секции" to searchFrom
+    val normalizedChunk = chunkText.trim()
+    if (normalizedChunk.isEmpty()) return spans.first().title to searchFrom
+
+    var chunkStart = chunkingText.indexOf(normalizedChunk, startIndex = searchFrom)
+    if (chunkStart < 0) {
+        chunkStart = chunkingText.indexOf(normalizedChunk)
+    }
+    if (chunkStart < 0) {
+        return spans.first().title to searchFrom
+    }
+
+    val chunkEnd = chunkStart + normalizedChunk.length
+    val bestSpan = spans.maxByOrNull { span ->
+        overlapLength(chunkStart, chunkEnd, span.start, span.end)
+    }
+    val bestOverlap = bestSpan?.let { overlapLength(chunkStart, chunkEnd, it.start, it.end) } ?: 0
+    val sectionTitle = if (bestOverlap > 0) {
+        bestSpan?.title ?: "Без секции"
+    } else {
+        spans.firstOrNull { chunkStart in it.start until it.end }?.title ?: spans.last().title
+    }
+
+    return sectionTitle to chunkEnd.coerceAtMost(chunkingText.length)
 }
 
 private suspend fun readTextFromFile(path: String): String = withContext(Dispatchers.IO) {
@@ -555,14 +620,16 @@ fun EmbedingGenerationScreen(
         }
 
         val sections = extractSections(text)
-        val chunksByStrategyAndSection = strategies.associateWith { strategy ->
-            sections.map { section ->
-                section to splitByStrategy(section.text, strategy)
-            }
+        val (chunkingText, sectionSpans) = buildChunkingTextAndSpans(sections)
+        if (chunkingText.isBlank()) {
+            updateFile(fileItem.id) { it.copy(state = FileProcessingState.Added, progress = 0f) }
+            logText += "\n[${fileName}] Пустой текст после разбиения на секции."
+            return
         }
-        val totalChunks = chunksByStrategyAndSection.values
-            .sumOf { sectionPairs -> sectionPairs.sumOf { it.second.size } }
-            .coerceAtLeast(1)
+        val chunksByStrategy = strategies.associateWith { strategy ->
+            splitByStrategy(chunkingText, strategy)
+        }
+        val totalChunks = chunksByStrategy.values.sumOf { it.size }.coerceAtLeast(1)
         var processedChunks = 0
         
         if (false) { /*
@@ -571,10 +638,18 @@ fun EmbedingGenerationScreen(
 
         queries.deleteBySource(source = sourcePath)
 
-        chunksByStrategyAndSection.forEach { (strategy, sectionPairs) ->
+        chunksByStrategy.forEach { (strategy, chunks) ->
             var strategyChunkId = 1L
-            sectionPairs.forEach { (section, chunks) ->
-                chunks.forEach { chunkText ->
+            var searchFrom = 0
+            chunks.forEach { chunkText ->
+                val (sectionTitle, nextSearchFrom) = resolveChunkSectionTitle(
+                    chunkText = chunkText,
+                    chunkingText = chunkingText,
+                    spans = sectionSpans,
+                    searchFrom = searchFrom
+                )
+                searchFrom = nextSearchFrom
+                val section = TextSection(title = sectionTitle, text = "")
                     val result = EmbeddingGeneratorStub.createEmbedding(chunkText)
                     result.onSuccess { embeddingValues ->
                         val embeddingJson = buildString {
@@ -587,7 +662,7 @@ fun EmbedingGenerationScreen(
                         queries.insertChunk(
                             source = sourcePath,
                             title = fileName,
-                            section = section.title,
+                            section = sectionTitle,
                             chunk_id = strategyChunkId,
                             strategy = strategy.dbValue,
                             chunk_text = chunkText,
@@ -671,7 +746,6 @@ fun EmbedingGenerationScreen(
                     val progress = (processedChunks.toFloat() / totalChunks.toFloat()).coerceIn(0f, 1f)
                     updateFile(fileItem.id) { it.copy(progress = progress) }
                 }
-            }
         }
 
         updateFile(fileItem.id) { it.copy(state = FileProcessingState.Completed, progress = 1f) }
