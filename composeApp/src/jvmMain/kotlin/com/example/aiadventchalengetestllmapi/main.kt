@@ -2,6 +2,8 @@ package com.example.aiadventchalengetestllmapi
 
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
+import androidx.compose.ui.window.rememberWindowState
+import androidx.compose.ui.unit.dp
 import java.io.FileDescriptor
 import java.io.FileOutputStream
 import java.io.PrintStream
@@ -19,10 +21,12 @@ private fun configureUtf8Console() {
 
 fun main() = application {
     configureUtf8Console()
+    val windowState = rememberWindowState(width = 1200.dp, height = 900.dp)
 
     Window(
         onCloseRequest = ::exitApplication,
         title = "aiadventchalengetestllmapi",
+        state = windowState,
     ) {
         RootApp()
     }
