@@ -266,7 +266,11 @@ fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> 
             reloadChats()
             if (activeChatId == chatId) {
                 if (chats.isEmpty()) {
-                    createChat(selectNew = true)
+                    activeChatId = null
+                    messages.clear()
+                    comparisonMessages.clear()
+                    selectedSourcesMessageId = null
+                    comparisonSelectedSourcesMessageId = null
                 } else {
                     val fallbackChatId = chats.first().id
                     activeChatId = fallbackChatId
@@ -283,7 +287,8 @@ fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> 
             messages.clear()
             comparisonMessages.clear()
             activeChatId = null
-            createChat(selectNew = true)
+            selectedSourcesMessageId = null
+            comparisonSelectedSourcesMessageId = null
         }
 
         suspend fun buildRetrievalOutput(question: String, config: RetrievalConfig): RetrievalOutput {
@@ -433,7 +438,6 @@ fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> 
 
         LaunchedEffect(Unit) {
             reloadChats()
-            if (chats.isEmpty()) createChat(selectNew = true)
             if (activeChatId == null && chats.isNotEmpty()) {
                 activeChatId = chats.first().id
                 loadMessages(chats.first().id)
