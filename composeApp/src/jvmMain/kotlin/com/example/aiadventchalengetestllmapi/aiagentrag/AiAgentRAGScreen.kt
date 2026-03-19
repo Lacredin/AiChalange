@@ -43,6 +43,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isAltPressed
+import androidx.compose.ui.input.key.isCtrlPressed
+import androidx.compose.ui.input.key.isShiftPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.unit.dp
 import com.example.aiadventchalengetestllmapi.BuildSecrets
 import com.example.aiadventchalengetestllmapi.RootScreen
@@ -726,7 +734,21 @@ fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> 
                         OutlinedTextField(
                             value = inputText,
                             onValueChange = { inputText = it },
-                            modifier = Modifier.weight(1f),
+                            modifier = Modifier
+                                .weight(1f)
+                                .onPreviewKeyEvent { event ->
+                                    if (event.type == KeyEventType.KeyDown && event.key == Key.Enter) {
+                                        val withModifier = event.isCtrlPressed || event.isShiftPressed || event.isAltPressed
+                                        if (withModifier) {
+                                            inputText += "\n"
+                                        } else if (inputText.isNotBlank() && !isLoading && activeChatId != null) {
+                                            sendMessage()
+                                        }
+                                        true
+                                    } else {
+                                        false
+                                    }
+                                },
                             label = { Text(if (dualChatEnabled) "Сообщение для двух чатов" else "Сообщение") },
                             maxLines = 4,
                             enabled = !isLoading
