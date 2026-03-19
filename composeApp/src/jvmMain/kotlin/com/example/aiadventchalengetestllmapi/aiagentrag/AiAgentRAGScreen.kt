@@ -121,7 +121,6 @@ private const val USE_RAG_KEY = "use_rag_enabled"
 private const val DEFAULT_TOP_K_BEFORE = 12
 private const val DEFAULT_TOP_K_AFTER = 5
 private const val DEFAULT_MIN_SCORE = 0.30
-private const val RAG_SYSTEM = "Use only provided context. If insufficient, say so."
 private val ragJson = Json { ignoreUnknownKeys = true }
 
 private fun ragReadApiKey(envVar: String): String {
@@ -315,12 +314,16 @@ fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> 
             }
             val retrievalInfo =
                 "rewrite=${if (config.useRewrite) "on" else "off"} | filter=${if (config.useFilter) "on" else "off"} | порог=${"%.2f".format(config.threshold)} | кандидатов=${allRanked.size} | topK-до=${topBefore.size} | после-filter=${afterFilter.size} | topK-после=${topAfter.size}"
-            val prompt = "Question:\n$question\n\nRetrieval query:\n$retrievalQuestion\n\nContext:\n$context\n\nAnswer only from context."
+            val ragPrompt = AiAgentRagPrompts.buildUserPrompt(
+                question = question,
+                retrievalQuery = retrievalQuestion,
+                context = if (topAfter.isEmpty()) AiAgentRagPrompts.EMPTY_CONTEXT else context
+            )
 
             return RetrievalOutput(
                 requestMessages = listOf(
-                    DeepSeekMessage("system", RAG_SYSTEM),
-                    DeepSeekMessage("user", prompt)
+                    DeepSeekMessage("system", AiAgentRagPrompts.SYSTEM),
+                    DeepSeekMessage("user", ragPrompt)
                 ),
                 selectedChunks = topAfter,
                 retrievalInfo = retrievalInfo
@@ -333,6 +336,14 @@ fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> 
                 if (apiKey.isBlank()) error("Missing API key: ${config.api.envVar}")
 
                 val retrieval = buildRetrievalOutput(question, config)
+                if (config.useRag && retrieval.selectedChunks.isEmpty()) {
+                    return AssistantResult(
+                        answer = AiAgentRagPrompts.NO_ANSWER,
+                        paramsInfo = assistantParams(config),
+                        sources = emptyList(),
+                        retrievalInfo = retrieval.retrievalInfo
+                    )
+                }
                 val requestMessages = if (config.useRag) {
                     retrieval.requestMessages
                 } else {
