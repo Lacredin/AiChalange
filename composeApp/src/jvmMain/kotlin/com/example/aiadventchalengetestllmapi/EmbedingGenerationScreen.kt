@@ -579,6 +579,8 @@ fun EmbedingGenerationScreen(
     var openedFileStrategyMenuExpanded by remember { mutableStateOf(false) }
     var dbReloadCounter by remember { mutableIntStateOf(0) }
     var isGlobalProcessing by remember { mutableStateOf(false) }
+    var embeddingModelMenuExpanded by remember { mutableStateOf(false) }
+    var selectedEmbeddingModel by remember { mutableStateOf(EmbeddingGeneratorStub.loadSelectedModel()) }
     var logText by remember { mutableStateOf("Логи обработки появятся здесь.") }
     val hasActiveStrategies = selectedStrategies.values.any { it }
 
@@ -602,7 +604,11 @@ fun EmbedingGenerationScreen(
         else openedFileRecords.filter { it.strategy == openedFileStrategyFilter }
     }
 
-    suspend fun processSingleFile(fileItem: ProcessingFileItem, strategies: List<ChunkStrategy>) {
+    suspend fun processSingleFile(
+        fileItem: ProcessingFileItem,
+        strategies: List<ChunkStrategy>,
+        embeddingModel: String
+    ) {
         updateFile(fileItem.id) { it.copy(state = FileProcessingState.Processing, progress = 0f) }
         val sourcePath = fileItem.source
         val fileName = fileItem.fileName
@@ -650,7 +656,10 @@ fun EmbedingGenerationScreen(
                 )
                 searchFrom = nextSearchFrom
                 val section = TextSection(title = sectionTitle, text = "")
-                    val result = EmbeddingGeneratorStub.createEmbedding(chunkText)
+                    val result = EmbeddingGeneratorStub.createEmbedding(
+                        input = chunkText,
+                        model = embeddingModel
+                    )
                     result.onSuccess { embeddingValues ->
                         val embeddingJson = buildString {
                             append("{\"embedding\":[")
@@ -907,6 +916,29 @@ fun EmbedingGenerationScreen(
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Box {
+                    TextButton(
+                        onClick = { embeddingModelMenuExpanded = true },
+                        enabled = !isGlobalProcessing
+                    ) {
+                        Text("Embedding model: $selectedEmbeddingModel")
+                    }
+                    DropdownMenu(
+                        expanded = embeddingModelMenuExpanded,
+                        onDismissRequest = { embeddingModelMenuExpanded = false }
+                    ) {
+                        EmbeddingGeneratorStub.availableModels.forEach { model ->
+                            DropdownMenuItem(
+                                text = { Text(model) },
+                                onClick = {
+                                    selectedEmbeddingModel = model
+                                    EmbeddingGeneratorStub.saveSelectedModel(model)
+                                    embeddingModelMenuExpanded = false
+                                }
+                            )
+                        }
+                    }
+                }
                 Button(
                     onClick = {
                         val selected = openFilesDialog()
@@ -984,7 +1016,11 @@ fun EmbedingGenerationScreen(
                             supervisorScope {
                                 files.map { file ->
                                     async {
-                                        processSingleFile(file, activeStrategies)
+                                        processSingleFile(
+                                            fileItem = file,
+                                            strategies = activeStrategies,
+                                            embeddingModel = selectedEmbeddingModel
+                                        )
                                     }
                                 }.awaitAll()
                             }
