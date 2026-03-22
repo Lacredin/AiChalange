@@ -71,6 +71,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 import java.util.prefs.Preferences
 
 private enum class RagApi(val label: String, val envVar: String, val defaultModel: String) {
@@ -124,11 +125,20 @@ private data class AssistantResult(
     val retrievalInfo: String?
 )
 
+private data class RagTaskState(
+    val goal: String = "",
+    val clarifiedPoints: List<String> = emptyList(),
+    val constraints: List<String> = emptyList(),
+    val terms: List<String> = emptyList()
+)
+
 private const val PREF_NODE = "com.example.aiadventchalengetestllmapi.aiagentrag"
 private const val USE_RAG_KEY = "use_rag_enabled"
 private const val DEFAULT_TOP_K_BEFORE = 12
 private const val DEFAULT_TOP_K_AFTER = 5
 private const val DEFAULT_MIN_SCORE = 0.30
+private const val RAG_HISTORY_LIMIT = 10
+private const val TASK_STATE_ITEMS_LIMIT = 14
 private val ragJson = Json { ignoreUnknownKeys = true }
 
 private fun ragReadApiKey(envVar: String): String {
@@ -139,6 +149,220 @@ private fun ragReadApiKey(envVar: String): String {
 
 private fun loadUseRagState(): Boolean = Preferences.userRoot().node(PREF_NODE).getBoolean(USE_RAG_KEY, true)
 private fun saveUseRagState(enabled: Boolean) = Preferences.userRoot().node(PREF_NODE).putBoolean(USE_RAG_KEY, enabled)
+
+private fun taskStateSettingKey(chatId: Long): String = "rag_task_state_chat_$chatId"
+
+private fun normalizeTaskItem(raw: String): String =
+    raw.replace(Regex("\\s+"), " ").trim().trim('\"', '\'', '.', ',', ';', ':')
+
+private fun mergeDistinct(base: List<String>, additions: List<String>, limit: Int = TASK_STATE_ITEMS_LIMIT): List<String> {
+    val result = mutableListOf<String>()
+    val seen = mutableSetOf<String>()
+    (base + additions)
+        .map(::normalizeTaskItem)
+        .filter { it.length >= 3 }
+        .forEach { item ->
+            val key = item.lowercase()
+            if (key !in seen) {
+                seen += key
+                result += item
+            }
+        }
+    return result.take(limit)
+}
+
+private fun extractQuotedTerms(message: String): List<String> {
+    val quoteRegex = Regex("[\"“”«»'`]{1}([^\"“”«»'`]{2,80})[\"“”«»'`]{1}")
+    val quoted = quoteRegex.findAll(message).mapNotNull { it.groupValues.getOrNull(1) }.toList()
+    val termMarkerRegex = Regex("(?i)\\bтермин(?:ы)?\\b\\s*[:\\-]?\\s*([^\\n.]{2,120})")
+    val marked = termMarkerRegex.findAll(message).mapNotNull { it.groupValues.getOrNull(1) }.toList()
+    val tokenized = message.split(Regex("[\\s,;()\\[\\]{}]+"))
+        .filter { token -> token.length in 3..40 && (token.contains("_") || token.contains("-")) }
+    return mergeDistinct(emptyList(), quoted + marked + tokenized, limit = TASK_STATE_ITEMS_LIMIT)
+}
+
+private fun extractConstraintCandidates(message: String): List<String> {
+    val cues = listOf(
+        "не ", "нельзя", "без ", "только", "обязательно", "огранич", "формат",
+        "срок", "максимум", "минимум", "должен", "нужно", "не трогай", "не удаляй"
+    )
+    val sentences = message.split(Regex("[\\n.!?]+")).map(::normalizeTaskItem).filter { it.isNotBlank() }
+    return sentences.filter { sentence ->
+        val low = sentence.lowercase()
+        cues.any { low.contains(it) }
+    }.take(TASK_STATE_ITEMS_LIMIT)
+}
+
+private fun extractClarifiedPoints(message: String): List<String> {
+    val parts = message.split(Regex("[\\n.!?]+"))
+        .map(::normalizeTaskItem)
+        .filter { it.length >= 8 }
+    return parts.take(4)
+}
+
+private fun extractGoalCandidate(currentGoal: String, message: String): String {
+    val explicitGoal = Regex("(?i)\\b(цель|задача|хочу|нужно|надо)\\b\\s*[:\\-]?\\s*(.+)")
+        .find(message)
+        ?.groupValues
+        ?.getOrNull(2)
+        ?.let(::normalizeTaskItem)
+        ?.takeIf { it.length >= 8 }
+    if (!explicitGoal.isNullOrBlank()) return explicitGoal.take(240)
+    if (currentGoal.isNotBlank()) return currentGoal
+    return message.split(Regex("[\\n.!?]+"))
+        .map(::normalizeTaskItem)
+        .firstOrNull { it.length >= 8 }
+        ?.take(240)
+        .orEmpty()
+}
+
+private fun updateTaskStateFromUserMessage(current: RagTaskState, userMessage: String): RagTaskState {
+    val goal = extractGoalCandidate(current.goal, userMessage)
+    val clarified = mergeDistinct(current.clarifiedPoints, extractClarifiedPoints(userMessage))
+    val constraints = mergeDistinct(current.constraints, extractConstraintCandidates(userMessage))
+    val terms = mergeDistinct(current.terms, extractQuotedTerms(userMessage))
+    return RagTaskState(goal = goal, clarifiedPoints = clarified, constraints = constraints, terms = terms)
+}
+
+private fun taskStateToJson(state: RagTaskState): String =
+    JsonObject(
+        mapOf(
+            "goal" to JsonPrimitive(state.goal),
+            "clarified_points" to JsonArray(state.clarifiedPoints.map { JsonPrimitive(it) }),
+            "constraints" to JsonArray(state.constraints.map { JsonPrimitive(it) }),
+            "terms" to JsonArray(state.terms.map { JsonPrimitive(it) })
+        )
+    ).toString()
+
+private fun jsonArrayStrings(obj: JsonObject, key: String): List<String> =
+    (obj[key] as? JsonArray)
+        ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
+        ?.map(::normalizeTaskItem)
+        ?.filter { it.isNotBlank() }
+        .orEmpty()
+
+private fun taskStateFromJson(raw: String): RagTaskState {
+    val root = runCatching { ragJson.parseToJsonElement(raw) as? JsonObject }.getOrNull() ?: return RagTaskState()
+    val goal = (root["goal"] as? JsonPrimitive)?.contentOrNull?.let(::normalizeTaskItem).orEmpty()
+    return RagTaskState(
+        goal = goal,
+        clarifiedPoints = jsonArrayStrings(root, "clarified_points"),
+        constraints = jsonArrayStrings(root, "constraints"),
+        terms = jsonArrayStrings(root, "terms")
+    )
+}
+
+private fun buildDialogHistory(conversation: List<RagMessage>, limit: Int = RAG_HISTORY_LIMIT): String {
+    if (conversation.isEmpty()) return "нет сообщений"
+    return conversation.takeLast(limit).joinToString("\n") { message ->
+        val role = if (message.isUser) "Пользователь" else "Ассистент"
+        val text = message.text.replace(Regex("\\s+"), " ").trim().take(360)
+        "$role: $text"
+    }
+}
+
+private fun buildTaskStateBlock(taskState: RagTaskState): String = buildString {
+    appendLine("goal: ${if (taskState.goal.isBlank()) "не зафиксирована" else taskState.goal}")
+    appendLine("clarified_points:")
+    if (taskState.clarifiedPoints.isEmpty()) appendLine("- нет")
+    taskState.clarifiedPoints.forEach { appendLine("- $it") }
+    appendLine("constraints:")
+    if (taskState.constraints.isEmpty()) appendLine("- нет")
+    taskState.constraints.forEach { appendLine("- $it") }
+    appendLine("terms:")
+    if (taskState.terms.isEmpty()) appendLine("- нет")
+    taskState.terms.forEach { appendLine("- $it") }
+}.trimEnd()
+
+private fun sourceLabel(index: Int): String = "[S${index + 1}]"
+
+private fun normalizeQuote(raw: String): String {
+    val oneLine = raw.replace(Regex("\\s+"), " ").trim()
+    return if (oneLine.length <= 220) oneLine else "${oneLine.take(217)}..."
+}
+
+private fun buildSourcesBlock(sources: List<RetrievedChunk>): String {
+    if (sources.isEmpty()) return "- нет релевантных источников"
+    return sources.mapIndexed { index, src ->
+        "${sourceLabel(index)} ${src.title} | ${src.section} | ${src.source}"
+    }.joinToString("\n")
+}
+
+private fun buildQuotesBlock(sources: List<RetrievedChunk>): String {
+    if (sources.isEmpty()) return "- нет релевантных цитат"
+    return sources.mapIndexed { index, src ->
+        "- ${sourceLabel(index)} \"${normalizeQuote(src.chunkText)}\""
+    }.joinToString("\n")
+}
+
+private fun ensureStrictAnswerFormat(rawAnswer: String, sources: List<RetrievedChunk>): String {
+    val trimmed = rawAnswer.trim().ifBlank { "Недостаточно данных для ответа." }
+    val answerPart = if (trimmed.startsWith("Ответ:")) trimmed else "Ответ: $trimmed"
+    return buildString {
+        append(answerPart)
+        append("\n\nИсточники:\n")
+        append(buildSourcesBlock(sources))
+        append("\n\nЦитаты:\n")
+        append(buildQuotesBlock(sources))
+    }.trim()
+}
+
+private fun tokenizeForOverlapV2(text: String): Set<String> =
+    text.lowercase()
+        .split(Regex("[^\\p{L}\\p{N}_-]+"))
+        .filter { it.length >= 4 }
+        .toSet()
+
+private fun extractUsedSourceIndicesV2(rawAnswer: String, sources: List<RetrievedChunk>): List<Int> {
+    if (sources.isEmpty()) return emptyList()
+    val explicitByTag = Regex("\\[S(\\d+)]")
+        .findAll(rawAnswer)
+        .mapNotNull { it.groupValues.getOrNull(1)?.toIntOrNull()?.minus(1) }
+        .filter { it in sources.indices }
+        .distinct()
+        .toList()
+    if (explicitByTag.isNotEmpty()) return explicitByTag
+
+    val answerOnly = rawAnswer
+        .substringBefore("\nИсточники:", missingDelimiterValue = rawAnswer)
+        .substringBefore("\nЦитаты:", missingDelimiterValue = rawAnswer)
+    val answerTokens = tokenizeForOverlapV2(answerOnly)
+    if (answerTokens.isEmpty()) return emptyList()
+
+    return sources.mapIndexed { index, source ->
+        val sourceTokens = tokenizeForOverlapV2("${source.title} ${source.section} ${source.chunkText}")
+        index to answerTokens.intersect(sourceTokens).size
+    }.filter { (_, overlap) ->
+        overlap >= 2
+    }.sortedByDescending { (_, overlap) ->
+        overlap
+    }.take(4).map { (index, _) ->
+        index
+    }
+}
+
+private fun buildSourcesWithInlineQuotesV2(sources: List<RetrievedChunk>, usedIndices: List<Int>): String {
+    if (sources.isEmpty() || usedIndices.isEmpty()) return "- нет релевантных источников"
+    return usedIndices.map { index ->
+        val src = sources[index]
+        "- ${sourceLabel(index)} ${src.title} | ${src.section} | ${src.source}\n  Цитата: \"${normalizeQuote(src.chunkText)}\""
+    }.joinToString("\n")
+}
+
+private fun ensureStrictAnswerFormatV2(rawAnswer: String, sources: List<RetrievedChunk>): String {
+    val trimmed = rawAnswer.trim().ifBlank { "Недостаточно данных для ответа." }
+    val answerCore = trimmed
+        .substringBefore("\nИсточники:", missingDelimiterValue = trimmed)
+        .substringBefore("\nЦитаты:", missingDelimiterValue = trimmed)
+        .trim()
+    val answerPart = if (answerCore.startsWith("Ответ:")) answerCore else "Ответ: $answerCore"
+    val usedIndices = extractUsedSourceIndicesV2(rawAnswer, sources)
+    return buildString {
+        append(answerPart)
+        append("\n\nИсточники:\n")
+        append(buildSourcesWithInlineQuotesV2(sources, usedIndices))
+    }.trim()
+}
 
 private fun parseEmbeddingVector(raw: String): List<Double> {
     val parsed = runCatching { ragJson.parseToJsonElement(raw.trim()) }.getOrNull()
@@ -233,6 +457,23 @@ fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> 
         var nextMessageId by remember { mutableStateOf(1L) }
         var selectedSourcesMessageId by remember { mutableStateOf<Long?>(null) }
         var comparisonSelectedSourcesMessageId by remember { mutableStateOf<Long?>(null) }
+        var taskState by remember { mutableStateOf(RagTaskState()) }
+
+        fun loadTaskState(chatId: Long): RagTaskState {
+            val raw = ragQueries.selectAppSettingByKey(setting_key = taskStateSettingKey(chatId))
+                .executeAsOneOrNull()
+                ?.setting_value
+                .orEmpty()
+            if (raw.isBlank()) return RagTaskState()
+            return taskStateFromJson(raw)
+        }
+
+        fun saveTaskState(chatId: Long, value: RagTaskState) {
+            ragQueries.upsertAppSetting(
+                setting_key = taskStateSettingKey(chatId),
+                setting_value = taskStateToJson(value)
+            )
+        }
 
         fun reloadChats() {
             chats.clear()
@@ -255,6 +496,7 @@ fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> 
             nextMessageId = (messages.maxOfOrNull { it.id } ?: 0L) + 1L
             selectedSourcesMessageId = null
             comparisonSelectedSourcesMessageId = null
+            taskState = loadTaskState(chatId)
         }
 
         fun createChat(selectNew: Boolean) {
@@ -269,6 +511,7 @@ fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> 
         }
 
         fun deleteChat(chatId: Long) {
+            ragQueries.deleteAppSettingByKey(setting_key = taskStateSettingKey(chatId))
             ragQueries.deleteChatById(chatId)
             reloadChats()
             if (activeChatId == chatId) {
@@ -278,6 +521,7 @@ fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> 
                     comparisonMessages.clear()
                     selectedSourcesMessageId = null
                     comparisonSelectedSourcesMessageId = null
+                    taskState = RagTaskState()
                 } else {
                     val fallbackChatId = chats.first().id
                     activeChatId = fallbackChatId
@@ -287,6 +531,9 @@ fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> 
         }
 
         fun deleteAllChats() {
+            ragQueries.selectChats().executeAsList().forEach { chat ->
+                ragQueries.deleteAppSettingByKey(setting_key = taskStateSettingKey(chat.id))
+            }
             ragQueries.deleteAllBranchMessages()
             ragQueries.deleteAllMessages()
             ragQueries.deleteAllChats()
@@ -296,9 +543,15 @@ fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> 
             activeChatId = null
             selectedSourcesMessageId = null
             comparisonSelectedSourcesMessageId = null
+            taskState = RagTaskState()
         }
 
-        suspend fun buildRetrievalOutput(question: String, config: RetrievalConfig): RetrievalOutput {
+        suspend fun buildRetrievalOutput(
+            question: String,
+            conversation: List<RagMessage>,
+            taskState: RagTaskState,
+            config: RetrievalConfig
+        ): RetrievalOutput {
             if (!config.useRag) return RetrievalOutput(emptyList(), emptyList(), null)
             val retrievalQuestion = if (config.useRewrite) heuristicRewriteQuery(question) else question
             val queryEmb = EmbeddingGeneratorStub.createEmbedding(retrievalQuestion).getOrElse { throw it }
@@ -316,16 +569,31 @@ fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> 
             val context = if (topAfter.isEmpty()) {
                 "Контекст не найден после фильтрации."
             } else {
-                topAfter.joinToString("\n\n") {
-                    "Document: ${it.title}\nSection: ${it.section}\nPath: ${it.source}\nChunk: ${it.chunkText}"
-                }
+                topAfter.mapIndexed { index, chunk ->
+                    "${sourceLabel(index)} title=${chunk.title}\n" +
+                        "section=${chunk.section}\n" +
+                        "path=${chunk.source}\n" +
+                        "chunk=${chunk.chunkText}"
+                }.joinToString("\n\n")
             }
-            val retrievalInfo =
-                "rewrite=${if (config.useRewrite) "on" else "off"} | filter=${if (config.useFilter) "on" else "off"} | порог=${"%.2f".format(config.threshold)} | кандидатов=${allRanked.size} | topK-до=${topBefore.size} | после-filter=${afterFilter.size} | topK-после=${topAfter.size}"
+            val retrievalInfo = buildString {
+                append("rewrite=${if (config.useRewrite) "on" else "off"}")
+                append(" | filter=${if (config.useFilter) "on" else "off"}")
+                append(" | threshold=${"%.2f".format(config.threshold)}")
+                append(" | candidates=${allRanked.size}")
+                append(" | topK-before=${topBefore.size}")
+                append(" | after-filter=${afterFilter.size}")
+                append(" | topK-after=${topAfter.size}")
+                if (taskState.goal.isNotBlank()) append(" | goal=${taskState.goal.take(80)}")
+                append(" | constraints=${taskState.constraints.size}")
+                append(" | terms=${taskState.terms.size}")
+            }
             val ragPrompt = AiAgentRagPrompts.buildUserPrompt(
                 question = question,
                 retrievalQuery = retrievalQuestion,
-                context = if (topAfter.isEmpty()) AiAgentRagPrompts.EMPTY_CONTEXT else context
+                context = if (topAfter.isEmpty()) AiAgentRagPrompts.EMPTY_CONTEXT else context,
+                dialogHistory = buildDialogHistory(conversation),
+                taskState = buildTaskStateBlock(taskState)
             )
 
             return RetrievalOutput(
@@ -338,15 +606,20 @@ fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> 
             )
         }
 
-        suspend fun requestAssistant(question: String, conversation: List<RagMessage>, config: RetrievalConfig): AssistantResult {
+        suspend fun requestAssistant(
+            question: String,
+            conversation: List<RagMessage>,
+            taskState: RagTaskState,
+            config: RetrievalConfig
+        ): AssistantResult {
             return try {
                 val apiKey = ragReadApiKey(config.api.envVar)
                 if (apiKey.isBlank()) error("Missing API key: ${config.api.envVar}")
 
-                val retrieval = buildRetrievalOutput(question, config)
+                val retrieval = buildRetrievalOutput(question, conversation, taskState, config)
                 if (config.useRag && retrieval.selectedChunks.isEmpty()) {
                     return AssistantResult(
-                        answer = AiAgentRagPrompts.NO_ANSWER,
+                        answer = ensureStrictAnswerFormatV2("Недостаточно данных в переданном контексте для точного ответа.", emptyList()),
                         paramsInfo = assistantParams(config),
                         sources = emptyList(),
                         retrievalInfo = retrieval.retrievalInfo
@@ -365,10 +638,18 @@ fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> 
                     RagApi.GigaChat -> gigaChatApi.createChatCompletion(apiKey, request)
                     RagApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletion(apiKey, request)
                 }
-                val answer = response.choices.firstOrNull()?.message?.content?.trim().orEmpty().ifEmpty { "Empty response" }
+                val answer = ensureStrictAnswerFormatV2(
+                    response.choices.firstOrNull()?.message?.content?.trim().orEmpty().ifEmpty { "Empty response" },
+                    retrieval.selectedChunks
+                )
                 AssistantResult(answer, assistantParams(config), retrieval.selectedChunks, retrieval.retrievalInfo)
             } catch (e: Exception) {
-                AssistantResult("Request failed: ${e.message ?: "unknown error"}", assistantParams(config), emptyList(), null)
+                AssistantResult(
+                    ensureStrictAnswerFormatV2("Request failed: ${e.message ?: "unknown error"}", emptyList()),
+                    assistantParams(config),
+                    emptyList(),
+                    null
+                )
             }
         }
 
@@ -395,6 +676,8 @@ fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> 
                 topKAfter = readPositiveInt(comparisonTopKAfterRaw, DEFAULT_TOP_K_AFTER),
                 threshold = readThreshold(comparisonThresholdRaw, DEFAULT_MIN_SCORE)
             )
+            taskState = updateTaskStateFromUserMessage(taskState, text)
+            saveTaskState(chatId, taskState)
 
             ragQueries.insertMessage(
                 chatId,
@@ -414,9 +697,10 @@ fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> 
 
             scope.launch {
                 isLoading = true
-                val primaryDeferred = async { requestAssistant(text, messages.toList(), primaryConfig) }
+                val taskStateSnapshot = taskState
+                val primaryDeferred = async { requestAssistant(text, messages.toList(), taskStateSnapshot, primaryConfig) }
                 val comparisonDeferred = if (dualChatEnabled) async {
-                    requestAssistant(text, comparisonMessages.toList(), compareConfig)
+                    requestAssistant(text, comparisonMessages.toList(), taskStateSnapshot, compareConfig)
                 } else null
 
                 val primaryResult = primaryDeferred.await()
