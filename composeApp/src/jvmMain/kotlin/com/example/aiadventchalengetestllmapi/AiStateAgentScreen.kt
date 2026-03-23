@@ -75,6 +75,7 @@ import com.example.aiadventchalengetestllmapi.network.DeepSeekChatRequest
 import com.example.aiadventchalengetestllmapi.network.DeepSeekMessage
 import com.example.aiadventchalengetestllmapi.network.DeepSeekResponseFormat
 import com.example.aiadventchalengetestllmapi.network.GigaChatApi
+import com.example.aiadventchalengetestllmapi.network.LocalLlmApi
 import com.example.aiadventchalengetestllmapi.network.OpenAiApi
 import com.example.aiadventchalengetestllmapi.network.ProxyOpenAiApi
 import kotlinx.coroutines.delay
@@ -255,6 +256,12 @@ private enum class AiAgentApi(
             "anthropic/claude-opus-4-6",
             "anthropic/claude-3-7-sonnet-20250219"
         )
+    ),
+    LocalLlm(
+        label = "Локальная LLM",
+        envVar = "LOCAL_LLM_API_KEY",
+        defaultModel = "llama3.1:8b",
+        supportedModels = listOf("llama3.1:8b", "gemma2:2b", "qwen2.5:7b")
     )
 }
 
@@ -308,6 +315,7 @@ private fun AiAgentMessage.displayParamsInfo(): String =
         .replace(epochStripRegex, "")
 
 private fun aiAgentReadApiKey(envVar: String): String {
+    if (envVar == "LOCAL_LLM_API_KEY") return "local-llm"
     val fromBuildSecrets = BuildSecrets.apiKeyFor(envVar).trim()
     if (fromBuildSecrets.isNotEmpty()) return fromBuildSecrets
     return System.getenv(envVar)?.trim().orEmpty()
@@ -385,6 +393,7 @@ private fun AiStateAgentChat(
     val openAiApi = remember { OpenAiApi() }
     val gigaChatApi = remember { GigaChatApi() }
     val proxyOpenAiApi = remember { ProxyOpenAiApi() }
+    val localLlmApi = remember { LocalLlmApi() }
     val database = remember { createAiStateAgentDatabase(AiStateAgentDatabaseDriverFactory()) }
     val queries = remember(database) { database.chatHistoryQueries }
 
@@ -749,6 +758,7 @@ private fun AiStateAgentChat(
             AiAgentApi.OpenAI -> openAiApi.createChatCompletion(apiKey = apiKey, request = request)
             AiAgentApi.GigaChat -> gigaChatApi.createChatCompletion(accessToken = apiKey, request = request)
             AiAgentApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletion(apiKey = apiKey, request = request)
+            AiAgentApi.LocalLlm -> localLlmApi.createChatCompletion(request = request)
         }
         return response.choices.firstOrNull()?.message?.content?.trim().orEmpty()
             .ifEmpty { "Пустой ответ от ${requestApi.label}." }
@@ -787,6 +797,7 @@ private fun AiStateAgentChat(
             AiAgentApi.OpenAI -> openAiApi.createChatCompletion(apiKey = apiKey, request = request)
             AiAgentApi.GigaChat -> gigaChatApi.createChatCompletion(accessToken = apiKey, request = request)
             AiAgentApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletion(apiKey = apiKey, request = request)
+            AiAgentApi.LocalLlm -> localLlmApi.createChatCompletion(request = request)
         }
         return response.choices.firstOrNull()?.message?.content?.trim().orEmpty()
             .ifEmpty { "Пустой ответ от ${requestApi.label}." }
@@ -838,6 +849,7 @@ private fun AiStateAgentChat(
             AiAgentApi.OpenAI -> openAiApi.createChatCompletion(apiKey = apiKey, request = request)
             AiAgentApi.GigaChat -> gigaChatApi.createChatCompletion(accessToken = apiKey, request = request)
             AiAgentApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletion(apiKey = apiKey, request = request)
+            AiAgentApi.LocalLlm -> localLlmApi.createChatCompletion(request = request)
         }
         return response.choices.firstOrNull()?.message?.content?.trim().orEmpty()
             .ifEmpty { "Пустой ответ от ${requestApi.label}." }
@@ -858,6 +870,7 @@ private fun AiStateAgentChat(
             AiAgentApi.OpenAI -> openAiApi.createChatCompletion(apiKey = apiKey, request = request)
             AiAgentApi.GigaChat -> gigaChatApi.createChatCompletion(accessToken = apiKey, request = request)
             AiAgentApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletion(apiKey = apiKey, request = request)
+            AiAgentApi.LocalLlm -> localLlmApi.createChatCompletion(request = request)
         }
         return response.choices.firstOrNull()?.message?.content?.trim().orEmpty()
             .ifEmpty { "Пустой ответ от ${requestApi.label}." }
@@ -899,6 +912,7 @@ private fun AiStateAgentChat(
             AiAgentApi.OpenAI -> openAiApi.createChatCompletion(apiKey = apiKey, request = request)
             AiAgentApi.GigaChat -> gigaChatApi.createChatCompletion(accessToken = apiKey, request = request)
             AiAgentApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletion(apiKey = apiKey, request = request)
+            AiAgentApi.LocalLlm -> localLlmApi.createChatCompletion(request = request)
         }
         return response.choices.firstOrNull()?.message?.content?.trim().orEmpty()
             .ifEmpty { "Пустой ответ от ${requestApi.label}." }
@@ -930,6 +944,7 @@ private fun AiStateAgentChat(
             AiAgentApi.OpenAI -> openAiApi.createChatCompletion(apiKey = apiKey, request = request)
             AiAgentApi.GigaChat -> gigaChatApi.createChatCompletion(accessToken = apiKey, request = request)
             AiAgentApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletion(apiKey = apiKey, request = request)
+            AiAgentApi.LocalLlm -> localLlmApi.createChatCompletion(request = request)
         }
         return response.choices.firstOrNull()?.message?.content?.trim().orEmpty()
             .ifEmpty { "Пустой ответ от ${requestApi.label}." }
@@ -1112,6 +1127,7 @@ private fun AiStateAgentChat(
             AiAgentApi.OpenAI -> openAiApi.createChatCompletion(apiKey = apiKey, request = request)
             AiAgentApi.GigaChat -> gigaChatApi.createChatCompletion(accessToken = apiKey, request = request)
             AiAgentApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletion(apiKey = apiKey, request = request)
+            AiAgentApi.LocalLlm -> localLlmApi.createChatCompletion(request = request)
         }
         return response.choices.firstOrNull()?.message?.content?.trim().orEmpty()
             .ifEmpty { "Пустой ответ от ${requestApi.label}." }

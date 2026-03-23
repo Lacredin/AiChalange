@@ -63,6 +63,7 @@ import com.example.aiadventchalengetestllmapi.network.DeepSeekApi
 import com.example.aiadventchalengetestllmapi.network.DeepSeekChatRequest
 import com.example.aiadventchalengetestllmapi.network.DeepSeekMessage
 import com.example.aiadventchalengetestllmapi.network.GigaChatApi
+import com.example.aiadventchalengetestllmapi.network.LocalLlmApi
 import com.example.aiadventchalengetestllmapi.network.OpenAiApi
 import com.example.aiadventchalengetestllmapi.network.ProxyOpenAiApi
 import kotlinx.coroutines.async
@@ -74,11 +75,38 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import java.util.prefs.Preferences
 
-private enum class RagApi(val label: String, val envVar: String, val defaultModel: String) {
-    DeepSeek("DeepSeek", "DEEPSEEK_API_KEY", "deepseek-chat"),
-    OpenAI("OpenAI", "OPENAI_API_KEY", "gpt-4o-mini"),
-    GigaChat("GigaChat", "GIGACHAT_ACCESS_TOKEN", "GigaChat-2"),
-    ProxyOpenAI("ProxyAPI (OpenAI)", "PROXYAPI_API_KEY", "openai/gpt-4o-mini")
+private enum class RagApi(
+    val label: String,
+    val envVar: String,
+    val defaultModel: String,
+    val supportedModels: List<String>
+) {
+    DeepSeek("DeepSeek", "DEEPSEEK_API_KEY", "deepseek-chat", listOf("deepseek-chat", "deepseek-reasoner")),
+    OpenAI("OpenAI", "OPENAI_API_KEY", "gpt-4o-mini", listOf("gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1", "o3-mini")),
+    GigaChat("GigaChat", "GIGACHAT_ACCESS_TOKEN", "GigaChat-2", listOf("GigaChat-2", "GigaChat-2-Pro", "GigaChat-2-Max")),
+    ProxyOpenAI(
+        "ProxyAPI (OpenAI)",
+        "PROXYAPI_API_KEY",
+        "openai/gpt-4o-mini",
+        listOf(
+            "openai/gpt-5.2",
+            "openai/gpt-4o-mini",
+            "openai/gpt-4o",
+            "openai/gpt-4.1-mini",
+            "openai/gpt-4.1",
+            "openai/o3-mini",
+            "anthropic/claude-sonnet-4-6",
+            "anthropic/claude-sonnet-4-5",
+            "anthropic/claude-opus-4-6",
+            "anthropic/claude-3-7-sonnet-20250219"
+        )
+    ),
+    LocalLlm(
+        "Локальная LLM",
+        "LOCAL_LLM_API_KEY",
+        "llama3.1:8b",
+        listOf("llama3.1:8b", "gemma2:2b", "qwen2.5:7b")
+    )
 }
 
 private data class RagChatItem(val id: Long, val title: String)
@@ -104,6 +132,7 @@ private data class RagMessage(
 
 private data class RetrievalConfig(
     val api: RagApi,
+    val model: String,
     val useRag: Boolean,
     val useFilter: Boolean,
     val useRewrite: Boolean,
@@ -142,6 +171,7 @@ private const val TASK_STATE_ITEMS_LIMIT = 14
 private val ragJson = Json { ignoreUnknownKeys = true }
 
 private fun ragReadApiKey(envVar: String): String {
+    if (envVar == "LOCAL_LLM_API_KEY") return "local-llm"
     val fromBuildSecrets = BuildSecrets.apiKeyFor(envVar).trim()
     if (fromBuildSecrets.isNotEmpty()) return fromBuildSecrets
     return System.getenv(envVar)?.trim().orEmpty()
@@ -405,10 +435,10 @@ private fun readPositiveInt(raw: String, fallback: Int): Int = raw.toIntOrNull()
 private fun readThreshold(raw: String, fallback: Double): Double = raw.toDoubleOrNull()?.coerceIn(0.0, 1.0) ?: fallback
 
 private fun userParams(config: RetrievalConfig): String =
-    "api=${config.api.label} | model=${config.api.defaultModel} | rag=${if (config.useRag) "on" else "off"} | filter=${if (config.useFilter) "on" else "off"} | rewrite=${if (config.useRewrite) "on" else "off"}"
+    "api=${config.api.label} | model=${config.model} | rag=${if (config.useRag) "on" else "off"} | filter=${if (config.useFilter) "on" else "off"} | rewrite=${if (config.useRewrite) "on" else "off"}"
 
 private fun assistantParams(config: RetrievalConfig): String =
-    "api=${config.api.label} | model=${config.api.defaultModel} | rag=${if (config.useRag) "on" else "off"} | filter=${if (config.useFilter) "on" else "off"} | rewrite=${if (config.useRewrite) "on" else "off"} | kBefore=${config.topKBefore} | kAfter=${config.topKAfter} | threshold=${"%.2f".format(config.threshold)}"
+    "api=${config.api.label} | model=${config.model} | rag=${if (config.useRag) "on" else "off"} | filter=${if (config.useFilter) "on" else "off"} | rewrite=${if (config.useRewrite) "on" else "off"} | kBefore=${config.topKBefore} | kAfter=${config.topKAfter} | threshold=${"%.2f".format(config.threshold)}"
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -425,6 +455,7 @@ fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> 
         val openAiApi = remember { OpenAiApi() }
         val gigaChatApi = remember { GigaChatApi() }
         val proxyOpenAiApi = remember { ProxyOpenAiApi() }
+        val localLlmApi = remember { LocalLlmApi() }
         val ragDb = remember { createAiAgentRagDatabase(AiAgentRagDatabaseDriverFactory()) }
         val ragQueries = remember(ragDb) { ragDb.chatHistoryQueries }
         val embDb = remember { createEmbedingGenerationDatabase(EmbedingGenerationDatabaseDriverFactory()) }
@@ -439,6 +470,10 @@ fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> 
         var inputText by remember { mutableStateOf("") }
         var selectedApi by remember { mutableStateOf(RagApi.DeepSeek) }
         var comparisonApi by remember { mutableStateOf(RagApi.DeepSeek) }
+        var localModel by remember { mutableStateOf(RagApi.LocalLlm.defaultModel) }
+        var comparisonLocalModel by remember { mutableStateOf(RagApi.LocalLlm.defaultModel) }
+        var localModelMenuExpanded by remember { mutableStateOf(false) }
+        var comparisonLocalModelMenuExpanded by remember { mutableStateOf(false) }
         var isLoading by remember { mutableStateOf(false) }
         var useRag by remember { mutableStateOf(loadUseRagState()) }
         var comparisonUseRag by remember { mutableStateOf(true) }
@@ -631,12 +666,13 @@ fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> 
                     conversation.map { msg -> DeepSeekMessage(if (msg.isUser) "user" else "assistant", msg.text) }
                 }
 
-                val request = DeepSeekChatRequest(config.api.defaultModel, requestMessages)
+                val request = DeepSeekChatRequest(config.model, requestMessages)
                 val response = when (config.api) {
                     RagApi.DeepSeek -> deepSeekApi.createChatCompletion(apiKey, request)
                     RagApi.OpenAI -> openAiApi.createChatCompletion(apiKey, request)
                     RagApi.GigaChat -> gigaChatApi.createChatCompletion(apiKey, request)
                     RagApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletion(apiKey, request)
+                    RagApi.LocalLlm -> localLlmApi.createChatCompletion(request)
                 }
                 val answer = ensureStrictAnswerFormatV2(
                     response.choices.firstOrNull()?.message?.content?.trim().orEmpty().ifEmpty { "Empty response" },
@@ -660,6 +696,7 @@ fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> 
 
             val primaryConfig = RetrievalConfig(
                 api = selectedApi,
+                model = if (selectedApi == RagApi.LocalLlm) localModel else selectedApi.defaultModel,
                 useRag = useRag,
                 useFilter = useFilter,
                 useRewrite = useRewrite,
@@ -669,6 +706,7 @@ fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> 
             )
             val compareConfig = RetrievalConfig(
                 api = comparisonApi,
+                model = if (comparisonApi == RagApi.LocalLlm) comparisonLocalModel else comparisonApi.defaultModel,
                 useRag = comparisonUseRag,
                 useFilter = comparisonUseFilter,
                 useRewrite = comparisonUseRewrite,
@@ -679,13 +717,13 @@ fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> 
             taskState = updateTaskStateFromUserMessage(taskState, text)
             saveTaskState(chatId, taskState)
 
-            ragQueries.insertMessage(
-                chatId,
-                primaryConfig.api.label,
-                primaryConfig.api.defaultModel,
-                "user",
-                text,
-                userParams(primaryConfig),
+                ragQueries.insertMessage(
+                    chatId,
+                    primaryConfig.api.label,
+                    primaryConfig.model,
+                    "user",
+                    text,
+                    userParams(primaryConfig),
                 System.currentTimeMillis()
             )
             messages += RagMessage(nextMessageId++, text, true, userParams(primaryConfig))
@@ -707,7 +745,7 @@ fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> 
                 ragQueries.insertMessage(
                     chatId,
                     primaryConfig.api.label,
-                    primaryConfig.api.defaultModel,
+                    primaryConfig.model,
                     "assistant",
                     primaryResult.answer,
                     primaryResult.paramsInfo,
@@ -820,10 +858,37 @@ fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> 
                                 Column(modifier = Modifier.fillMaxWidth().padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                                         Text("Настройки основного чата")
-                                        TextButton(
-                                            onClick = { selectedApi = RagApi.entries[(RagApi.entries.indexOf(selectedApi) + 1) % RagApi.entries.size] },
-                                            enabled = !isLoading
-                                        ) { Text("API: ${selectedApi.label}") }
+                                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                            TextButton(
+                                                onClick = {
+                                                    selectedApi = RagApi.entries[(RagApi.entries.indexOf(selectedApi) + 1) % RagApi.entries.size]
+                                                    localModelMenuExpanded = false
+                                                },
+                                                enabled = !isLoading
+                                            ) { Text("API: ${selectedApi.label}") }
+                                            if (selectedApi == RagApi.LocalLlm) {
+                                                Box {
+                                                    TextButton(
+                                                        onClick = { localModelMenuExpanded = true },
+                                                        enabled = !isLoading
+                                                    ) { Text("Model: $localModel") }
+                                                    DropdownMenu(
+                                                        expanded = localModelMenuExpanded,
+                                                        onDismissRequest = { localModelMenuExpanded = false }
+                                                    ) {
+                                                        RagApi.LocalLlm.supportedModels.forEach { model ->
+                                                            DropdownMenuItem(
+                                                                text = { Text(model) },
+                                                                onClick = {
+                                                                    localModel = model
+                                                                    localModelMenuExpanded = false
+                                                                }
+                                                            )
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                         OutlinedTextField(
@@ -917,10 +982,37 @@ fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> 
                                     Column(modifier = Modifier.fillMaxWidth().padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                                             Text("Настройки чата сравнения")
-                                            TextButton(
-                                                onClick = { comparisonApi = RagApi.entries[(RagApi.entries.indexOf(comparisonApi) + 1) % RagApi.entries.size] },
-                                                enabled = !isLoading
-                                            ) { Text("API: ${comparisonApi.label}") }
+                                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                                TextButton(
+                                                    onClick = {
+                                                        comparisonApi = RagApi.entries[(RagApi.entries.indexOf(comparisonApi) + 1) % RagApi.entries.size]
+                                                        comparisonLocalModelMenuExpanded = false
+                                                    },
+                                                    enabled = !isLoading
+                                                ) { Text("API: ${comparisonApi.label}") }
+                                                if (comparisonApi == RagApi.LocalLlm) {
+                                                    Box {
+                                                        TextButton(
+                                                            onClick = { comparisonLocalModelMenuExpanded = true },
+                                                            enabled = !isLoading
+                                                        ) { Text("Model: $comparisonLocalModel") }
+                                                        DropdownMenu(
+                                                            expanded = comparisonLocalModelMenuExpanded,
+                                                            onDismissRequest = { comparisonLocalModelMenuExpanded = false }
+                                                        ) {
+                                                            RagApi.LocalLlm.supportedModels.forEach { model ->
+                                                                DropdownMenuItem(
+                                                                    text = { Text(model) },
+                                                                    onClick = {
+                                                                        comparisonLocalModel = model
+                                                                        comparisonLocalModelMenuExpanded = false
+                                                                    }
+                                                                )
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
                                         }
                                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                             OutlinedTextField(

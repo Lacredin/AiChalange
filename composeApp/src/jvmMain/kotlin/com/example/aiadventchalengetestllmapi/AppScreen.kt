@@ -45,6 +45,7 @@ import com.example.aiadventchalengetestllmapi.network.DeepSeekApi
 import com.example.aiadventchalengetestllmapi.network.DeepSeekChatRequest
 import com.example.aiadventchalengetestllmapi.network.DeepSeekMessage
 import com.example.aiadventchalengetestllmapi.network.GigaChatApi
+import com.example.aiadventchalengetestllmapi.network.LocalLlmApi
 import com.example.aiadventchalengetestllmapi.network.OpenAiApi
 import com.example.aiadventchalengetestllmapi.network.ProxyOpenAiApi
 import kotlinx.coroutines.launch
@@ -54,7 +55,8 @@ private enum class AppApi(
     val label: String,
     val envVar: String,
     val defaultModel: String,
-    val supportedModels: List<String>
+    val supportedModels: List<String>,
+    val requiresApiKey: Boolean = true
 ) {
     DeepSeek(
         label = "DeepSeek",
@@ -90,6 +92,13 @@ private enum class AppApi(
             "anthropic/claude-opus-4-6",
             "anthropic/claude-3-7-sonnet-20250219"
         )
+    ),
+    LocalLlm(
+        label = "Локальная LLM",
+        envVar = "LOCAL_LLM_API_KEY",
+        defaultModel = "llama3.1:8b",
+        supportedModels = listOf("llama3.1:8b", "gemma2:2b", "qwen2.5:7b"),
+        requiresApiKey = false
     )
 }
 
@@ -117,6 +126,7 @@ fun App(onBackClick: () -> Unit = {}) {
         val openAiApi = remember { OpenAiApi() }
         val gigaChatApi = remember { GigaChatApi() }
         val proxyOpenAiApi = remember { ProxyOpenAiApi() }
+        val localLlmApi = remember { LocalLlmApi() }
 
         val messages = remember { mutableStateListOf<AppMessage>() }
         val listState = rememberLazyListState()
@@ -189,7 +199,7 @@ fun App(onBackClick: () -> Unit = {}) {
                         .orEmpty()
                         .trim()
                         .ifEmpty { appReadApiKey(selectedApi.envVar) }
-                    if (apiKey.isBlank()) {
+                    if (selectedApi.requiresApiKey && apiKey.isBlank()) {
                         error("Missing API key in input, secrets.properties, or env var: ${selectedApi.envVar}")
                     }
 
@@ -215,6 +225,7 @@ fun App(onBackClick: () -> Unit = {}) {
                         AppApi.OpenAI -> openAiApi.createChatCompletion(apiKey = apiKey, request = request)
                         AppApi.GigaChat -> gigaChatApi.createChatCompletion(accessToken = apiKey, request = request)
                         AppApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletion(apiKey = apiKey, request = request)
+                        AppApi.LocalLlm -> localLlmApi.createChatCompletion(request = request)
                     }
                     response.choices.firstOrNull()?.message?.content?.trim()
                         .orEmpty()

@@ -68,6 +68,7 @@ import com.example.aiadventchalengetestllmapi.network.DeepSeekApi
 import com.example.aiadventchalengetestllmapi.network.DeepSeekChatRequest
 import com.example.aiadventchalengetestllmapi.network.DeepSeekMessage
 import com.example.aiadventchalengetestllmapi.network.GigaChatApi
+import com.example.aiadventchalengetestllmapi.network.LocalLlmApi
 import com.example.aiadventchalengetestllmapi.network.OpenAiApi
 import com.example.aiadventchalengetestllmapi.network.ProxyOpenAiApi
 import kotlinx.coroutines.launch
@@ -83,7 +84,8 @@ private enum class AiAgentApi(
     val label: String,
     val envVar: String,
     val defaultModel: String,
-    val supportedModels: List<String>
+    val supportedModels: List<String>,
+    val requiresApiKey: Boolean = true
 ) {
     DeepSeek(
         label = "DeepSeek",
@@ -119,6 +121,13 @@ private enum class AiAgentApi(
             "anthropic/claude-opus-4-6",
             "anthropic/claude-3-7-sonnet-20250219"
         )
+    ),
+    LocalLlm(
+        label = "Локальная LLM",
+        envVar = "LOCAL_LLM_API_KEY",
+        defaultModel = "llama3.1:8b",
+        supportedModels = listOf("llama3.1:8b", "gemma2:2b", "qwen2.5:7b"),
+        requiresApiKey = false
     )
 }
 
@@ -315,6 +324,7 @@ private fun AiAgentChat(
     val openAiApi = remember { OpenAiApi() }
     val gigaChatApi = remember { GigaChatApi() }
     val proxyOpenAiApi = remember { ProxyOpenAiApi() }
+    val localLlmApi = remember { LocalLlmApi() }
     val database = remember { createAppDatabase(DatabaseDriverFactory()) }
     val queries = remember(database) { database.chatHistoryQueries }
 
@@ -878,7 +888,7 @@ private fun AiAgentChat(
             val startedAtNanos = System.nanoTime()
             val completionResult = try {
                 val apiKey = aiAgentReadApiKey(requestApi.envVar)
-                if (apiKey.isBlank()) {
+                if (requestApi.requiresApiKey && apiKey.isBlank()) {
                     error("Missing API key in secrets.properties or env var: ${requestApi.envVar}")
                 }
 
@@ -892,6 +902,7 @@ private fun AiAgentChat(
                     AiAgentApi.OpenAI -> openAiApi.createChatCompletion(apiKey = apiKey, request = request)
                     AiAgentApi.GigaChat -> gigaChatApi.createChatCompletion(accessToken = apiKey, request = request)
                     AiAgentApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletion(apiKey = apiKey, request = request)
+                    AiAgentApi.LocalLlm -> localLlmApi.createChatCompletion(request = request)
                 }
 
                 val answerText = response.choices.firstOrNull()?.message?.content?.trim().orEmpty()
@@ -1000,13 +1011,14 @@ private fun AiAgentChat(
                     )
 
                     val stickyApiKey = aiAgentReadApiKey(requestApi.envVar)
-                    if (stickyApiKey.isNotBlank()) {
+                    if (!requestApi.requiresApiKey || stickyApiKey.isNotBlank()) {
                         val stickyFactsText = runCatching {
                             val stickyResponse = when (requestApi) {
                                 AiAgentApi.DeepSeek -> deepSeekApi.createChatCompletion(apiKey = stickyApiKey, request = stickyRequest)
                                 AiAgentApi.OpenAI -> openAiApi.createChatCompletion(apiKey = stickyApiKey, request = stickyRequest)
                                 AiAgentApi.GigaChat -> gigaChatApi.createChatCompletion(accessToken = stickyApiKey, request = stickyRequest)
                                 AiAgentApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletion(apiKey = stickyApiKey, request = stickyRequest)
+                                AiAgentApi.LocalLlm -> localLlmApi.createChatCompletion(request = stickyRequest)
                             }
                             stickyResponse.choices.firstOrNull()?.message?.content.orEmpty()
                         }.getOrNull()
@@ -1033,7 +1045,7 @@ private fun AiAgentChat(
                     val summaryStartedAtNanos = System.nanoTime()
                     val summaryResult = try {
                         val apiKey = aiAgentReadApiKey(requestApi.envVar)
-                        if (apiKey.isBlank()) {
+                        if (requestApi.requiresApiKey && apiKey.isBlank()) {
                             error("Missing API key in secrets.properties or env var: ${requestApi.envVar}")
                         }
 
@@ -1070,6 +1082,7 @@ private fun AiAgentChat(
                             AiAgentApi.OpenAI -> openAiApi.createChatCompletion(apiKey = apiKey, request = summaryRequest)
                             AiAgentApi.GigaChat -> gigaChatApi.createChatCompletion(accessToken = apiKey, request = summaryRequest)
                             AiAgentApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletion(apiKey = apiKey, request = summaryRequest)
+                            AiAgentApi.LocalLlm -> localLlmApi.createChatCompletion(request = summaryRequest)
                         }
 
                         val summaryText = summaryResponse.choices.firstOrNull()?.message?.content?.trim().orEmpty()
