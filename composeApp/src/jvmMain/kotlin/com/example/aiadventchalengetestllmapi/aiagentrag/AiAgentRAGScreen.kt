@@ -470,6 +470,8 @@ fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> 
         var inputText by remember { mutableStateOf("") }
         var selectedApi by remember { mutableStateOf(RagApi.DeepSeek) }
         var comparisonApi by remember { mutableStateOf(RagApi.DeepSeek) }
+        var apiMenuExpanded by remember { mutableStateOf(false) }
+        var comparisonApiMenuExpanded by remember { mutableStateOf(false) }
         var localModel by remember { mutableStateOf(RagApi.LocalLlm.defaultModel) }
         var comparisonLocalModel by remember { mutableStateOf(RagApi.LocalLlm.defaultModel) }
         var localModelMenuExpanded by remember { mutableStateOf(false) }
@@ -859,13 +861,27 @@ fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> 
                                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                                         Text("Настройки основного чата")
                                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                                            TextButton(
-                                                onClick = {
-                                                    selectedApi = RagApi.entries[(RagApi.entries.indexOf(selectedApi) + 1) % RagApi.entries.size]
-                                                    localModelMenuExpanded = false
-                                                },
-                                                enabled = !isLoading
-                                            ) { Text("API: ${selectedApi.label}") }
+                                            Box {
+                                                TextButton(
+                                                    onClick = { apiMenuExpanded = true },
+                                                    enabled = !isLoading
+                                                ) { Text("API: ${selectedApi.label}") }
+                                                DropdownMenu(
+                                                    expanded = apiMenuExpanded,
+                                                    onDismissRequest = { apiMenuExpanded = false }
+                                                ) {
+                                                    RagApi.entries.forEach { api ->
+                                                        DropdownMenuItem(
+                                                            text = { Text(api.label) },
+                                                            onClick = {
+                                                                selectedApi = api
+                                                                localModelMenuExpanded = false
+                                                                apiMenuExpanded = false
+                                                            }
+                                                        )
+                                                    }
+                                                }
+                                            }
                                             if (selectedApi == RagApi.LocalLlm) {
                                                 Box {
                                                     TextButton(
@@ -983,13 +999,27 @@ fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> 
                                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                                             Text("Настройки чата сравнения")
                                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                                                TextButton(
-                                                    onClick = {
-                                                        comparisonApi = RagApi.entries[(RagApi.entries.indexOf(comparisonApi) + 1) % RagApi.entries.size]
-                                                        comparisonLocalModelMenuExpanded = false
-                                                    },
-                                                    enabled = !isLoading
-                                                ) { Text("API: ${comparisonApi.label}") }
+                                                Box {
+                                                    TextButton(
+                                                        onClick = { comparisonApiMenuExpanded = true },
+                                                        enabled = !isLoading
+                                                    ) { Text("API: ${comparisonApi.label}") }
+                                                    DropdownMenu(
+                                                        expanded = comparisonApiMenuExpanded,
+                                                        onDismissRequest = { comparisonApiMenuExpanded = false }
+                                                    ) {
+                                                        RagApi.entries.forEach { api ->
+                                                            DropdownMenuItem(
+                                                                text = { Text(api.label) },
+                                                                onClick = {
+                                                                    comparisonApi = api
+                                                                    comparisonLocalModelMenuExpanded = false
+                                                                    comparisonApiMenuExpanded = false
+                                                                }
+                                                            )
+                                                        }
+                                                    }
+                                                }
                                                 if (comparisonApi == RagApi.LocalLlm) {
                                                     Box {
                                                         TextButton(
