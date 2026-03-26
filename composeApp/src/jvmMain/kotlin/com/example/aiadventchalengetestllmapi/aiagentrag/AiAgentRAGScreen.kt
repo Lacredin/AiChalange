@@ -647,7 +647,8 @@ fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> 
             question: String,
             conversation: List<RagMessage>,
             taskState: RagTaskState,
-            config: RetrievalConfig
+            config: RetrievalConfig,
+            onDelta: ((String) -> Unit)? = null
         ): AssistantResult {
             return try {
                 val apiKey = ragReadApiKey(config.api.envVar)
@@ -674,7 +675,11 @@ fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> 
                     RagApi.OpenAI -> openAiApi.createChatCompletion(apiKey, request)
                     RagApi.GigaChat -> gigaChatApi.createChatCompletion(apiKey, request)
                     RagApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletion(apiKey, request)
-                    RagApi.LocalLlm -> localLlmApi.createChatCompletion(request)
+                    RagApi.LocalLlm -> if (onDelta == null) {
+                        localLlmApi.createChatCompletion(request)
+                    } else {
+                        localLlmApi.createChatCompletionStreaming(request, onDelta)
+                    }
                 }
                 val answer = ensureStrictAnswerFormatV2(
                     response.choices.firstOrNull()?.message?.content?.trim().orEmpty().ifEmpty { "Empty response" },
@@ -689,6 +694,14 @@ fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> 
                     null
                 )
             }
+        }
+
+        fun appendAssistantDelta(target: MutableList<RagMessage>, messageId: Long, delta: String) {
+            if (delta.isEmpty()) return
+            val index = target.indexOfFirst { it.id == messageId }
+            if (index == -1) return
+            val item = target[index]
+            target[index] = item.copy(text = item.text + delta)
         }
 
         fun sendMessage() {
@@ -732,15 +745,52 @@ fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> 
             if (dualChatEnabled) {
                 comparisonMessages += RagMessage(nextMessageId++, text, true, userParams(compareConfig))
             }
+            val primaryConversationSnapshot = messages.toList()
+            val comparisonConversationSnapshot = comparisonMessages.toList()
             inputText = ""
             saveUseRagState(useRag)
 
             scope.launch {
                 isLoading = true
                 val taskStateSnapshot = taskState
-                val primaryDeferred = async { requestAssistant(text, messages.toList(), taskStateSnapshot, primaryConfig) }
+                val primaryStreamingMessageId = if (primaryConfig.api == RagApi.LocalLlm) {
+                    val id = nextMessageId++
+                    messages += RagMessage(
+                        id = id,
+                        text = "",
+                        isUser = false,
+                        paramsInfo = assistantParams(primaryConfig)
+                    )
+                    id
+                } else null
+                val comparisonStreamingMessageId = if (dualChatEnabled && compareConfig.api == RagApi.LocalLlm) {
+                    val id = nextMessageId++
+                    comparisonMessages += RagMessage(
+                        id = id,
+                        text = "",
+                        isUser = false,
+                        paramsInfo = assistantParams(compareConfig)
+                    )
+                    id
+                } else null
+
+                val primaryDeferred = async {
+                    requestAssistant(
+                        text,
+                        primaryConversationSnapshot,
+                        taskStateSnapshot,
+                        primaryConfig,
+                        onDelta = primaryStreamingMessageId?.let { id -> { delta -> appendAssistantDelta(messages, id, delta) } }
+                    )
+                }
                 val comparisonDeferred = if (dualChatEnabled) async {
-                    requestAssistant(text, comparisonMessages.toList(), taskStateSnapshot, compareConfig)
+                    requestAssistant(
+                        text,
+                        comparisonConversationSnapshot,
+                        taskStateSnapshot,
+                        compareConfig,
+                        onDelta = comparisonStreamingMessageId?.let { id -> { delta -> appendAssistantDelta(comparisonMessages, id, delta) } }
+                    )
                 } else null
 
                 val primaryResult = primaryDeferred.await()
@@ -753,26 +803,50 @@ fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> 
                     primaryResult.paramsInfo,
                     System.currentTimeMillis()
                 )
-                messages += RagMessage(
-                    id = nextMessageId++,
-                    text = primaryResult.answer,
-                    isUser = false,
-                    paramsInfo = primaryResult.paramsInfo,
-                    sources = primaryResult.sources,
-                    retrievalInfo = primaryResult.retrievalInfo
-                )
+                if (primaryStreamingMessageId == null) {
+                    messages += RagMessage(
+                        id = nextMessageId++,
+                        text = primaryResult.answer,
+                        isUser = false,
+                        paramsInfo = primaryResult.paramsInfo,
+                        sources = primaryResult.sources,
+                        retrievalInfo = primaryResult.retrievalInfo
+                    )
+                } else {
+                    val index = messages.indexOfFirst { it.id == primaryStreamingMessageId }
+                    if (index != -1) {
+                        messages[index] = messages[index].copy(
+                            text = primaryResult.answer,
+                            paramsInfo = primaryResult.paramsInfo,
+                            sources = primaryResult.sources,
+                            retrievalInfo = primaryResult.retrievalInfo
+                        )
+                    }
+                }
 
                 if (dualChatEnabled) {
                     val compareResult = comparisonDeferred?.await()
                     if (compareResult != null) {
-                        comparisonMessages += RagMessage(
-                            id = nextMessageId++,
-                            text = compareResult.answer,
-                            isUser = false,
-                            paramsInfo = compareResult.paramsInfo,
-                            sources = compareResult.sources,
-                            retrievalInfo = compareResult.retrievalInfo
-                        )
+                        if (comparisonStreamingMessageId == null) {
+                            comparisonMessages += RagMessage(
+                                id = nextMessageId++,
+                                text = compareResult.answer,
+                                isUser = false,
+                                paramsInfo = compareResult.paramsInfo,
+                                sources = compareResult.sources,
+                                retrievalInfo = compareResult.retrievalInfo
+                            )
+                        } else {
+                            val index = comparisonMessages.indexOfFirst { it.id == comparisonStreamingMessageId }
+                            if (index != -1) {
+                                comparisonMessages[index] = comparisonMessages[index].copy(
+                                    text = compareResult.answer,
+                                    paramsInfo = compareResult.paramsInfo,
+                                    sources = compareResult.sources,
+                                    retrievalInfo = compareResult.retrievalInfo
+                                )
+                            }
+                        }
                     }
                 }
                 isLoading = false
