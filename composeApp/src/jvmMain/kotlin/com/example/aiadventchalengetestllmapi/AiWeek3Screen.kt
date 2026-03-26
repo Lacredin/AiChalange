@@ -1,4 +1,4 @@
-п»їpackage com.example.aiadventchalengetestllmapi.aiweek3
+package com.example.aiadventchalengetestllmapi.aiweek3
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -129,7 +129,7 @@ private enum class AiAgentApi(
         )
     ),
     LocalLlm(
-        label = "Р›РѕРєР°Р»СЊРЅР°СЏ LLM",
+        label = "Локальная LLM",
         envVar = "LOCAL_LLM_API_KEY",
         defaultModel = "llama3.1:8b",
         supportedModels = listOf("llama3.1:8b", "gemma2:2b", "qwen2.5:7b"),
@@ -209,16 +209,16 @@ private fun aiAgentTakeLastMessages(messages: List<AiAgentMessage>, lastN: Int):
 }
 
 private const val aiAgentStickyFactsExtractorPrompt = """
-РўС‹ РІС‹РґРµР»СЏРµС€СЊ С‚РѕР»СЊРєРѕ СѓСЃС‚РѕР№С‡РёРІС‹Рµ РІР°Р¶РЅС‹Рµ С„Р°РєС‚С‹ РёР· Р±РµСЃРµРґС‹.
-Р’РµСЂРЅРё РѕС‚РІРµС‚ СЃС‚СЂРѕРіРѕ РІ С„РѕСЂРјР°С‚Рµ "РєР»СЋС‡: Р·РЅР°С‡РµРЅРёРµ", РїРѕ РѕРґРЅРѕР№ РїР°СЂРµ РЅР° СЃС‚СЂРѕРєСѓ, Р±РµР· markdown Рё РїРѕСЏСЃРЅРµРЅРёР№.
-Р’РєР»СЋС‡Р°Р№ С‚РѕР»СЊРєРѕ РїРѕРґС‚РІРµСЂР¶РґРµРЅРЅС‹Рµ С„Р°РєС‚С‹ РёР· РєРѕРЅС‚РµРєСЃС‚Р°.
-РџСЂРёРѕСЂРёС‚РµС‚ РєР»СЋС‡РµР№: С†РµР»СЊ, РѕРіСЂР°РЅРёС‡РµРЅРёСЏ, РїСЂРµРґРїРѕС‡С‚РµРЅРёСЏ, СЂРµС€РµРЅРёСЏ, РґРѕРіРѕРІРѕСЂРµРЅРЅРѕСЃС‚Рё.
-Р•СЃР»Рё РґР°РЅРЅС‹С… РЅРµС‚, РІРµСЂРЅРё РїСѓСЃС‚СѓСЋ СЃС‚СЂРѕРєСѓ.
+Ты выделяешь только устойчивые важные факты из беседы.
+Верни ответ строго в формате "ключ: значение", по одной паре на строку, без markdown и пояснений.
+Включай только подтвержденные факты из контекста.
+Приоритет ключей: цель, ограничения, предпочтения, решения, договоренности.
+Если данных нет, верни пустую строку.
 """
 
 private fun aiAgentNormalizeFactsText(text: String): String =
     text.lineSequence()
-        .map { it.trim().trimStart('-', '*', 'вЂў') }
+        .map { it.trim().trimStart('-', '*', '•') }
         .filter { it.isNotEmpty() && it.contains(":") }
         .map { line ->
             val key = line.substringBefore(":").trim().lowercase(Locale.getDefault())
@@ -247,9 +247,9 @@ private fun aiAgentFactsSystemMessage(factsText: String): DeepSeekMessage? {
     val normalizedFacts = aiAgentNormalizeFactsText(factsText)
     if (normalizedFacts.isBlank()) return null
     val systemText = buildString {
-        append("Р’Р°Р¶РЅС‹Рµ С„Р°РєС‚С‹ РґРёР°Р»РѕРіР° (РєР»СЋС‡-Р·РЅР°С‡РµРЅРёРµ):\n")
+        append("Важные факты диалога (ключ-значение):\n")
         append(normalizedFacts)
-        append("\nРЎР»РµРґСѓР№ СЌС‚РёРј С„Р°РєС‚Р°Рј РїСЂРё РѕС‚РІРµС‚Рµ, РµСЃР»Рё РѕРЅРё РѕС‚РЅРѕСЃСЏС‚СЃСЏ Рє Р·Р°РїСЂРѕСЃСѓ.")
+        append("\nСледуй этим фактам при ответе, если они относятся к запросу.")
     }
     return DeepSeekMessage(role = "system", content = systemText)
 }
@@ -264,7 +264,7 @@ private fun aiAgentLongTermMemoryMessage(entries: List<LongTermMemoryEntry>): De
     if (entries.isEmpty()) return null
     val content = buildString {
         entries.forEach { e -> appendLine("${e.key}: ${e.value}") }
-        append("\nРЈС‡РёС‚С‹РІР°Р№ СЌС‚Сѓ РёРЅС„РѕСЂРјР°С†РёСЋ РІРѕ РІСЃРµС… РѕС‚РІРµС‚Р°С….")
+        append("\nУчитывай эту информацию во всех ответах.")
     }
     return DeepSeekMessage(role = "system", content = content.trim())
 }
@@ -329,21 +329,21 @@ private fun AiAgentMessage.displayParamsInfo(): String =
         .replace(epochStripRegex, "")
 
 /**
- * РўРµРјР° СЌРєСЂР°РЅР° AiWeek3. РњРµРЅСЏР№С‚Рµ С†РІРµС‚Р° Р·РґРµСЃСЊ, С‡С‚РѕР±С‹ РёР·РјРµРЅРёС‚СЊ РѕС„РѕСЂРјР»РµРЅРёРµ РІСЃРµРіРѕ СЌРєСЂР°РЅР°.
+ * Тема экрана AiWeek3. Меняйте цвета здесь, чтобы изменить оформление всего экрана.
  */
 internal object AiWeek3ScreenTheme {
-    // Sunset Amber вЂ” С‚С‘РїР»Р°СЏ СЏРЅС‚Р°СЂРЅР°СЏ РїР°Р»РёС‚СЂР°
-    val primary = Color(0xFFE65100)            // Deep Orange 900 вЂ” РѕСЃРЅРѕРІРЅРѕР№ Р°РєС†РµРЅС‚
+    // Sunset Amber — тёплая янтарная палитра
+    val primary = Color(0xFFE65100)            // Deep Orange 900 — основной акцент
     val onPrimary = Color(0xFFFFFFFF)
-    val primaryContainer = Color(0xFFFFE0B2)   // Orange 100 вЂ” С„РѕРЅ РїСѓР·С‹СЂСЊРєРѕРІ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ
-    val onPrimaryContainer = Color(0xFF4A1800) // РўС‘РјРЅРѕ-РєРѕСЂРёС‡РЅРµРІС‹Р№ вЂ” С‚РµРєСЃС‚ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ
+    val primaryContainer = Color(0xFFFFE0B2)   // Orange 100 — фон пузырьков пользователя
+    val onPrimaryContainer = Color(0xFF4A1800) // Тёмно-коричневый — текст пользователя
 
     val secondary = Color(0xFFBF360C)          // Deep Orange 800
     val onSecondary = Color(0xFFFFFFFF)
     val secondaryContainer = Color(0xFFFFF3E0) // Orange 50
     val onSecondaryContainer = Color(0xFF3E1000)
 
-    val background = Color(0xFFFFFBF5)         // РљСЂРµРјРѕРІС‹Р№ С‚С‘РїР»С‹Р№ С„РѕРЅ
+    val background = Color(0xFFFFFBF5)         // Кремовый тёплый фон
     val onBackground = Color(0xFF1A0800)
     val surface = Color(0xFFFFFFFF)
     val onSurface = Color(0xFF1A0800)
@@ -351,22 +351,22 @@ internal object AiWeek3ScreenTheme {
     val onSurfaceVariant = Color(0xFF4A1800)
     val outline = Color(0xFFFFCC80)            // Orange 200
 
-    // РџСѓР·С‹СЂСЊРєРё РѕС‚РІРµС‚РѕРІ Р°СЃСЃРёСЃС‚РµРЅС‚Р°
-    val assistantBubble = Color(0xFFFFF8F0)    // РўС‘РїР»С‹Р№ РјРѕР»РѕС‡РЅС‹Р№
-    val onAssistantBubble = Color(0xFF2D0F00)  // Р“Р»СѓР±РѕРєРёР№ С‚С‘РјРЅРѕ-РєРѕСЂРёС‡РЅРµРІС‹Р№
+    // Пузырьки ответов ассистента
+    val assistantBubble = Color(0xFFFFF8F0)    // Тёплый молочный
+    val onAssistantBubble = Color(0xFF2D0F00)  // Глубокий тёмно-коричневый
 
-    // Р‘Р°РЅРЅРµСЂ Sticky Facts
+    // Баннер Sticky Facts
     val stickyFactsBg = Color(0xFFFFF3E0)      // Orange 50
     val stickyFactsBorder = Color(0xFFFFCC80)  // Orange 200
-    val stickyFactsTitle = Color(0xFF6D2B00)   // РўС‘РјРЅС‹Р№ СЏРЅС‚Р°СЂСЊ вЂ” Р·Р°РіРѕР»РѕРІРѕРє
-    val stickyFactsText = Color(0xFF1A0800)    // РџРѕС‡С‚Рё С‡С‘СЂРЅС‹Р№ СЃ С‚С‘РїР»С‹Рј РѕС‚С‚РµРЅРєРѕРј
+    val stickyFactsTitle = Color(0xFF6D2B00)   // Тёмный янтарь — заголовок
+    val stickyFactsText = Color(0xFF1A0800)    // Почти чёрный с тёплым оттенком
 
-    // Р Р°Р·РґРµР»РёС‚РµР»СЊРЅС‹Рµ Р»РёРЅРёРё РјРµР¶РґСѓ РїР°РЅРµР»СЏРјРё
+    // Разделительные линии между панелями
     val divider = Color(0xFFFFE0B2)            // Orange 100
 
     // TopAppBar
-    val topBarContainer = Color(0xFFFFF3E0)    // Orange 50 вЂ” СЃРІРµС‚Р»Р°СЏ СЏРЅС‚Р°СЂРЅР°СЏ С€Р°РїРєР°
-    val topBarContent = Color(0xFF6D2B00)      // РўС‘РјРЅС‹Р№ СЏРЅС‚Р°СЂСЊ вЂ” С‚РµРєСЃС‚/РёРєРѕРЅРєРё
+    val topBarContainer = Color(0xFFFFF3E0)    // Orange 50 — светлая янтарная шапка
+    val topBarContent = Color(0xFF6D2B00)      // Тёмный янтарь — текст/иконки
 
     fun colorScheme() = lightColorScheme(
         primary = primary,
@@ -462,7 +462,7 @@ private fun AiWeek3Chat(
     var showRawHistory by remember { mutableStateOf(false) }
     var realEpoch by remember { mutableIntStateOf(0) }
 
-    // Tier 3: Р”РѕР»РіРѕРІСЂРµРјРµРЅРЅР°СЏ РїР°РјСЏС‚СЊ
+    // Tier 3: Долговременная память
     val longTermMemory = remember { mutableStateListOf<LongTermMemoryEntry>() }
     var isLongTermMemoryEnabled by remember { mutableStateOf(true) }
     var isMemoryPanelExpanded by remember { mutableStateOf(true) }
@@ -550,7 +550,7 @@ private fun AiWeek3Chat(
     fun ensureDefaultProfileExists() {
         if (profiles.isNotEmpty()) return
         queries.insertProfile(
-            name = "РџСЂРѕС„РёР»СЊ 1",
+            name = "Профиль 1",
             is_long_term_memory_enabled = 1,
             is_system_prompt_enabled = 0,
             system_prompt_text = "",
@@ -570,7 +570,7 @@ private fun AiWeek3Chat(
     fun nextAutoProfileName(): String {
         var number = 1
         while (true) {
-            val candidate = "РџСЂРѕС„РёР»СЊ $number"
+            val candidate = "Профиль $number"
             if (profiles.none { it.name.equals(candidate, ignoreCase = true) }) {
                 return candidate
             }
@@ -927,7 +927,7 @@ private fun AiWeek3Chat(
     }
 
     fun createNewChatAndOpen() {
-        val title = "Р§Р°С‚ ${chats.size + 1}"
+        val title = "Чат ${chats.size + 1}"
         val profileIdForChat = selectedProfileId ?: profiles.firstOrNull()?.id
         queries.insertChat(
             title = title,
@@ -1062,7 +1062,7 @@ private fun AiWeek3Chat(
         val history = historyForContext().filter { it.isApiHistoryMessage() }
         val baseSystemPrompt = if (isSystemPromptEnabled) systemPromptText else ""
 
-        // РћР±СЉРµРґРёРЅСЏРµС‚ СЃРёСЃС‚РµРјРЅС‹Р№ РїСЂРѕРјС‚ + sticky facts (СЂР°Р±РѕС‡Р°СЏ РїР°РјСЏС‚СЊ) + РѕРїС†РёРѕРЅР°Р»СЊРЅС‹Р№ РґРѕРї. РєРѕРЅС‚РµРЅС‚
+        // Объединяет системный промт + sticky facts (рабочая память) + опциональный доп. контент
         fun buildSystemMessage(extraContent: String = ""): DeepSeekMessage? {
             val longTermMemory =  if (isLongTermMemoryEnabled) {
                 aiAgentLongTermMemoryMessage(longTermMemory)?.content.orEmpty()
@@ -1101,12 +1101,12 @@ private fun AiWeek3Chat(
                 }
             }
             else -> {
-                // РЎСѓРјРјР°СЂРёР·Р°С†РёСЏ вЂ” СЂР°Р±РѕС‡Р°СЏ РїР°РјСЏС‚СЊ: СЂРµР·СѓР»СЊС‚Р°С‚ РёРґС‘С‚ РІ СЃРёСЃС‚РµРјРЅС‹Р№ РїСЂРѕРјС‚
+                // Суммаризация — рабочая память: результат идёт в системный промт
                 val summaryText = if (realEpoch > 0 && !isBranchingEnabled) {
                     history.firstOrNull { !it.isUser }?.text.orEmpty()
                 } else ""
                 val summaryExtra = if (summaryText.isNotEmpty()) {
-                    "РљСЂР°С‚РєРѕРµ СЃРѕРґРµСЂР¶Р°РЅРёРµ РїСЂРµРґС‹РґСѓС‰РµРіРѕ РґРёР°Р»РѕРіР°:\n$summaryText"
+                    "Краткое содержание предыдущего диалога:\n$summaryText"
                 } else ""
                 buildList {
 //                    if (isLongTermMemoryEnabled) {
@@ -1228,6 +1228,60 @@ private fun AiWeek3Chat(
             val requestChatId = currentChatId
             isLoading = true
             val startedAtNanos = System.nanoTime()
+            val assistantCreatedAt = System.currentTimeMillis()
+            val streamingParamsRaw = aiAgentApplyStream("$paramsInfoPrefix | response_time=streaming", AiAgentStream.Raw, 0)
+            val streamingRawIndex = rawMessages.size
+            rawMessages += AiAgentMessage(
+                text = "",
+                isUser = false,
+                paramsInfo = streamingParamsRaw,
+                stream = AiAgentStream.Raw,
+                epoch = 0,
+                createdAt = assistantCreatedAt
+            )
+            val streamingRealIndex = if (realEpoch > 0) {
+                val params = aiAgentApplyStream("$paramsInfoPrefix | response_time=streaming", AiAgentStream.Real, realEpoch)
+                val index = realMessages.size
+                realMessages += AiAgentMessage(
+                    text = "",
+                    isUser = false,
+                    paramsInfo = params,
+                    stream = AiAgentStream.Real,
+                    epoch = realEpoch,
+                    createdAt = assistantCreatedAt
+                )
+                index
+            } else null
+            val branchStreamingIndex = if (activeBranch != null) {
+                val index = activeBranch.size
+                activeBranch += AiAgentMessage(
+                    text = "",
+                    isUser = false,
+                    paramsInfo = aiAgentApplyStream("$paramsInfoPrefix | response_time=streaming", AiAgentStream.Real, realEpoch),
+                    stream = AiAgentStream.Real,
+                    epoch = realEpoch,
+                    createdAt = assistantCreatedAt
+                )
+                index
+            } else null
+
+            fun appendDelta(delta: String) {
+                if (delta.isEmpty()) return
+                if (requestSessionId != chatSessionId || requestChatId != activeChatId) return
+                rawMessages.getOrNull(streamingRawIndex)?.let { current ->
+                    rawMessages[streamingRawIndex] = current.copy(text = current.text + delta)
+                }
+                streamingRealIndex?.let { index ->
+                    realMessages.getOrNull(index)?.let { current ->
+                        realMessages[index] = current.copy(text = current.text + delta)
+                    }
+                }
+                branchStreamingIndex?.let { index ->
+                    activeBranch?.getOrNull(index)?.let { current ->
+                        activeBranch[index] = current.copy(text = current.text + delta)
+                    }
+                }
+            }
             val completionResult = try {
                 val apiKey = aiAgentReadApiKey(requestApi.envVar)
                 if (requestApi.requiresApiKey && apiKey.isBlank()) {
@@ -1240,11 +1294,11 @@ private fun AiWeek3Chat(
                 )
 
                 val response = when (requestApi) {
-                    AiAgentApi.DeepSeek -> deepSeekApi.createChatCompletion(apiKey = apiKey, request = request)
-                    AiAgentApi.OpenAI -> openAiApi.createChatCompletion(apiKey = apiKey, request = request)
-                    AiAgentApi.GigaChat -> gigaChatApi.createChatCompletion(accessToken = apiKey, request = request)
-                    AiAgentApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletion(apiKey = apiKey, request = request)
-                    AiAgentApi.LocalLlm -> localLlmApi.createChatCompletion(request = request)
+                    AiAgentApi.DeepSeek -> deepSeekApi.createChatCompletionStreaming(apiKey = apiKey, request = request, onChunk = ::appendDelta)
+                    AiAgentApi.OpenAI -> openAiApi.createChatCompletionStreaming(apiKey = apiKey, request = request, onChunk = ::appendDelta)
+                    AiAgentApi.GigaChat -> gigaChatApi.createChatCompletionStreaming(accessToken = apiKey, request = request, onChunk = ::appendDelta)
+                    AiAgentApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletionStreaming(apiKey = apiKey, request = request, onChunk = ::appendDelta)
+                    AiAgentApi.LocalLlm -> localLlmApi.createChatCompletionStreaming(request = request, onChunk = ::appendDelta)
                 }
 
                 val answerText = response.choices.firstOrNull()?.message?.content?.trim().orEmpty()
@@ -1282,29 +1336,34 @@ private fun AiWeek3Chat(
                 totalTokens?.let { append(" | tokens=$it") }
             }
             val assistantParamsInfo = "$paramsInfoPrefix | response_time=${responseTimeSec.aiAgentFormatSeconds()}$tokenInfoSuffix"
-            val assistantCreatedAt = System.currentTimeMillis()
-            appendMessageToStream(
-                chatId = requestChatId,
-                stream = AiAgentStream.Raw,
-                epoch = 0,
-                text = completionResult.answer,
-                isUser = false,
-                paramsInfoBase = assistantParamsInfo,
-                apiLabel = requestApi.label,
+            val rawParamsInfo = aiAgentApplyStream(assistantParamsInfo, AiAgentStream.Raw, 0)
+            rawMessages.getOrNull(streamingRawIndex)?.let {
+                rawMessages[streamingRawIndex] = it.copy(text = completionResult.answer, paramsInfo = rawParamsInfo)
+            }
+            queries.insertMessage(
+                chat_id = requestChatId,
+                api = requestApi.label,
                 model = model,
-                createdAt = assistantCreatedAt
+                role = "assistant",
+                message = completionResult.answer,
+                params_info = rawParamsInfo,
+                created_at = assistantCreatedAt
             )
             if (realEpoch > 0) {
-                appendMessageToStream(
-                    chatId = requestChatId,
-                    stream = AiAgentStream.Real,
-                    epoch = realEpoch,
-                    text = completionResult.answer,
-                    isUser = false,
-                    paramsInfoBase = assistantParamsInfo,
-                    apiLabel = requestApi.label,
+                val realParamsInfo = aiAgentApplyStream(assistantParamsInfo, AiAgentStream.Real, realEpoch)
+                streamingRealIndex?.let { index ->
+                    realMessages.getOrNull(index)?.let { current ->
+                        realMessages[index] = current.copy(text = completionResult.answer, paramsInfo = realParamsInfo)
+                    }
+                }
+                queries.insertMessage(
+                    chat_id = requestChatId,
+                    api = requestApi.label,
                     model = model,
-                    createdAt = assistantCreatedAt
+                    role = "assistant",
+                    message = completionResult.answer,
+                    params_info = realParamsInfo,
+                    created_at = assistantCreatedAt
                 )
             }
             if (activeBranch != null) {
@@ -1316,7 +1375,11 @@ private fun AiWeek3Chat(
                     epoch = realEpoch,
                     createdAt = assistantCreatedAt
                 )
-                activeBranch += branchMessage
+                branchStreamingIndex?.let { index ->
+                    if (index in activeBranch.indices) {
+                        activeBranch[index] = branchMessage
+                    }
+                }
                 if (activeBranchNumber != null) {
                     appendMessageToBranch(
                         chatId = requestChatId,
@@ -1330,7 +1393,7 @@ private fun AiWeek3Chat(
                 val stickyContextMessages = stickyFactsContextMessages()
                 if (stickyContextMessages.isNotEmpty()) {
                     val stickyTranscript = stickyContextMessages.joinToString("\n") { message ->
-                        val prefix = if (message.isUser) "РџРѕР»СЊР·РѕРІР°С‚РµР»СЊ" else "РђСЃСЃРёСЃС‚РµРЅС‚"
+                        val prefix = if (message.isUser) "Пользователь" else "Ассистент"
                         "$prefix: ${message.text}"
                     }
 
@@ -1343,7 +1406,7 @@ private fun AiWeek3Chat(
                                     role = "user",
                                     content = buildString {
                                         appendLine(aiAgentStickyFactsExtractorPrompt.trimIndent())
-                                        append("РљРѕРЅС‚РµРєСЃС‚ РїРѕСЃР»РµРґРЅРёС… СЃРѕРѕР±С‰РµРЅРёР№:\n")
+                                        append("Контекст последних сообщений:\n")
                                         append(stickyTranscript)
                                     }
                                 )
@@ -1356,11 +1419,11 @@ private fun AiWeek3Chat(
                     if (!requestApi.requiresApiKey || stickyApiKey.isNotBlank()) {
                         val stickyFactsText = runCatching {
                             val stickyResponse = when (requestApi) {
-                                AiAgentApi.DeepSeek -> deepSeekApi.createChatCompletion(apiKey = stickyApiKey, request = stickyRequest)
-                                AiAgentApi.OpenAI -> openAiApi.createChatCompletion(apiKey = stickyApiKey, request = stickyRequest)
-                                AiAgentApi.GigaChat -> gigaChatApi.createChatCompletion(accessToken = stickyApiKey, request = stickyRequest)
-                                AiAgentApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletion(apiKey = stickyApiKey, request = stickyRequest)
-                                AiAgentApi.LocalLlm -> localLlmApi.createChatCompletion(request = stickyRequest)
+                                AiAgentApi.DeepSeek -> deepSeekApi.createChatCompletionStreaming(apiKey = stickyApiKey, request = stickyRequest, onChunk = {})
+                                AiAgentApi.OpenAI -> openAiApi.createChatCompletionStreaming(apiKey = stickyApiKey, request = stickyRequest, onChunk = {})
+                                AiAgentApi.GigaChat -> gigaChatApi.createChatCompletionStreaming(accessToken = stickyApiKey, request = stickyRequest, onChunk = {})
+                                AiAgentApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletionStreaming(apiKey = stickyApiKey, request = stickyRequest, onChunk = {})
+                                AiAgentApi.LocalLlm -> localLlmApi.createChatCompletionStreaming(request = stickyRequest, onChunk = {})
                             }
                             stickyResponse.choices.firstOrNull()?.message?.content.orEmpty()
                         }.getOrNull()
@@ -1394,7 +1457,7 @@ private fun AiWeek3Chat(
                         val transcript = historyForContext()
                             .filter { it.isApiHistoryMessage() }
                             .joinToString("\n") { message ->
-                                val prefix = if (message.isUser) "РџРѕР»СЊР·РѕРІР°С‚РµР»СЊ" else "РђСЃСЃРёСЃС‚РµРЅС‚"
+                                val prefix = if (message.isUser) "Пользователь" else "Ассистент"
                                 "$prefix: ${message.text}"
                             }
 
@@ -1407,24 +1470,24 @@ private fun AiWeek3Chat(
                                 add(
                                     DeepSeekMessage(
                                         role = "system",
-                                        content = "РЎСѓРјРјРёСЂСѓР№ РєРѕРЅС‚РµРєСЃС‚ Р±РµСЃРµРґС‹ РєСЂР°С‚РєРѕ. РЎРѕС…СЂР°РЅРё С„Р°РєС‚С‹, РґРѕРіРѕРІРѕСЂРµРЅРЅРѕСЃС‚Рё Рё РІР°Р¶РЅС‹Рµ РґРµС‚Р°Р»Рё."
+                                        content = "Суммируй контекст беседы кратко. Сохрани факты, договоренности и важные детали."
                                     )
                                 )
                                 add(
                                     DeepSeekMessage(
                                         role = "user",
-                                        content = "РљРѕРЅС‚РµРєСЃС‚:\n$transcript"
+                                        content = "Контекст:\n$transcript"
                                     )
                                 )
                             }
                         )
 
                         val summaryResponse = when (requestApi) {
-                            AiAgentApi.DeepSeek -> deepSeekApi.createChatCompletion(apiKey = apiKey, request = summaryRequest)
-                            AiAgentApi.OpenAI -> openAiApi.createChatCompletion(apiKey = apiKey, request = summaryRequest)
-                            AiAgentApi.GigaChat -> gigaChatApi.createChatCompletion(accessToken = apiKey, request = summaryRequest)
-                            AiAgentApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletion(apiKey = apiKey, request = summaryRequest)
-                            AiAgentApi.LocalLlm -> localLlmApi.createChatCompletion(request = summaryRequest)
+                            AiAgentApi.DeepSeek -> deepSeekApi.createChatCompletionStreaming(apiKey = apiKey, request = summaryRequest, onChunk = {})
+                            AiAgentApi.OpenAI -> openAiApi.createChatCompletionStreaming(apiKey = apiKey, request = summaryRequest, onChunk = {})
+                            AiAgentApi.GigaChat -> gigaChatApi.createChatCompletionStreaming(accessToken = apiKey, request = summaryRequest, onChunk = {})
+                            AiAgentApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletionStreaming(apiKey = apiKey, request = summaryRequest, onChunk = {})
+                            AiAgentApi.LocalLlm -> localLlmApi.createChatCompletionStreaming(request = summaryRequest, onChunk = {})
                         }
 
                         val summaryText = summaryResponse.choices.firstOrNull()?.message?.content?.trim().orEmpty()
@@ -1573,11 +1636,11 @@ private fun AiWeek3Chat(
                             enabled = !isLoading
                         ) {
                             val titleSuffix = if (activeChatTitle.isNotBlank()) {
-                                " | $activeChatTitle ($activeChatTotalTokens С‚РѕРєРµРЅРѕРІ)"
+                                " | $activeChatTitle ($activeChatTotalTokens токенов)"
                             } else {
                                 ""
                             }
-                            Text("Ai РЅРµРґРµР»СЏ 3$titleSuffix")
+                            Text("Ai неделя 3$titleSuffix")
                         }
                         DropdownMenu(
                             expanded = screensMenuExpanded,
@@ -1585,7 +1648,7 @@ private fun AiWeek3Chat(
                         ) {
                             DropdownMenuItem(
                                 text = {
-                                    Text(if (currentScreen == RootScreen.AiAgentRAG) "AiAgentRAG вњ“" else "AiAgentRAG")
+                                    Text(if (currentScreen == RootScreen.AiAgentRAG) "AiAgentRAG ?" else "AiAgentRAG")
                                 },
                                 onClick = {
                                     screensMenuExpanded = false
@@ -1595,7 +1658,7 @@ private fun AiWeek3Chat(
                             DropdownMenuItem(
                                 text = {
                                     Text(
-                                        if (currentScreen == RootScreen.EmbedingGeneration) "EmbedingGeneration вњ“" else "EmbedingGeneration"
+                                        if (currentScreen == RootScreen.EmbedingGeneration) "EmbedingGeneration ?" else "EmbedingGeneration"
                                     )
                                 },
                                 onClick = {
@@ -1606,7 +1669,7 @@ private fun AiWeek3Chat(
                             DropdownMenuItem(
                                 text = {
                                     Text(
-                                        if (currentScreen == RootScreen.AiAgentMain) "AiAgentMain вњ“" else "AiAgentMain"
+                                        if (currentScreen == RootScreen.AiAgentMain) "AiAgentMain ?" else "AiAgentMain"
                                     )
                                 },
                                 onClick = {
@@ -1639,7 +1702,7 @@ private fun AiWeek3Chat(
                             DropdownMenuItem(
                                 text = {
                                     Text(
-                                        if (currentScreen == RootScreen.AiWeek3) "Ai РЅРµРґРµР»СЏ 3 ?" else "Ai РЅРµРґРµР»СЏ 3"
+                                        if (currentScreen == RootScreen.AiWeek3) "Ai неделя 3 ?" else "Ai неделя 3"
                                     )
                                 },
                                 onClick = {
@@ -1678,7 +1741,7 @@ private fun AiWeek3Chat(
                             onClick = { showRawHistory = !showRawHistory },
                             enabled = !isLoading
                         ) {
-                            Text(if (showRawHistory) "РџРѕРєР°Р·Р°С‚СЊ СЃР¶Р°С‚С‹Р№" else "РџРѕРєР°Р·Р°С‚СЊ РїРѕР»РЅС‹Р№")
+                            Text(if (showRawHistory) "Показать сжатый" else "Показать полный")
                         }
                     }
                     IconButton(
@@ -1688,7 +1751,7 @@ private fun AiWeek3Chat(
                         Text(text = if (isFeaturesPanelVisible) "?" else "\u2610")
                     }
                     TextButton(onClick = ::createNewChatAndOpen, enabled = !isLoading) {
-                        Text("РќРѕРІС‹Р№ С‡Р°С‚")
+                        Text("Новый чат")
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -1719,7 +1782,7 @@ private fun AiWeek3Chat(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = "Р§Р°С‚С‹",
+                        text = "Чаты",
                         style = MaterialTheme.typography.titleSmall
                     )
                     Box(modifier = Modifier.weight(1f))
@@ -1727,7 +1790,7 @@ private fun AiWeek3Chat(
                         onClick = ::deleteAllChats,
                         enabled = chats.isNotEmpty() && !isLoading
                     ) {
-                        Text("РЈРґР°Р»РёС‚СЊ РІСЃС‘")
+                        Text("Удалить всё")
                     }
                 }
                 LazyColumn(
@@ -1891,7 +1954,7 @@ private fun AiWeek3Chat(
                                                 modifier = Modifier.weight(1f)
                                             ) {
                                                 Text(
-                                                    text = "РІРµС‚РєР° (${branch.number})",
+                                                    text = "ветка (${branch.number})",
                                                     color = if (isActiveBranch) {
                                                         MaterialTheme.colorScheme.onPrimaryContainer
                                                     } else {
@@ -1955,7 +2018,7 @@ private fun AiWeek3Chat(
                             .height(52.dp),
                         readOnly = true,
                         enabled = !isLoading && activeChatId != null && profiles.isNotEmpty(),
-                        placeholder = { Text("РџСЂРѕС„РёР»СЊ", style = MaterialTheme.typography.labelSmall) },
+                        placeholder = { Text("Профиль", style = MaterialTheme.typography.labelSmall) },
                         trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = profileSelectorExpanded) },
                         singleLine = true,
                         textStyle = MaterialTheme.typography.labelSmall
@@ -1982,7 +2045,7 @@ private fun AiWeek3Chat(
                     },
                     enabled = !isLoading && selectedProfileId != null
                 ) {
-                    Text("Р РµРґР°РєС‚РёСЂРѕРІР°С‚СЊ")
+                    Text("Редактировать")
                 }
                 Button(
                     onClick = {
@@ -1991,7 +2054,7 @@ private fun AiWeek3Chat(
                     },
                     enabled = !isLoading && activeChatId != null
                 ) {
-                    Text("РЎРѕР·РґР°С‚СЊ")
+                    Text("Создать")
                 }
             }
 
@@ -2006,7 +2069,7 @@ private fun AiWeek3Chat(
                         modifier = Modifier.weight(1f).height(52.dp),
                         enabled = !isLoading && selectedProfileId != null,
                         singleLine = true,
-                        label = { Text("РРјСЏ РїСЂРѕС„РёР»СЏ") },
+                        label = { Text("Имя профиля") },
                         isError = selectedProfileNameInput.trim().isNotEmpty() && profileNameExists,
                         textStyle = MaterialTheme.typography.labelSmall
                     )
@@ -2017,13 +2080,13 @@ private fun AiWeek3Chat(
                             selectedProfileNameInput.trim().isNotEmpty() &&
                             !profileNameExists
                     ) {
-                        Text("РЎРѕС…СЂР°РЅРёС‚СЊ")
+                        Text("Сохранить")
                     }
                     TextButton(
                         onClick = { isProfileRenameMode = false },
                         enabled = !isLoading
                     ) {
-                        Text("РћС‚РјРµРЅР°")
+                        Text("Отмена")
                     }
                 }
             }
@@ -2039,8 +2102,8 @@ private fun AiWeek3Chat(
                         modifier = Modifier.weight(1f).height(52.dp),
                         enabled = !isLoading && activeChatId != null,
                         singleLine = true,
-                        label = { Text("РќРѕРІС‹Р№ РїСЂРѕС„РёР»СЊ") },
-                        placeholder = { Text("РџСѓСЃС‚Рѕ = Р°РІС‚РѕРёРјСЏ", style = MaterialTheme.typography.labelSmall) },
+                        label = { Text("Новый профиль") },
+                        placeholder = { Text("Пусто = автоимя", style = MaterialTheme.typography.labelSmall) },
                         isError = newProfileNameInput.trim().isNotEmpty() && newProfileNameExists,
                         textStyle = MaterialTheme.typography.labelSmall
                     )
@@ -2048,7 +2111,7 @@ private fun AiWeek3Chat(
                         onClick = ::createProfile,
                         enabled = !isLoading && activeChatId != null && !newProfileNameExists
                     ) {
-                        Text("РЎРѕР·РґР°С‚СЊ РїСЂРѕС„РёР»СЊ")
+                        Text("Создать профиль")
                     }
                     TextButton(
                         onClick = {
@@ -2057,7 +2120,7 @@ private fun AiWeek3Chat(
                         },
                         enabled = !isLoading
                     ) {
-                        Text("РћС‚РјРµРЅР°")
+                        Text("Отмена")
                     }
                 }
             }
@@ -2146,7 +2209,7 @@ private fun AiWeek3Chat(
                     onClick = ::createBranchForActiveChat,
                     enabled = !isLoading && activeChatId != null && isBranchingEnabled
                 ) {
-                    Text("+ РІРµС‚РєР°")
+                    Text("+ ветка")
                 }
             }
 
@@ -2163,21 +2226,21 @@ private fun AiWeek3Chat(
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Text(
-                            text = "РљСЂР°С‚РєРѕСЃСЂРѕС‡РЅР°СЏ: ${currentHistoryMessages().size} СЃРѕРѕР±С‰.",
+                            text = "Краткосрочная: ${currentHistoryMessages().size} сообщ.",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
                         )
                         Text("|", style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f))
                         val workingMemoryLabel = when {
-                            isStickyFactsEnabled && stickyFacts.isNotEmpty() -> "${stickyFacts.size} С„Р°РєС‚РѕРІ"
-                            isSummarizationEnabled && realEpoch > 0 -> "СЃРІРѕРґРєР°"
-                            else -> "вЂ”"
+                            isStickyFactsEnabled && stickyFacts.isNotEmpty() -> "${stickyFacts.size} фактов"
+                            isSummarizationEnabled && realEpoch > 0 -> "сводка"
+                            else -> "—"
                         }
                         val isWorkingMemoryActive = (isStickyFactsEnabled && stickyFacts.isNotEmpty()) ||
                             (isSummarizationEnabled && realEpoch > 0)
                         Text(
-                            text = "Р Р°Р±РѕС‡Р°СЏ: $workingMemoryLabel",
+                            text = "Рабочая: $workingMemoryLabel",
                             style = MaterialTheme.typography.labelSmall,
                             color = if (isWorkingMemoryActive) MaterialTheme.colorScheme.primary
                                     else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
@@ -2185,7 +2248,7 @@ private fun AiWeek3Chat(
                         Text("|", style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f))
                         Text(
-                            text = "Р”РѕР»РіРѕРІСЂРµРјРµРЅРЅР°СЏ: ${longTermMemory.size} Р·Р°Рї.",
+                            text = "Долговременная: ${longTermMemory.size} зап.",
                             style = MaterialTheme.typography.labelSmall,
                             color = if (longTermMemory.isNotEmpty() && isLongTermMemoryEnabled)
                                         MaterialTheme.colorScheme.primary
@@ -2257,7 +2320,7 @@ private fun AiWeek3Chat(
                     onClick = ::sendMessage,
                     enabled = inputText.text.isNotBlank() && !isLoading
                 ) {
-                    Text("РћС‚РїСЂР°РІРёС‚СЊ")
+                    Text("Отправить")
                 }
             }
         }
@@ -2279,7 +2342,7 @@ private fun AiWeek3Chat(
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 Text(
-                    text = "Р”РѕРї. С„СѓРЅРєС†РёРё",
+                    text = "Доп. функции",
                     style = MaterialTheme.typography.titleSmall
                 )
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -2291,16 +2354,16 @@ private fun AiWeek3Chat(
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Text(
-                            text = "Р”РѕР»РіРѕРІСЂРµРјРµРЅРЅР°СЏ РїР°РјСЏС‚СЊ",
+                            text = "Долговременная память",
                             style = MaterialTheme.typography.labelMedium,
                             modifier = Modifier.weight(1f)
                         )
-                        Text(if (isMemoryPanelExpanded) "в–ѕ" else "в–ё", style = MaterialTheme.typography.labelSmall)
+                        Text(if (isMemoryPanelExpanded) "?" else "?", style = MaterialTheme.typography.labelSmall)
                     }
                     if (isMemoryPanelExpanded) {
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             Checkbox(checked = isLongTermMemoryEnabled, onCheckedChange = { isLongTermMemoryEnabled = it }, enabled = !isLoading)
-                            Text(if (isLongTermMemoryEnabled) "Р’РєР» (РёРЅР¶РµРєС‚ РІ Р·Р°РїСЂРѕСЃ)" else "Р’С‹РєР»", style = MaterialTheme.typography.labelSmall)
+                            Text(if (isLongTermMemoryEnabled) "Вкл (инжект в запрос)" else "Выкл", style = MaterialTheme.typography.labelSmall)
                         }
                         longTermMemory.forEach { entry ->
                             Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -2308,16 +2371,16 @@ private fun AiWeek3Chat(
                                     Text(entry.key, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
                                     Text(entry.value, style = MaterialTheme.typography.labelSmall)
                                 }
-                                TextButton(onClick = { memoryEditingId = entry.id; memoryKeyInput = entry.key; memoryValueInput = entry.value; isMemoryFormVisible = true }, enabled = !isLoading) { Text("вњЋ") }
+                                TextButton(onClick = { memoryEditingId = entry.id; memoryKeyInput = entry.key; memoryValueInput = entry.value; isMemoryFormVisible = true }, enabled = !isLoading) { Text("?") }
                                 TextButton(onClick = { scope.launch { deleteLongTermEntry(entry.id) } }, enabled = !isLoading) { Text("X") }
                             }
                         }
                         if (longTermMemory.isEmpty()) {
-                            Text("Р—Р°РїРёСЃРµР№ РЅРµС‚", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+                            Text("Записей нет", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
                         }
                         Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                             TextButton(onClick = { memoryEditingId = null; memoryKeyInput = ""; memoryValueInput = ""; isMemoryFormVisible = !isMemoryFormVisible }, enabled = !isLoading) {
-                                Text(if (isMemoryFormVisible && memoryEditingId == null) "РћС‚РјРµРЅР°" else "+ Р”РѕР±Р°РІРёС‚СЊ")
+                                Text(if (isMemoryFormVisible && memoryEditingId == null) "Отмена" else "+ Добавить")
                             }
                             TextButton(onClick = {
                                 scope.launch {
@@ -2328,18 +2391,18 @@ private fun AiWeek3Chat(
                                     longTermMemory.clear()
                                 }
                             }, enabled = longTermMemory.isNotEmpty() && !isLoading) {
-                                Text("РћС‡РёСЃС‚РёС‚СЊ")
+                                Text("Очистить")
                             }
                         }
                         if (isMemoryFormVisible) {
                             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                 OutlinedTextField(value = memoryKeyInput, onValueChange = { memoryKeyInput = it },
                                     modifier = Modifier.fillMaxWidth().height(52.dp), enabled = !isLoading,
-                                    placeholder = { Text("РљР»СЋС‡ (РёРјСЏ, СЃС‚РµРє, С†РµР»СЊ...)", style = MaterialTheme.typography.labelSmall) },
+                                    placeholder = { Text("Ключ (имя, стек, цель...)", style = MaterialTheme.typography.labelSmall) },
                                     singleLine = true, textStyle = MaterialTheme.typography.labelSmall)
                                 OutlinedTextField(value = memoryValueInput, onValueChange = { memoryValueInput = it },
                                     modifier = Modifier.fillMaxWidth().height(80.dp), enabled = !isLoading,
-                                    placeholder = { Text("Р—РЅР°С‡РµРЅРёРµ", style = MaterialTheme.typography.labelSmall) },
+                                    placeholder = { Text("Значение", style = MaterialTheme.typography.labelSmall) },
                                     textStyle = MaterialTheme.typography.labelSmall, maxLines = 3)
                                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                                     Button(
@@ -2355,8 +2418,8 @@ private fun AiWeek3Chat(
                                             }
                                         },
                                         enabled = memoryKeyInput.isNotBlank() && memoryValueInput.isNotBlank() && !isLoading
-                                    ) { Text(if (memoryEditingId != null) "РЎРѕС…СЂР°РЅРёС‚СЊ" else "Р”РѕР±Р°РІРёС‚СЊ") }
-                                    TextButton(onClick = { isMemoryFormVisible = false; memoryEditingId = null; memoryKeyInput = ""; memoryValueInput = "" }, enabled = !isLoading) { Text("РћС‚РјРµРЅР°") }
+                                    ) { Text(if (memoryEditingId != null) "Сохранить" else "Добавить") }
+                                    TextButton(onClick = { isMemoryFormVisible = false; memoryEditingId = null; memoryKeyInput = ""; memoryValueInput = "" }, enabled = !isLoading) { Text("Отмена") }
                                 }
                             }
                         }
@@ -2364,7 +2427,7 @@ private fun AiWeek3Chat(
                 }
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(
-                        text = "РЎРёСЃС‚РµРјРЅС‹Р№ РїСЂРѕРјС‚ (РєСЂР°С‚РєРѕСЃСЂРѕС‡РЅР°СЏ)",
+                        text = "Системный промт (краткосрочная)",
                         style = MaterialTheme.typography.labelMedium
                     )
                     Row(
@@ -2378,7 +2441,7 @@ private fun AiWeek3Chat(
                             enabled = !isLoading
                         )
                         Text(
-                            text = if (isSystemPromptEnabled) "Р’РєР»" else "Р’С‹РєР»",
+                            text = if (isSystemPromptEnabled) "Вкл" else "Выкл",
                             style = MaterialTheme.typography.labelSmall
                         )
                     }
@@ -2389,13 +2452,13 @@ private fun AiWeek3Chat(
                             .fillMaxWidth()
                             .height(96.dp),
                         enabled = !isLoading,
-                        placeholder = { Text("Р’РІРµРґРёС‚Рµ СЃРёСЃС‚РµРјРЅС‹Р№ РїСЂРѕРјС‚", style = MaterialTheme.typography.labelSmall) },
+                        placeholder = { Text("Введите системный промт", style = MaterialTheme.typography.labelSmall) },
                         textStyle = MaterialTheme.typography.labelSmall
                     )
                 }
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(
-                        text = "Р Р°Р±РѕС‡Р°СЏ РїР°РјСЏС‚СЊ вЂ” РЎСѓРјРјР°СЂРёР·Р°С†РёСЏ",
+                        text = "Рабочая память — Суммаризация",
                         style = MaterialTheme.typography.labelMedium
                     )
                     Row(
@@ -2427,7 +2490,7 @@ private fun AiWeek3Chat(
                 }
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(
-                        text = "Sliding Window (РїРѕСЃР»РµРґРЅРёРµ N)",
+                        text = "Sliding Window (последние N)",
                         style = MaterialTheme.typography.labelMedium
                     )
                     Row(
@@ -2459,7 +2522,7 @@ private fun AiWeek3Chat(
                 }
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(
-                        text = "Р Р°Р±РѕС‡Р°СЏ РїР°РјСЏС‚СЊ вЂ” Sticky Facts",
+                        text = "Рабочая память — Sticky Facts",
                         style = MaterialTheme.typography.labelMedium
                     )
                     Row(
@@ -2495,7 +2558,7 @@ private fun AiWeek3Chat(
                         },
                         enabled = stickyFactsSystemMessage.isNotBlank() && !isLoading
                     ) {
-                        Text("РћС‡РёСЃС‚РёС‚СЊ facts")
+                        Text("Очистить facts")
                     }
                     if (stickyFacts.isNotEmpty()) {
                         Text(
@@ -2506,7 +2569,7 @@ private fun AiWeek3Chat(
                 }
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(
-                        text = "Branching (РІРµС‚РєРё РґРёР°Р»РѕРіР°)",
+                        text = "Branching (ветки диалога)",
                         style = MaterialTheme.typography.labelMedium
                     )
                     Row(
@@ -2545,7 +2608,7 @@ private fun AiAgentStickyFactsBanner(systemFacts: String) {
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text(
-                text = "Р Р°Р±РѕС‡Р°СЏ РїР°РјСЏС‚СЊ вЂў Sticky Facts",
+                text = "Рабочая память • Sticky Facts",
                 style = MaterialTheme.typography.labelSmall,
                 color = AiWeek3ScreenTheme.stickyFactsTitle
             )
@@ -2609,7 +2672,7 @@ private fun AiAgentBubble(
                         onClick = { onSaveToMemory(message.text) },
                         modifier = Modifier.align(Alignment.End)
                     ) {
-                        Text("РЎРѕС…СЂР°РЅРёС‚СЊ РІ РїР°РјСЏС‚СЊ", style = MaterialTheme.typography.labelSmall,
+                        Text("Сохранить в память", style = MaterialTheme.typography.labelSmall,
                             color = assistantTextColor.copy(alpha = 0.7f))
                     }
                 }
@@ -2617,5 +2680,6 @@ private fun AiAgentBubble(
         }
     }
 }
+
 
 

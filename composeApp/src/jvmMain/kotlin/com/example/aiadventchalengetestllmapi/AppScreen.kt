@@ -190,6 +190,12 @@ fun App(onBackClick: () -> Unit = {}) {
                 isUser = true,
                 paramsInfo = "$paramsInfo | response_time=pending"
             )
+            val assistantMessageIndex = messages.size
+            messages += AppMessage(
+                text = "",
+                isUser = false,
+                paramsInfo = "$paramsInfo | response_time=streaming"
+            )
 
             scope.launch {
                 isLoading = true
@@ -221,11 +227,26 @@ fun App(onBackClick: () -> Unit = {}) {
                         stop = stop
                     )
                     val response = when (selectedApi) {
-                        AppApi.DeepSeek -> deepSeekApi.createChatCompletion(apiKey = apiKey, request = request)
-                        AppApi.OpenAI -> openAiApi.createChatCompletion(apiKey = apiKey, request = request)
-                        AppApi.GigaChat -> gigaChatApi.createChatCompletion(accessToken = apiKey, request = request)
-                        AppApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletion(apiKey = apiKey, request = request)
-                        AppApi.LocalLlm -> localLlmApi.createChatCompletion(request = request)
+                        AppApi.DeepSeek -> deepSeekApi.createChatCompletionStreaming(apiKey = apiKey, request = request) { delta ->
+                            val current = messages.getOrNull(assistantMessageIndex) ?: return@createChatCompletionStreaming
+                            messages[assistantMessageIndex] = current.copy(text = current.text + delta)
+                        }
+                        AppApi.OpenAI -> openAiApi.createChatCompletionStreaming(apiKey = apiKey, request = request) { delta ->
+                            val current = messages.getOrNull(assistantMessageIndex) ?: return@createChatCompletionStreaming
+                            messages[assistantMessageIndex] = current.copy(text = current.text + delta)
+                        }
+                        AppApi.GigaChat -> gigaChatApi.createChatCompletionStreaming(accessToken = apiKey, request = request) { delta ->
+                            val current = messages.getOrNull(assistantMessageIndex) ?: return@createChatCompletionStreaming
+                            messages[assistantMessageIndex] = current.copy(text = current.text + delta)
+                        }
+                        AppApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletionStreaming(apiKey = apiKey, request = request) { delta ->
+                            val current = messages.getOrNull(assistantMessageIndex) ?: return@createChatCompletionStreaming
+                            messages[assistantMessageIndex] = current.copy(text = current.text + delta)
+                        }
+                        AppApi.LocalLlm -> localLlmApi.createChatCompletionStreaming(request = request) { delta ->
+                            val current = messages.getOrNull(assistantMessageIndex) ?: return@createChatCompletionStreaming
+                            messages[assistantMessageIndex] = current.copy(text = current.text + delta)
+                        }
                     }
                     response.choices.firstOrNull()?.message?.content?.trim()
                         .orEmpty()
@@ -235,7 +256,7 @@ fun App(onBackClick: () -> Unit = {}) {
                 }
 
                 val responseTimeSec = (System.nanoTime() - startedAtNanos) / 1_000_000_000.0
-                messages += AppMessage(
+                messages[assistantMessageIndex] = AppMessage(
                     text = answer,
                     isUser = false,
                     paramsInfo = "$paramsInfo | response_time=${responseTimeSec.appFormatSeconds()}"

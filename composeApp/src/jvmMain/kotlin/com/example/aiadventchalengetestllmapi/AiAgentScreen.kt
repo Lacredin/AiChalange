@@ -1,4 +1,4 @@
-п»їpackage com.example.aiadventchalengetestllmapi
+package com.example.aiadventchalengetestllmapi
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -123,7 +123,7 @@ private enum class AiAgentApi(
         )
     ),
     LocalLlm(
-        label = "Р›РѕРєР°Р»СЊРЅР°СЏ LLM",
+        label = "Локальная LLM",
         envVar = "LOCAL_LLM_API_KEY",
         defaultModel = "llama3.1:8b",
         supportedModels = listOf("llama3.1:8b", "gemma2:2b", "qwen2.5:7b"),
@@ -187,16 +187,16 @@ private fun aiAgentTakeLastMessages(messages: List<AiAgentMessage>, lastN: Int):
 }
 
 private const val aiAgentStickyFactsExtractorPrompt = """
-РўС‹ РІС‹РґРµР»СЏРµС€СЊ С‚РѕР»СЊРєРѕ СѓСЃС‚РѕР№С‡РёРІС‹Рµ РІР°Р¶РЅС‹Рµ С„Р°РєС‚С‹ РёР· Р±РµСЃРµРґС‹.
-Р’РµСЂРЅРё РѕС‚РІРµС‚ СЃС‚СЂРѕРіРѕ РІ С„РѕСЂРјР°С‚Рµ "РєР»СЋС‡: Р·РЅР°С‡РµРЅРёРµ", РїРѕ РѕРґРЅРѕР№ РїР°СЂРµ РЅР° СЃС‚СЂРѕРєСѓ, Р±РµР· markdown Рё РїРѕСЏСЃРЅРµРЅРёР№.
-Р’РєР»СЋС‡Р°Р№ С‚РѕР»СЊРєРѕ РїРѕРґС‚РІРµСЂР¶РґРµРЅРЅС‹Рµ С„Р°РєС‚С‹ РёР· РєРѕРЅС‚РµРєСЃС‚Р°.
-РџСЂРёРѕСЂРёС‚РµС‚ РєР»СЋС‡РµР№: С†РµР»СЊ, РѕРіСЂР°РЅРёС‡РµРЅРёСЏ, РїСЂРµРґРїРѕС‡С‚РµРЅРёСЏ, СЂРµС€РµРЅРёСЏ, РґРѕРіРѕРІРѕСЂРµРЅРЅРѕСЃС‚Рё.
-Р•СЃР»Рё РґР°РЅРЅС‹С… РЅРµС‚, РІРµСЂРЅРё РїСѓСЃС‚СѓСЋ СЃС‚СЂРѕРєСѓ.
+Ты выделяешь только устойчивые важные факты из беседы.
+Верни ответ строго в формате "ключ: значение", по одной паре на строку, без markdown и пояснений.
+Включай только подтвержденные факты из контекста.
+Приоритет ключей: цель, ограничения, предпочтения, решения, договоренности.
+Если данных нет, верни пустую строку.
 """
 
 private fun aiAgentNormalizeFactsText(text: String): String =
     text.lineSequence()
-        .map { it.trim().trimStart('-', '*', 'вЂў') }
+        .map { it.trim().trimStart('-', '*', '•') }
         .filter { it.isNotEmpty() && it.contains(":") }
         .map { line ->
             val key = line.substringBefore(":").trim().lowercase(Locale.getDefault())
@@ -225,9 +225,9 @@ private fun aiAgentFactsSystemMessage(factsText: String): DeepSeekMessage? {
     val normalizedFacts = aiAgentNormalizeFactsText(factsText)
     if (normalizedFacts.isBlank()) return null
     val systemText = buildString {
-        append("Р’Р°Р¶РЅС‹Рµ С„Р°РєС‚С‹ РґРёР°Р»РѕРіР° (РєР»СЋС‡-Р·РЅР°С‡РµРЅРёРµ):\n")
+        append("Важные факты диалога (ключ-значение):\n")
         append(normalizedFacts)
-        append("\nРЎР»РµРґСѓР№ СЌС‚РёРј С„Р°РєС‚Р°Рј РїСЂРё РѕС‚РІРµС‚Рµ, РµСЃР»Рё РѕРЅРё РѕС‚РЅРѕСЃСЏС‚СЃСЏ Рє Р·Р°РїСЂРѕСЃСѓ.")
+        append("\nСледуй этим фактам при ответе, если они относятся к запросу.")
     }
     return DeepSeekMessage(role = "system", content = systemText)
 }
@@ -631,7 +631,7 @@ private fun AiAgentChat(
     }
 
     fun createNewChatAndOpen() {
-        val title = "Р§Р°С‚ ${chats.size + 1}"
+        val title = "Чат ${chats.size + 1}"
         queries.insertChat(
             title = title,
             created_at = System.currentTimeMillis()
@@ -886,6 +886,60 @@ private fun AiAgentChat(
             val requestChatId = currentChatId
             isLoading = true
             val startedAtNanos = System.nanoTime()
+            val assistantCreatedAt = System.currentTimeMillis()
+            val streamingParamsRaw = aiAgentApplyStream("$paramsInfoPrefix | response_time=streaming", AiAgentStream.Raw, 0)
+            val streamingRawIndex = rawMessages.size
+            rawMessages += AiAgentMessage(
+                text = "",
+                isUser = false,
+                paramsInfo = streamingParamsRaw,
+                stream = AiAgentStream.Raw,
+                epoch = 0,
+                createdAt = assistantCreatedAt
+            )
+            val streamingRealIndex = if (realEpoch > 0) {
+                val params = aiAgentApplyStream("$paramsInfoPrefix | response_time=streaming", AiAgentStream.Real, realEpoch)
+                val index = realMessages.size
+                realMessages += AiAgentMessage(
+                    text = "",
+                    isUser = false,
+                    paramsInfo = params,
+                    stream = AiAgentStream.Real,
+                    epoch = realEpoch,
+                    createdAt = assistantCreatedAt
+                )
+                index
+            } else null
+            val branchStreamingIndex = if (activeBranch != null) {
+                val index = activeBranch.size
+                activeBranch += AiAgentMessage(
+                    text = "",
+                    isUser = false,
+                    paramsInfo = aiAgentApplyStream("$paramsInfoPrefix | response_time=streaming", AiAgentStream.Real, realEpoch),
+                    stream = AiAgentStream.Real,
+                    epoch = realEpoch,
+                    createdAt = assistantCreatedAt
+                )
+                index
+            } else null
+
+            fun appendDelta(delta: String) {
+                if (delta.isEmpty()) return
+                if (requestSessionId != chatSessionId || requestChatId != activeChatId) return
+                rawMessages.getOrNull(streamingRawIndex)?.let { current ->
+                    rawMessages[streamingRawIndex] = current.copy(text = current.text + delta)
+                }
+                streamingRealIndex?.let { index ->
+                    realMessages.getOrNull(index)?.let { current ->
+                        realMessages[index] = current.copy(text = current.text + delta)
+                    }
+                }
+                branchStreamingIndex?.let { index ->
+                    activeBranch?.getOrNull(index)?.let { current ->
+                        activeBranch[index] = current.copy(text = current.text + delta)
+                    }
+                }
+            }
             val completionResult = try {
                 val apiKey = aiAgentReadApiKey(requestApi.envVar)
                 if (requestApi.requiresApiKey && apiKey.isBlank()) {
@@ -898,11 +952,11 @@ private fun AiAgentChat(
                 )
 
                 val response = when (requestApi) {
-                    AiAgentApi.DeepSeek -> deepSeekApi.createChatCompletion(apiKey = apiKey, request = request)
-                    AiAgentApi.OpenAI -> openAiApi.createChatCompletion(apiKey = apiKey, request = request)
-                    AiAgentApi.GigaChat -> gigaChatApi.createChatCompletion(accessToken = apiKey, request = request)
-                    AiAgentApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletion(apiKey = apiKey, request = request)
-                    AiAgentApi.LocalLlm -> localLlmApi.createChatCompletion(request = request)
+                    AiAgentApi.DeepSeek -> deepSeekApi.createChatCompletionStreaming(apiKey = apiKey, request = request, onChunk = ::appendDelta)
+                    AiAgentApi.OpenAI -> openAiApi.createChatCompletionStreaming(apiKey = apiKey, request = request, onChunk = ::appendDelta)
+                    AiAgentApi.GigaChat -> gigaChatApi.createChatCompletionStreaming(accessToken = apiKey, request = request, onChunk = ::appendDelta)
+                    AiAgentApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletionStreaming(apiKey = apiKey, request = request, onChunk = ::appendDelta)
+                    AiAgentApi.LocalLlm -> localLlmApi.createChatCompletionStreaming(request = request, onChunk = ::appendDelta)
                 }
 
                 val answerText = response.choices.firstOrNull()?.message?.content?.trim().orEmpty()
@@ -940,29 +994,34 @@ private fun AiAgentChat(
                 totalTokens?.let { append(" | tokens=$it") }
             }
             val assistantParamsInfo = "$paramsInfoPrefix | response_time=${responseTimeSec.aiAgentFormatSeconds()}$tokenInfoSuffix"
-            val assistantCreatedAt = System.currentTimeMillis()
-            appendMessageToStream(
-                chatId = requestChatId,
-                stream = AiAgentStream.Raw,
-                epoch = 0,
-                text = completionResult.answer,
-                isUser = false,
-                paramsInfoBase = assistantParamsInfo,
-                apiLabel = requestApi.label,
+            val rawParamsInfo = aiAgentApplyStream(assistantParamsInfo, AiAgentStream.Raw, 0)
+            rawMessages.getOrNull(streamingRawIndex)?.let {
+                rawMessages[streamingRawIndex] = it.copy(text = completionResult.answer, paramsInfo = rawParamsInfo)
+            }
+            queries.insertMessage(
+                chat_id = requestChatId,
+                api = requestApi.label,
                 model = model,
-                createdAt = assistantCreatedAt
+                role = "assistant",
+                message = completionResult.answer,
+                params_info = rawParamsInfo,
+                created_at = assistantCreatedAt
             )
             if (realEpoch > 0) {
-                appendMessageToStream(
-                    chatId = requestChatId,
-                    stream = AiAgentStream.Real,
-                    epoch = realEpoch,
-                    text = completionResult.answer,
-                    isUser = false,
-                    paramsInfoBase = assistantParamsInfo,
-                    apiLabel = requestApi.label,
+                val realParamsInfo = aiAgentApplyStream(assistantParamsInfo, AiAgentStream.Real, realEpoch)
+                streamingRealIndex?.let { index ->
+                    realMessages.getOrNull(index)?.let { current ->
+                        realMessages[index] = current.copy(text = completionResult.answer, paramsInfo = realParamsInfo)
+                    }
+                }
+                queries.insertMessage(
+                    chat_id = requestChatId,
+                    api = requestApi.label,
                     model = model,
-                    createdAt = assistantCreatedAt
+                    role = "assistant",
+                    message = completionResult.answer,
+                    params_info = realParamsInfo,
+                    created_at = assistantCreatedAt
                 )
             }
             if (activeBranch != null) {
@@ -974,7 +1033,11 @@ private fun AiAgentChat(
                     epoch = realEpoch,
                     createdAt = assistantCreatedAt
                 )
-                activeBranch += branchMessage
+                branchStreamingIndex?.let { index ->
+                    if (index in activeBranch.indices) {
+                        activeBranch[index] = branchMessage
+                    }
+                }
                 if (activeBranchNumber != null) {
                     appendMessageToBranch(
                         chatId = requestChatId,
@@ -988,7 +1051,7 @@ private fun AiAgentChat(
                 val stickyContextMessages = stickyFactsContextMessages()
                 if (stickyContextMessages.isNotEmpty()) {
                     val stickyTranscript = stickyContextMessages.joinToString("\n") { message ->
-                        val prefix = if (message.isUser) "РџРѕР»СЊР·РѕРІР°С‚РµР»СЊ" else "РђСЃСЃРёСЃС‚РµРЅС‚"
+                        val prefix = if (message.isUser) "Пользователь" else "Ассистент"
                         "$prefix: ${message.text}"
                     }
 
@@ -1001,7 +1064,7 @@ private fun AiAgentChat(
                                     role = "user",
                                     content = buildString {
                                         appendLine(aiAgentStickyFactsExtractorPrompt.trimIndent())
-                                        append("РљРѕРЅС‚РµРєСЃС‚ РїРѕСЃР»РµРґРЅРёС… СЃРѕРѕР±С‰РµРЅРёР№:\n")
+                                        append("Контекст последних сообщений:\n")
                                         append(stickyTranscript)
                                     }
                                 )
@@ -1014,11 +1077,11 @@ private fun AiAgentChat(
                     if (!requestApi.requiresApiKey || stickyApiKey.isNotBlank()) {
                         val stickyFactsText = runCatching {
                             val stickyResponse = when (requestApi) {
-                                AiAgentApi.DeepSeek -> deepSeekApi.createChatCompletion(apiKey = stickyApiKey, request = stickyRequest)
-                                AiAgentApi.OpenAI -> openAiApi.createChatCompletion(apiKey = stickyApiKey, request = stickyRequest)
-                                AiAgentApi.GigaChat -> gigaChatApi.createChatCompletion(accessToken = stickyApiKey, request = stickyRequest)
-                                AiAgentApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletion(apiKey = stickyApiKey, request = stickyRequest)
-                                AiAgentApi.LocalLlm -> localLlmApi.createChatCompletion(request = stickyRequest)
+                                AiAgentApi.DeepSeek -> deepSeekApi.createChatCompletionStreaming(apiKey = stickyApiKey, request = stickyRequest, onChunk = {})
+                                AiAgentApi.OpenAI -> openAiApi.createChatCompletionStreaming(apiKey = stickyApiKey, request = stickyRequest, onChunk = {})
+                                AiAgentApi.GigaChat -> gigaChatApi.createChatCompletionStreaming(accessToken = stickyApiKey, request = stickyRequest, onChunk = {})
+                                AiAgentApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletionStreaming(apiKey = stickyApiKey, request = stickyRequest, onChunk = {})
+                                AiAgentApi.LocalLlm -> localLlmApi.createChatCompletionStreaming(request = stickyRequest, onChunk = {})
                             }
                             stickyResponse.choices.firstOrNull()?.message?.content.orEmpty()
                         }.getOrNull()
@@ -1052,7 +1115,7 @@ private fun AiAgentChat(
                         val transcript = historyForContext()
                             .filter { it.isApiHistoryMessage() }
                             .joinToString("\n") { message ->
-                                val prefix = if (message.isUser) "РџРѕР»СЊР·РѕРІР°С‚РµР»СЊ" else "РђСЃСЃРёСЃС‚РµРЅС‚"
+                                val prefix = if (message.isUser) "Пользователь" else "Ассистент"
                                 "$prefix: ${message.text}"
                             }
 
@@ -1065,24 +1128,24 @@ private fun AiAgentChat(
                                 add(
                                     DeepSeekMessage(
                                         role = "system",
-                                        content = "РЎСѓРјРјРёСЂСѓР№ РєРѕРЅС‚РµРєСЃС‚ Р±РµСЃРµРґС‹ РєСЂР°С‚РєРѕ. РЎРѕС…СЂР°РЅРё С„Р°РєС‚С‹, РґРѕРіРѕРІРѕСЂРµРЅРЅРѕСЃС‚Рё Рё РІР°Р¶РЅС‹Рµ РґРµС‚Р°Р»Рё."
+                                        content = "Суммируй контекст беседы кратко. Сохрани факты, договоренности и важные детали."
                                     )
                                 )
                                 add(
                                     DeepSeekMessage(
                                         role = "user",
-                                        content = "РљРѕРЅС‚РµРєСЃС‚:\n$transcript"
+                                        content = "Контекст:\n$transcript"
                                     )
                                 )
                             }
                         )
 
                         val summaryResponse = when (requestApi) {
-                            AiAgentApi.DeepSeek -> deepSeekApi.createChatCompletion(apiKey = apiKey, request = summaryRequest)
-                            AiAgentApi.OpenAI -> openAiApi.createChatCompletion(apiKey = apiKey, request = summaryRequest)
-                            AiAgentApi.GigaChat -> gigaChatApi.createChatCompletion(accessToken = apiKey, request = summaryRequest)
-                            AiAgentApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletion(apiKey = apiKey, request = summaryRequest)
-                            AiAgentApi.LocalLlm -> localLlmApi.createChatCompletion(request = summaryRequest)
+                            AiAgentApi.DeepSeek -> deepSeekApi.createChatCompletionStreaming(apiKey = apiKey, request = summaryRequest, onChunk = {})
+                            AiAgentApi.OpenAI -> openAiApi.createChatCompletionStreaming(apiKey = apiKey, request = summaryRequest, onChunk = {})
+                            AiAgentApi.GigaChat -> gigaChatApi.createChatCompletionStreaming(accessToken = apiKey, request = summaryRequest, onChunk = {})
+                            AiAgentApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletionStreaming(apiKey = apiKey, request = summaryRequest, onChunk = {})
+                            AiAgentApi.LocalLlm -> localLlmApi.createChatCompletionStreaming(request = summaryRequest, onChunk = {})
                         }
 
                         val summaryText = summaryResponse.choices.firstOrNull()?.message?.content?.trim().orEmpty()
@@ -1219,32 +1282,32 @@ private fun AiAgentChat(
                             enabled = !isLoading
                         ) {
                             val titleSuffix = if (activeChatTitle.isNotBlank()) {
-                                " | $activeChatTitle ($activeChatTotalTokens С‚РѕРєРµРЅРѕРІ)"
+                                " | $activeChatTitle ($activeChatTotalTokens токенов)"
                             } else {
                                 ""
                             }
-                            Text("Ai РђРіРµРЅС‚$titleSuffix")
+                            Text("Ai Агент$titleSuffix")
                         }
                         DropdownMenu(
                             expanded = screensMenuExpanded,
                             onDismissRequest = { screensMenuExpanded = false }
                         ) {
                             DropdownMenuItem(
-                                text = { Text(if (currentScreen == RootScreen.AiAgentRAG) "AiAgentRAG вњ“" else "AiAgentRAG") },
+                                text = { Text(if (currentScreen == RootScreen.AiAgentRAG) "AiAgentRAG ?" else "AiAgentRAG") },
                                 onClick = {
                                     screensMenuExpanded = false
                                     onSelectScreen(RootScreen.AiAgentRAG)
                                 }
                             )
                             DropdownMenuItem(
-                                text = { Text(if (currentScreen == RootScreen.EmbedingGeneration) "EmbedingGeneration вњ“" else "EmbedingGeneration") },
+                                text = { Text(if (currentScreen == RootScreen.EmbedingGeneration) "EmbedingGeneration ?" else "EmbedingGeneration") },
                                 onClick = {
                                     screensMenuExpanded = false
                                     onSelectScreen(RootScreen.EmbedingGeneration)
                                 }
                             )
                             DropdownMenuItem(
-                                text = { Text(if (currentScreen == RootScreen.AiAgentMain) "AiAgentMain вњ“" else "AiAgentMain") },
+                                text = { Text(if (currentScreen == RootScreen.AiAgentMain) "AiAgentMain ?" else "AiAgentMain") },
                                 onClick = {
                                     screensMenuExpanded = false
                                     onSelectScreen(RootScreen.AiAgentMain)
@@ -1253,7 +1316,7 @@ private fun AiAgentChat(
                             DropdownMenuItem(
                                 text = {
                                     Text(
-                                        if (currentScreen == RootScreen.AiAgentMCP) "AiAgentMCP вњ“" else "AiAgentMCP"
+                                        if (currentScreen == RootScreen.AiAgentMCP) "AiAgentMCP ?" else "AiAgentMCP"
                                     )
                                 },
                                 onClick = {
@@ -1264,7 +1327,7 @@ private fun AiAgentChat(
                             DropdownMenuItem(
                                 text = {
                                     Text(
-                                        if (currentScreen == RootScreen.AiWeek3) "Ai РЅРµРґРµР»СЏ 3 вњ“" else "Ai РЅРµРґРµР»СЏ 3"
+                                        if (currentScreen == RootScreen.AiWeek3) "Ai неделя 3 ?" else "Ai неделя 3"
                                     )
                                 },
                                 onClick = {
@@ -1273,7 +1336,7 @@ private fun AiAgentChat(
                                 }
                             )
                             DropdownMenuItem(
-                                text = { Text(if (currentScreen == RootScreen.AiStateAgent) "AiStateAgent вњ“" else "AiStateAgent") },
+                                text = { Text(if (currentScreen == RootScreen.AiStateAgent) "AiStateAgent ?" else "AiStateAgent") },
                                 onClick = {
                                     screensMenuExpanded = false
                                     onSelectScreen(RootScreen.AiStateAgent)
@@ -1282,7 +1345,7 @@ private fun AiAgentChat(
                             DropdownMenuItem(
                                 text = {
                                     Text(
-                                        if (currentScreen == RootScreen.AiAgent) "AiAgent вњ“" else "AiAgent"
+                                        if (currentScreen == RootScreen.AiAgent) "AiAgent ?" else "AiAgent"
                                     )
                                 },
                                 onClick = {
@@ -1293,7 +1356,7 @@ private fun AiAgentChat(
                             DropdownMenuItem(
                                 text = {
                                     Text(
-                                        if (currentScreen == RootScreen.App) "App вњ“" else "App"
+                                        if (currentScreen == RootScreen.App) "App ?" else "App"
                                     )
                                 },
                                 onClick = {
@@ -1310,17 +1373,17 @@ private fun AiAgentChat(
                             onClick = { showRawHistory = !showRawHistory },
                             enabled = !isLoading
                         ) {
-                            Text(if (showRawHistory) "РџРѕРєР°Р·Р°С‚СЊ СЃР¶Р°С‚С‹Р№" else "РџРѕРєР°Р·Р°С‚СЊ РїРѕР»РЅС‹Р№")
+                            Text(if (showRawHistory) "Показать сжатый" else "Показать полный")
                         }
                     }
                     IconButton(
                         onClick = { isFeaturesPanelVisible = !isFeaturesPanelVisible },
                         enabled = !isLoading
                     ) {
-                        Text(text = if (isFeaturesPanelVisible) "вњ“" else "\u2610")
+                        Text(text = if (isFeaturesPanelVisible) "?" else "\u2610")
                     }
                     TextButton(onClick = ::createNewChatAndOpen, enabled = !isLoading) {
-                        Text("РќРѕРІС‹Р№ С‡Р°С‚")
+                        Text("Новый чат")
                     }
                 }
             )
@@ -1346,7 +1409,7 @@ private fun AiAgentChat(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = "Р§Р°С‚С‹",
+                        text = "Чаты",
                         style = MaterialTheme.typography.titleSmall
                     )
                     Box(modifier = Modifier.weight(1f))
@@ -1354,7 +1417,7 @@ private fun AiAgentChat(
                         onClick = ::deleteAllChats,
                         enabled = chats.isNotEmpty() && !isLoading
                     ) {
-                        Text("РЈРґР°Р»РёС‚СЊ РІСЃС‘")
+                        Text("Удалить всё")
                     }
                 }
                 LazyColumn(
@@ -1462,7 +1525,7 @@ private fun AiAgentChat(
                                         contentAlignment = Alignment.Center
                                     ) {
                                         Text(
-                                            text = if (areBranchesVisible) "в–ѕ" else "в–ё",
+                                            text = if (areBranchesVisible) "?" else "?",
                                             style = MaterialTheme.typography.labelSmall,
                                             color = if (isSelected) {
                                                 MaterialTheme.colorScheme.onPrimaryContainer
@@ -1518,7 +1581,7 @@ private fun AiAgentChat(
                                                 modifier = Modifier.weight(1f)
                                             ) {
                                                 Text(
-                                                    text = "РІРµС‚РєР° (${branch.number})",
+                                                    text = "ветка (${branch.number})",
                                                     color = if (isActiveBranch) {
                                                         MaterialTheme.colorScheme.onPrimaryContainer
                                                     } else {
@@ -1645,7 +1708,7 @@ private fun AiAgentChat(
                     onClick = ::createBranchForActiveChat,
                     enabled = !isLoading && activeChatId != null && isBranchingEnabled
                 ) {
-                    Text("+ РІРµС‚РєР°")
+                    Text("+ ветка")
                 }
             }
 
@@ -1717,7 +1780,7 @@ private fun AiAgentChat(
                     onClick = ::sendMessage,
                     enabled = inputText.text.isNotBlank() && !isLoading
                 ) {
-                    Text("РћС‚РїСЂР°РІРёС‚СЊ")
+                    Text("Отправить")
                 }
             }
         }
@@ -1738,12 +1801,12 @@ private fun AiAgentChat(
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 Text(
-                    text = "Р”РѕРї. С„СѓРЅРєС†РёРё",
+                    text = "Доп. функции",
                     style = MaterialTheme.typography.titleSmall
                 )
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(
-                        text = "РЎРёСЃС‚РµРјРЅС‹Р№ РїСЂРѕРјС‚",
+                        text = "Системный промт",
                         style = MaterialTheme.typography.labelMedium
                     )
                     Row(
@@ -1757,7 +1820,7 @@ private fun AiAgentChat(
                             enabled = !isLoading
                         )
                         Text(
-                            text = if (isSystemPromptEnabled) "Р’РєР»" else "Р’С‹РєР»",
+                            text = if (isSystemPromptEnabled) "Вкл" else "Выкл",
                             style = MaterialTheme.typography.labelSmall
                         )
                     }
@@ -1768,13 +1831,13 @@ private fun AiAgentChat(
                             .fillMaxWidth()
                             .height(96.dp),
                         enabled = !isLoading,
-                        placeholder = { Text("Р’РІРµРґРёС‚Рµ СЃРёСЃС‚РµРјРЅС‹Р№ РїСЂРѕРјС‚", style = MaterialTheme.typography.labelSmall) },
+                        placeholder = { Text("Введите системный промт", style = MaterialTheme.typography.labelSmall) },
                         textStyle = MaterialTheme.typography.labelSmall
                     )
                 }
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(
-                        text = "РЎСѓРјРјР°СЂРёР·Р°С†РёСЏ РєРѕРЅС‚РµРєСЃС‚Р°",
+                        text = "Суммаризация контекста",
                         style = MaterialTheme.typography.labelMedium
                     )
                     Row(
@@ -1806,7 +1869,7 @@ private fun AiAgentChat(
                 }
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(
-                        text = "Sliding Window (РїРѕСЃР»РµРґРЅРёРµ N)",
+                        text = "Sliding Window (последние N)",
                         style = MaterialTheme.typography.labelMedium
                     )
                     Row(
@@ -1838,7 +1901,7 @@ private fun AiAgentChat(
                 }
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(
-                        text = "Sticky Facts (facts + РїРѕСЃР»РµРґРЅРёРµ N)",
+                        text = "Sticky Facts (facts + последние N)",
                         style = MaterialTheme.typography.labelMedium
                     )
                     Row(
@@ -1874,7 +1937,7 @@ private fun AiAgentChat(
                         },
                         enabled = stickyFactsSystemMessage.isNotBlank() && !isLoading
                     ) {
-                        Text("РћС‡РёСЃС‚РёС‚СЊ facts")
+                        Text("Очистить facts")
                     }
                     if (stickyFacts.isNotEmpty()) {
                         Text(
@@ -1885,7 +1948,7 @@ private fun AiAgentChat(
                 }
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(
-                        text = "Branching (РІРµС‚РєРё РґРёР°Р»РѕРіР°)",
+                        text = "Branching (ветки диалога)",
                         style = MaterialTheme.typography.labelMedium
                     )
                     Row(
@@ -1924,7 +1987,7 @@ private fun AiAgentStickyFactsBanner(systemFacts: String) {
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text(
-                text = "System вЂў Sticky Facts",
+                text = "System • Sticky Facts",
                 style = MaterialTheme.typography.labelSmall,
                 color = Color(0xFF334155)
             )
@@ -1984,3 +2047,4 @@ private fun AiAgentBubble(message: AiAgentMessage) {
         }
     }
 }
+

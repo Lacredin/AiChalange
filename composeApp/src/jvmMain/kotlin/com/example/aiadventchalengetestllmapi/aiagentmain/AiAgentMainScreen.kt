@@ -1272,11 +1272,11 @@ private fun AiAgentMainChat(
             responseFormat = DeepSeekResponseFormat(type = "json_object")
         )
         val response = when (requestApi) {
-            AiAgentApi.DeepSeek -> deepSeekApi.createChatCompletion(apiKey = apiKey, request = request)
-            AiAgentApi.OpenAI -> openAiApi.createChatCompletion(apiKey = apiKey, request = request)
-            AiAgentApi.GigaChat -> gigaChatApi.createChatCompletion(accessToken = apiKey, request = request)
-            AiAgentApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletion(apiKey = apiKey, request = request)
-            AiAgentApi.LocalLlm -> localLlmApi.createChatCompletion(request = request)
+            AiAgentApi.DeepSeek -> deepSeekApi.createChatCompletionStreaming(apiKey = apiKey, request = request, onChunk = {})
+            AiAgentApi.OpenAI -> openAiApi.createChatCompletionStreaming(apiKey = apiKey, request = request, onChunk = {})
+            AiAgentApi.GigaChat -> gigaChatApi.createChatCompletionStreaming(accessToken = apiKey, request = request, onChunk = {})
+            AiAgentApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletionStreaming(apiKey = apiKey, request = request, onChunk = {})
+            AiAgentApi.LocalLlm -> localLlmApi.createChatCompletionStreaming(request = request, onChunk = {})
         }
         return response.choices.firstOrNull()?.message?.content?.trim().orEmpty()
             .ifEmpty { "Пустой ответ от ${requestApi.label}." }
@@ -1312,11 +1312,11 @@ private fun AiAgentMainChat(
             responseFormat = DeepSeekResponseFormat(type = "json_object")
         )
         val response = when (requestApi) {
-            AiAgentApi.DeepSeek -> deepSeekApi.createChatCompletion(apiKey = apiKey, request = request)
-            AiAgentApi.OpenAI -> openAiApi.createChatCompletion(apiKey = apiKey, request = request)
-            AiAgentApi.GigaChat -> gigaChatApi.createChatCompletion(accessToken = apiKey, request = request)
-            AiAgentApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletion(apiKey = apiKey, request = request)
-            AiAgentApi.LocalLlm -> localLlmApi.createChatCompletion(request = request)
+            AiAgentApi.DeepSeek -> deepSeekApi.createChatCompletionStreaming(apiKey = apiKey, request = request, onChunk = {})
+            AiAgentApi.OpenAI -> openAiApi.createChatCompletionStreaming(apiKey = apiKey, request = request, onChunk = {})
+            AiAgentApi.GigaChat -> gigaChatApi.createChatCompletionStreaming(accessToken = apiKey, request = request, onChunk = {})
+            AiAgentApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletionStreaming(apiKey = apiKey, request = request, onChunk = {})
+            AiAgentApi.LocalLlm -> localLlmApi.createChatCompletionStreaming(request = request, onChunk = {})
         }
         return response.choices.firstOrNull()?.message?.content?.trim().orEmpty()
             .ifEmpty { "Пустой ответ от ${requestApi.label}." }
@@ -1365,11 +1365,11 @@ private fun AiAgentMainChat(
             responseFormat = DeepSeekResponseFormat(type = "json_object")
         )
         val response = when (requestApi) {
-            AiAgentApi.DeepSeek -> deepSeekApi.createChatCompletion(apiKey = apiKey, request = request)
-            AiAgentApi.OpenAI -> openAiApi.createChatCompletion(apiKey = apiKey, request = request)
-            AiAgentApi.GigaChat -> gigaChatApi.createChatCompletion(accessToken = apiKey, request = request)
-            AiAgentApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletion(apiKey = apiKey, request = request)
-            AiAgentApi.LocalLlm -> localLlmApi.createChatCompletion(request = request)
+            AiAgentApi.DeepSeek -> deepSeekApi.createChatCompletionStreaming(apiKey = apiKey, request = request, onChunk = {})
+            AiAgentApi.OpenAI -> openAiApi.createChatCompletionStreaming(apiKey = apiKey, request = request, onChunk = {})
+            AiAgentApi.GigaChat -> gigaChatApi.createChatCompletionStreaming(accessToken = apiKey, request = request, onChunk = {})
+            AiAgentApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletionStreaming(apiKey = apiKey, request = request, onChunk = {})
+            AiAgentApi.LocalLlm -> localLlmApi.createChatCompletionStreaming(request = request, onChunk = {})
         }
         return response.choices.firstOrNull()?.message?.content?.trim().orEmpty()
             .ifEmpty { "Пустой ответ от ${requestApi.label}." }
@@ -1387,11 +1387,11 @@ private fun AiAgentMainChat(
         }
         val request = DeepSeekChatRequest(model = model, messages = messages)
         val response = when (requestApi) {
-            AiAgentApi.DeepSeek -> deepSeekApi.createChatCompletion(apiKey = apiKey, request = request)
-            AiAgentApi.OpenAI -> openAiApi.createChatCompletion(apiKey = apiKey, request = request)
-            AiAgentApi.GigaChat -> gigaChatApi.createChatCompletion(accessToken = apiKey, request = request)
-            AiAgentApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletion(apiKey = apiKey, request = request)
-            AiAgentApi.LocalLlm -> localLlmApi.createChatCompletion(request = request)
+            AiAgentApi.DeepSeek -> deepSeekApi.createChatCompletionStreaming(apiKey = apiKey, request = request, onChunk = {})
+            AiAgentApi.OpenAI -> openAiApi.createChatCompletionStreaming(apiKey = apiKey, request = request, onChunk = {})
+            AiAgentApi.GigaChat -> gigaChatApi.createChatCompletionStreaming(accessToken = apiKey, request = request, onChunk = {})
+            AiAgentApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletionStreaming(apiKey = apiKey, request = request, onChunk = {})
+            AiAgentApi.LocalLlm -> localLlmApi.createChatCompletionStreaming(request = request, onChunk = {})
         }
         return response.choices.firstOrNull()?.message?.content?.trim().orEmpty()
             .ifEmpty { "Пустой ответ от ${requestApi.label}." }
@@ -1433,11 +1433,11 @@ private fun AiAgentMainChat(
             presencePenalty = null
         )
         val response = when (requestApi) {
-            AiAgentApi.DeepSeek -> deepSeekApi.createChatCompletion(apiKey = apiKey, request = request)
-            AiAgentApi.OpenAI -> openAiApi.createChatCompletion(apiKey = apiKey, request = request)
-            AiAgentApi.GigaChat -> gigaChatApi.createChatCompletion(accessToken = apiKey, request = request)
-            AiAgentApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletion(apiKey = apiKey, request = request)
-            AiAgentApi.LocalLlm -> localLlmApi.createChatCompletion(request = request)
+            AiAgentApi.DeepSeek -> deepSeekApi.createChatCompletionStreaming(apiKey = apiKey, request = request, onChunk = {})
+            AiAgentApi.OpenAI -> openAiApi.createChatCompletionStreaming(apiKey = apiKey, request = request, onChunk = {})
+            AiAgentApi.GigaChat -> gigaChatApi.createChatCompletionStreaming(accessToken = apiKey, request = request, onChunk = {})
+            AiAgentApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletionStreaming(apiKey = apiKey, request = request, onChunk = {})
+            AiAgentApi.LocalLlm -> localLlmApi.createChatCompletionStreaming(request = request, onChunk = {})
         }
         return response.choices.firstOrNull()?.message?.content?.trim().orEmpty()
             .ifEmpty { "Пустой ответ от ${requestApi.label}." }
@@ -1466,11 +1466,11 @@ private fun AiAgentMainChat(
             responseFormat = DeepSeekResponseFormat(type = "json_object")
         )
         val response = when (requestApi) {
-            AiAgentApi.DeepSeek -> deepSeekApi.createChatCompletion(apiKey = apiKey, request = request)
-            AiAgentApi.OpenAI -> openAiApi.createChatCompletion(apiKey = apiKey, request = request)
-            AiAgentApi.GigaChat -> gigaChatApi.createChatCompletion(accessToken = apiKey, request = request)
-            AiAgentApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletion(apiKey = apiKey, request = request)
-            AiAgentApi.LocalLlm -> localLlmApi.createChatCompletion(request = request)
+            AiAgentApi.DeepSeek -> deepSeekApi.createChatCompletionStreaming(apiKey = apiKey, request = request, onChunk = {})
+            AiAgentApi.OpenAI -> openAiApi.createChatCompletionStreaming(apiKey = apiKey, request = request, onChunk = {})
+            AiAgentApi.GigaChat -> gigaChatApi.createChatCompletionStreaming(accessToken = apiKey, request = request, onChunk = {})
+            AiAgentApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletionStreaming(apiKey = apiKey, request = request, onChunk = {})
+            AiAgentApi.LocalLlm -> localLlmApi.createChatCompletionStreaming(request = request, onChunk = {})
         }
         return response.choices.firstOrNull()?.message?.content?.trim().orEmpty()
             .ifEmpty { "Пустой ответ от ${requestApi.label}." }
@@ -1650,11 +1650,11 @@ private fun AiAgentMainChat(
             responseFormat = DeepSeekResponseFormat(type = "json_object")
         )
         val response = when (requestApi) {
-            AiAgentApi.DeepSeek -> deepSeekApi.createChatCompletion(apiKey = apiKey, request = request)
-            AiAgentApi.OpenAI -> openAiApi.createChatCompletion(apiKey = apiKey, request = request)
-            AiAgentApi.GigaChat -> gigaChatApi.createChatCompletion(accessToken = apiKey, request = request)
-            AiAgentApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletion(apiKey = apiKey, request = request)
-            AiAgentApi.LocalLlm -> localLlmApi.createChatCompletion(request = request)
+            AiAgentApi.DeepSeek -> deepSeekApi.createChatCompletionStreaming(apiKey = apiKey, request = request, onChunk = {})
+            AiAgentApi.OpenAI -> openAiApi.createChatCompletionStreaming(apiKey = apiKey, request = request, onChunk = {})
+            AiAgentApi.GigaChat -> gigaChatApi.createChatCompletionStreaming(accessToken = apiKey, request = request, onChunk = {})
+            AiAgentApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletionStreaming(apiKey = apiKey, request = request, onChunk = {})
+            AiAgentApi.LocalLlm -> localLlmApi.createChatCompletionStreaming(request = request, onChunk = {})
         }
         return response.choices.firstOrNull()?.message?.content?.trim().orEmpty()
             .ifEmpty { "Пустой ответ от ${requestApi.label}." }
@@ -3808,6 +3808,7 @@ private fun AiAgentBubble(
         }
     }
 }
+
 
 
 
