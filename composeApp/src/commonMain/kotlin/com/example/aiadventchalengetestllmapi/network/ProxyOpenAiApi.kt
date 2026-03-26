@@ -1,6 +1,7 @@
 package com.example.aiadventchalengetestllmapi.network
 
 import io.ktor.client.HttpClient
+import io.ktor.client.request.preparePost
 import io.ktor.client.request.bearerAuth
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
@@ -34,6 +35,20 @@ class ProxyOpenAiApi(
             proxyApiJson.decodeFromString(DeepSeekChatResponse.serializer(), payload)
         } catch (e: Exception) {
             error("ProxyAPI returned unexpected payload: $payload")
+        }
+    }
+
+    suspend fun createChatCompletionStreaming(
+        apiKey: String,
+        request: DeepSeekChatRequest,
+        onChunk: (String) -> Unit
+    ): DeepSeekChatResponse {
+        return httpClient.preparePost("$baseUrl/chat/completions") {
+            bearerAuth(apiKey)
+            contentType(ContentType.Application.Json)
+            setBody(request.copy(stream = true))
+        }.execute { response ->
+            parseStreamingChatResponse(response, request, providerName = "ProxyAPI", onChunk = onChunk)
         }
     }
 }

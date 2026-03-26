@@ -2,6 +2,7 @@ package com.example.aiadventchalengetestllmapi.network
 
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
+import io.ktor.client.request.preparePost
 import io.ktor.client.request.bearerAuth
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
@@ -21,5 +22,19 @@ class GigaChatApi(
             contentType(ContentType.Application.Json)
             setBody(request)
         }.body()
+    }
+
+    suspend fun createChatCompletionStreaming(
+        accessToken: String,
+        request: DeepSeekChatRequest,
+        onChunk: (String) -> Unit
+    ): DeepSeekChatResponse {
+        return httpClient.preparePost("$baseUrl/chat/completions") {
+            bearerAuth(accessToken)
+            contentType(ContentType.Application.Json)
+            setBody(request.copy(stream = true))
+        }.execute { response ->
+            parseStreamingChatResponse(response, request, providerName = "GigaChat", onChunk = onChunk)
+        }
     }
 }

@@ -2,6 +2,7 @@ package com.example.aiadventchalengetestllmapi.network
 
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
+import io.ktor.client.request.preparePost
 import io.ktor.client.request.bearerAuth
 import io.ktor.client.request.get
 import io.ktor.client.request.post
@@ -24,6 +25,20 @@ class DeepSeekApi(
             contentType(ContentType.Application.Json)
             setBody(request)
         }.body()
+    }
+
+    suspend fun createChatCompletionStreaming(
+        apiKey: String,
+        request: DeepSeekChatRequest,
+        onChunk: (String) -> Unit
+    ): DeepSeekChatResponse {
+        return httpClient.preparePost("$baseUrl/chat/completions") {
+            bearerAuth(apiKey)
+            contentType(ContentType.Application.Json)
+            setBody(request.copy(stream = true))
+        }.execute { response ->
+            parseStreamingChatResponse(response, request, providerName = "DeepSeek", onChunk = onChunk)
+        }
     }
 
     suspend fun createEmbedding(
@@ -91,6 +106,7 @@ data class DeepSeekEmbeddingUsage(
 data class DeepSeekChatRequest(
     val model: String,
     val messages: List<DeepSeekMessage>,
+    val stream: Boolean? = null,
     val temperature: Double? = null,
     @SerialName("max_tokens")
     val maxTokens: Int? = null,

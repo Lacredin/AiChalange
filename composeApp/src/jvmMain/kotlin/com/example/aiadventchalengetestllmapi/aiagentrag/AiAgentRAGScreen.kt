@@ -671,10 +671,26 @@ fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> 
 
                 val request = DeepSeekChatRequest(config.model, requestMessages)
                 val response = when (config.api) {
-                    RagApi.DeepSeek -> deepSeekApi.createChatCompletion(apiKey, request)
-                    RagApi.OpenAI -> openAiApi.createChatCompletion(apiKey, request)
-                    RagApi.GigaChat -> gigaChatApi.createChatCompletion(apiKey, request)
-                    RagApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletion(apiKey, request)
+                    RagApi.DeepSeek -> if (onDelta == null) {
+                        deepSeekApi.createChatCompletion(apiKey, request)
+                    } else {
+                        deepSeekApi.createChatCompletionStreaming(apiKey, request, onDelta)
+                    }
+                    RagApi.OpenAI -> if (onDelta == null) {
+                        openAiApi.createChatCompletion(apiKey, request)
+                    } else {
+                        openAiApi.createChatCompletionStreaming(apiKey, request, onDelta)
+                    }
+                    RagApi.GigaChat -> if (onDelta == null) {
+                        gigaChatApi.createChatCompletion(apiKey, request)
+                    } else {
+                        gigaChatApi.createChatCompletionStreaming(apiKey, request, onDelta)
+                    }
+                    RagApi.ProxyOpenAI -> if (onDelta == null) {
+                        proxyOpenAiApi.createChatCompletion(apiKey, request)
+                    } else {
+                        proxyOpenAiApi.createChatCompletionStreaming(apiKey, request, onDelta)
+                    }
                     RagApi.LocalLlm -> if (onDelta == null) {
                         localLlmApi.createChatCompletion(request)
                     } else {
@@ -753,17 +769,14 @@ fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> 
             scope.launch {
                 isLoading = true
                 val taskStateSnapshot = taskState
-                val primaryStreamingMessageId = if (primaryConfig.api == RagApi.LocalLlm) {
-                    val id = nextMessageId++
-                    messages += RagMessage(
-                        id = id,
-                        text = "",
-                        isUser = false,
-                        paramsInfo = assistantParams(primaryConfig)
-                    )
-                    id
-                } else null
-                val comparisonStreamingMessageId = if (dualChatEnabled && compareConfig.api == RagApi.LocalLlm) {
+                val primaryStreamingMessageId = nextMessageId++
+                messages += RagMessage(
+                    id = primaryStreamingMessageId,
+                    text = "",
+                    isUser = false,
+                    paramsInfo = assistantParams(primaryConfig)
+                )
+                val comparisonStreamingMessageId = if (dualChatEnabled) {
                     val id = nextMessageId++
                     comparisonMessages += RagMessage(
                         id = id,
@@ -780,7 +793,7 @@ fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> 
                         primaryConversationSnapshot,
                         taskStateSnapshot,
                         primaryConfig,
-                        onDelta = primaryStreamingMessageId?.let { id -> { delta -> appendAssistantDelta(messages, id, delta) } }
+                        onDelta = { delta -> appendAssistantDelta(messages, primaryStreamingMessageId, delta) }
                     )
                 }
                 val comparisonDeferred = if (dualChatEnabled) async {
@@ -789,7 +802,7 @@ fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> 
                         comparisonConversationSnapshot,
                         taskStateSnapshot,
                         compareConfig,
-                        onDelta = comparisonStreamingMessageId?.let { id -> { delta -> appendAssistantDelta(comparisonMessages, id, delta) } }
+                        onDelta = { delta -> appendAssistantDelta(comparisonMessages, comparisonStreamingMessageId!!, delta) }
                     )
                 } else null
 
@@ -803,49 +816,27 @@ fun AiAgentRAGScreen(currentScreen: RootScreen, onSelectScreen: (RootScreen) -> 
                     primaryResult.paramsInfo,
                     System.currentTimeMillis()
                 )
-                if (primaryStreamingMessageId == null) {
-                    messages += RagMessage(
-                        id = nextMessageId++,
+                val index = messages.indexOfFirst { it.id == primaryStreamingMessageId }
+                if (index != -1) {
+                    messages[index] = messages[index].copy(
                         text = primaryResult.answer,
-                        isUser = false,
                         paramsInfo = primaryResult.paramsInfo,
                         sources = primaryResult.sources,
                         retrievalInfo = primaryResult.retrievalInfo
                     )
-                } else {
-                    val index = messages.indexOfFirst { it.id == primaryStreamingMessageId }
-                    if (index != -1) {
-                        messages[index] = messages[index].copy(
-                            text = primaryResult.answer,
-                            paramsInfo = primaryResult.paramsInfo,
-                            sources = primaryResult.sources,
-                            retrievalInfo = primaryResult.retrievalInfo
-                        )
-                    }
                 }
 
                 if (dualChatEnabled) {
                     val compareResult = comparisonDeferred?.await()
                     if (compareResult != null) {
-                        if (comparisonStreamingMessageId == null) {
-                            comparisonMessages += RagMessage(
-                                id = nextMessageId++,
+                        val comparisonIndex = comparisonMessages.indexOfFirst { it.id == comparisonStreamingMessageId }
+                        if (comparisonIndex != -1) {
+                            comparisonMessages[comparisonIndex] = comparisonMessages[comparisonIndex].copy(
                                 text = compareResult.answer,
-                                isUser = false,
                                 paramsInfo = compareResult.paramsInfo,
                                 sources = compareResult.sources,
                                 retrievalInfo = compareResult.retrievalInfo
                             )
-                        } else {
-                            val index = comparisonMessages.indexOfFirst { it.id == comparisonStreamingMessageId }
-                            if (index != -1) {
-                                comparisonMessages[index] = comparisonMessages[index].copy(
-                                    text = compareResult.answer,
-                                    paramsInfo = compareResult.paramsInfo,
-                                    sources = compareResult.sources,
-                                    retrievalInfo = compareResult.retrievalInfo
-                                )
-                            }
                         }
                     }
                 }
