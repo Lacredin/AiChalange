@@ -202,6 +202,7 @@ private fun AiAgentMainChat(
     var invariantValueInput by remember { mutableStateOf("") }
     var isInvariantFormVisible by remember { mutableStateOf(false) }
     var isInvariantsEnabled by remember { mutableStateOf(true) }
+    var isStateMachineEnabled by remember { mutableStateOf(true) }
     var invariantViolations by remember { mutableStateOf<List<String>>(emptyList()) }
     var invariantViolationPreviousState by remember { mutableStateOf(AgentState.Idle) }
     var planInvariantCheckFailed by remember { mutableStateOf(false) }
@@ -905,6 +906,19 @@ private fun AiAgentMainChat(
         return nextBranchNumber to createStateBranch(chatId, nextBranchNumber, name)
     }
 
+    fun ensureMainBranch(chatId: Long): SnapshotStateList<AiAgentMessage> {
+        val branches = branchesByChat.getOrPut(chatId) {
+            loadBranchesForChat(chatId).ifEmpty { mutableStateListOf() }
+        }
+        branches.firstOrNull { it.number == 1 }?.let { return it.messages }
+        val messages = mutableStateListOf<AiAgentMessage>()
+        branches.add(0, AiAgentBranchItem(number = 1, messages = messages))
+        branchCounterByChat[chatId] = maxOf(branchCounterByChat[chatId] ?: 0, 1)
+        branchVisibilityByChat.putIfAbsent(chatId, true)
+        branchNames[1] = "Основная"
+        return messages
+    }
+
     fun appendValidationRecoveryHistory(
         chatId: Long,
         text: String,
@@ -1069,6 +1083,84 @@ private fun AiAgentMainChat(
         }
         return response.choices.firstOrNull()?.message?.content?.trim().orEmpty()
             .ifEmpty { "Пустой ответ от ${requestApi.label}." }
+    }
+
+    suspend fun callApiWithHistory(history: List<AiAgentMessage>): String {
+        val requestApi = selectedApi
+        val model = modelInput.trim().ifEmpty { requestApi.defaultModel }
+        val apiKey = aiAgentReadApiKey(requestApi.envVar)
+        if (apiKey.isBlank()) error("Нет API ключа. Проверьте ${requestApi.envVar}")
+        val messages = buildList {
+            buildLtmSystemMessage()?.let { add(it) }
+            buildMcpSystemMessageCached()?.let { add(it) }
+            history.forEach { message ->
+                add(
+                    DeepSeekMessage(
+                        role = if (message.isUser) "user" else "assistant",
+                        content = message.text
+                    )
+                )
+            }
+        }
+        val request = DeepSeekChatRequest(model = model, messages = messages)
+        val response = when (requestApi) {
+            AiAgentApi.DeepSeek -> deepSeekApi.createChatCompletionStreaming(apiKey = apiKey, request = request, onChunk = {})
+            AiAgentApi.OpenAI -> openAiApi.createChatCompletionStreaming(apiKey = apiKey, request = request, onChunk = {})
+            AiAgentApi.GigaChat -> gigaChatApi.createChatCompletionStreaming(accessToken = apiKey, request = request, onChunk = {})
+            AiAgentApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletionStreaming(apiKey = apiKey, request = request, onChunk = {})
+            AiAgentApi.LocalLlm -> localLlmApi.createChatCompletionStreaming(request = request, onChunk = {})
+        }
+        return response.choices.firstOrNull()?.message?.content?.trim().orEmpty()
+            .ifEmpty { "Пустой ответ от ${requestApi.label}." }
+    }
+
+    fun sendRegularChatMessage() {
+        val chatId = activeChatId ?: return
+        val trimmed = inputText.text.trim()
+        if (trimmed.isEmpty() || isLoading) return
+
+        val mainMessages = ensureMainBranch(chatId)
+        isBranchingEnabled = true
+        selectedBranchNumber = 1
+        agentState = AgentState.Idle
+        planClarificationNeeded = null
+
+        val userMsg = AiAgentMessage(
+            text = trimmed,
+            isUser = true,
+            paramsInfo = "stage=chat",
+            stream = AiAgentStream.Raw,
+            epoch = 0,
+            createdAt = System.currentTimeMillis()
+        )
+        mainMessages += userMsg
+        appendMessageToBranch(chatId, 1, userMsg)
+        inputText = TextFieldValue("")
+
+        scope.launch {
+            val sessionId = chatSessionId
+            isLoading = true
+            val result = try {
+                isErrorState = false
+                callApiWithHistory(mainMessages.toList())
+            } catch (e: Exception) {
+                isErrorState = true
+                "Request failed: ${e.message ?: "unknown error"}"
+            }
+            if (sessionId != chatSessionId) { isLoading = false; return@launch }
+
+            val respMsg = AiAgentMessage(
+                text = result,
+                isUser = false,
+                paramsInfo = "stage=chat",
+                stream = AiAgentStream.Raw,
+                epoch = 0,
+                createdAt = System.currentTimeMillis()
+            )
+            mainMessages += respMsg
+            appendMessageToBranch(chatId, 1, respMsg)
+            isLoading = false
+        }
     }
 
     suspend fun callExecutionStepApi(
@@ -2311,7 +2403,48 @@ private fun AiAgentMainChat(
         invariantViolations = emptyList()
         apiSelectorExpanded = false
         modelSelectorExpanded = false
+        if (!isStateMachineEnabled) {
+            agentState = AgentState.Idle
+            isErrorState = false
+            isPaused = false
+            planClarificationNeeded = null
+            validationFailure = null
+            validationRecoveryBranchNumber = null
+            validationRecoveryAttempt = 0
+            planInvariantCheckFailed = false
+            planInvariantViolationByAi = false
+            val hasMainBranch = branchesByChat[chatId]?.any { it.number == 1 } == true
+            selectedBranchNumber = if (hasMainBranch) 1 else null
+            isBranchingEnabled = hasMainBranch
+        }
         selectedProfileId?.let { loadLongTermMemoryForProfile(it) }
+    }
+
+    fun setStateMachineEnabled(enabled: Boolean) {
+        if (isStateMachineEnabled == enabled || isLoading) return
+        isStateMachineEnabled = enabled
+        saveAppSettingBool("state_machine_enabled", enabled)
+
+        if (!enabled) {
+            chatSessionId++
+            agentState = AgentState.Idle
+            isErrorState = false
+            isPaused = false
+            planClarificationNeeded = null
+            validationFailure = null
+            validationRecoveryBranchNumber = null
+            validationRecoveryAttempt = 0
+            invariantViolations = emptyList()
+            planInvariantCheckFailed = false
+            planInvariantViolationByAi = false
+            activeChatId?.let { chatId ->
+                val mainMessages = ensureMainBranch(chatId)
+                isBranchingEnabled = mainMessages.isNotEmpty() || (branchesByChat[chatId]?.isNotEmpty() == true)
+                selectedBranchNumber = if (isBranchingEnabled) 1 else null
+            }
+        } else {
+            activeChatId?.let(::openChat)
+        }
     }
 
     fun createNewChatAndOpen() {
@@ -2364,6 +2497,7 @@ private fun AiAgentMainChat(
 
     LaunchedEffect(Unit) {
         ensureProfileAndLtm()
+        isStateMachineEnabled = appSettingBool("state_machine_enabled", default = true)
         isMcpEnabled = appSettingBool("mcp_enabled", default = false)
         isInvariantsEnabled = appSettingBool("invariants_enabled", default = true)
         mcpServerOptions.forEach { server ->
@@ -2383,10 +2517,14 @@ private fun AiAgentMainChat(
         if (!isLoading) inputFocusRequester.requestFocus()
     }
 
+    val displayBranchNumber = if (isStateMachineEnabled) {
+        selectedBranchNumber
+    } else {
+        selectedBranchNumber ?: 1
+    }
     val displayMessages: List<AiAgentMessage> =
-        if (isBranchingEnabled && selectedBranchNumber != null)
-            branchesByChat[activeChatId]?.firstOrNull { it.number == selectedBranchNumber }?.messages
-                ?: emptyList()
+        if (isBranchingEnabled && displayBranchNumber != null)
+            branchesByChat[activeChatId]?.firstOrNull { it.number == displayBranchNumber }?.messages ?: emptyList()
         else emptyList()
 
     val latestExecutionAssistantMessage = displayMessages.lastOrNull { message ->
@@ -2458,11 +2596,17 @@ private fun AiAgentMainChat(
                 },
                 actions = {
                     Text(
-                        text = agentState.name,
+                        text = if (isStateMachineEnabled) agentState.name else "CHAT",
                         style = MaterialTheme.typography.labelSmall,
                         color = AiAgentMainScreenTheme.topBarContent,
                         modifier = Modifier.padding(horizontal = 8.dp)
                     )
+                    TextButton(
+                        onClick = { setStateMachineEnabled(!isStateMachineEnabled) },
+                        enabled = !isLoading
+                    ) {
+                        Text(if (isStateMachineEnabled) "State ON" else "State OFF")
+                    }
                     TextButton(onClick = { isInvariantPanelVisible = !isInvariantPanelVisible }) {
                         Text(if (isInvariantPanelVisible) "Инварианты ▾" else "Инварианты ▸")
                     }
@@ -2624,6 +2768,7 @@ private fun AiAgentMainChat(
                                                         if (activeChatId != chat.id) openChat(chat.id)
                                                         restartBranch(chat.id, branch.number)
                                                     },
+                                                    enabled = !isLoading && isStateMachineEnabled,
                                                     contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp),
                                                     modifier = Modifier.height(28.dp)
                                                 ) {
@@ -2722,7 +2867,7 @@ private fun AiAgentMainChat(
                     items(displayMessages) { message ->
                         AiAgentBubble(message = message)
                     }
-                    if (agentState == AgentState.Execution && parsedExecutionJson != null) {
+                    if (isStateMachineEnabled && agentState == AgentState.Execution && parsedExecutionJson != null) {
                         item {
                             Box(
                                 modifier = Modifier
@@ -2857,7 +3002,44 @@ private fun AiAgentMainChat(
                 }
 
                 // State machine action area
-                when {
+                if (!isStateMachineEnabled) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.Bottom,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedTextField(
+                            value = inputText,
+                            onValueChange = { inputText = it },
+                            modifier = Modifier
+                                .weight(1f)
+                                .focusRequester(inputFocusRequester)
+                                .onPreviewKeyEvent { keyEvent ->
+                                    if (keyEvent.type != KeyEventType.KeyDown || keyEvent.key != Key.Enter) {
+                                        return@onPreviewKeyEvent false
+                                    }
+                                    if (keyEvent.isAltPressed || keyEvent.isShiftPressed || keyEvent.isCtrlPressed) {
+                                        val start = inputText.selection.min
+                                        val end = inputText.selection.max
+                                        inputText = inputText.copy(
+                                            text = inputText.text.replaceRange(start, end, "\n"),
+                                            selection = TextRange(start + 1)
+                                        )
+                                        return@onPreviewKeyEvent true
+                                    }
+                                    sendRegularChatMessage()
+                                    true
+                                },
+                            enabled = !isLoading,
+                            label = { Text("Сообщение") },
+                            maxLines = 4
+                        )
+                        Button(
+                            onClick = ::sendRegularChatMessage,
+                            enabled = inputText.text.isNotBlank() && !isLoading
+                        ) { Text("Отправить") }
+                    }
+                } else when {
                     (agentState == AgentState.Execution || agentState == AgentState.Checking) && isLoading -> {
                         Row(
                             modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp),
@@ -3082,7 +3264,7 @@ private fun AiAgentMainChat(
                                             )
                                             return@onPreviewKeyEvent true
                                         }
-                                        startPlanningPhase()
+                                        if (isStateMachineEnabled) startPlanningPhase() else sendRegularChatMessage()
                                         true
                                     },
                                 enabled = !isLoading,
@@ -3090,7 +3272,9 @@ private fun AiAgentMainChat(
                                 maxLines = 4
                             )
                             Button(
-                                onClick = ::startPlanningPhase,
+                                onClick = {
+                                    if (isStateMachineEnabled) startPlanningPhase() else sendRegularChatMessage()
+                                },
                                 enabled = inputText.text.isNotBlank() && !isLoading
                             ) { Text("Отправить") }
                         }
