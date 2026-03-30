@@ -2618,21 +2618,6 @@ private fun AiAgentMainChat(
                         color = AiAgentMainScreenTheme.topBarContent,
                         modifier = Modifier.padding(horizontal = 8.dp)
                     )
-                    TextButton(
-                        onClick = { setStateMachineEnabled(!isStateMachineEnabled) },
-                        enabled = !isLoading
-                    ) {
-                        Text(if (isStateMachineEnabled) "State ON" else "State OFF")
-                    }
-                    TextButton(onClick = { isInvariantPanelVisible = !isInvariantPanelVisible }) {
-                        Text(if (isInvariantPanelVisible) "Инварианты ▾" else "Инварианты ▸")
-                    }
-                    TextButton(onClick = { isMemoryPanelVisible = !isMemoryPanelVisible }) {
-                        Text(if (isMemoryPanelVisible) "Память ▾" else "Память ▸")
-                    }
-                    TextButton(onClick = { isMcpPanelVisible = !isMcpPanelVisible }) {
-                        Text(if (isMcpPanelVisible) "MCP on" else "MCP off")
-                    }
                     TextButton(onClick = ::createNewChatAndOpen, enabled = !isLoading) {
                         Text("Новый чат")
                     }
@@ -2663,6 +2648,63 @@ private fun AiAgentMainChat(
                     Box(modifier = Modifier.weight(1f))
                     TextButton(onClick = ::deleteAllChats, enabled = chats.isNotEmpty() && !isLoading) {
                         Text("Удалить всё")
+                    }
+                }
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(8.dp))
+                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                ) {
+                    Text("Screen Features", style = MaterialTheme.typography.labelSmall)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Checkbox(
+                            checked = isStateMachineEnabled,
+                            onCheckedChange = { setStateMachineEnabled(it) },
+                            enabled = !isLoading
+                        )
+                        Text("State machine", style = MaterialTheme.typography.labelSmall)
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Checkbox(
+                            checked = isInvariantPanelVisible,
+                            onCheckedChange = { isInvariantPanelVisible = it },
+                            enabled = !isLoading
+                        )
+                        Text("Invariants panel", style = MaterialTheme.typography.labelSmall)
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Checkbox(
+                            checked = isMemoryPanelVisible,
+                            onCheckedChange = { isMemoryPanelVisible = it },
+                            enabled = !isLoading
+                        )
+                        Text("Memory panel", style = MaterialTheme.typography.labelSmall)
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Checkbox(
+                            checked = isMcpPanelVisible,
+                            onCheckedChange = { isMcpPanelVisible = it },
+                            enabled = !isLoading
+                        )
+                        Text("MCP panel", style = MaterialTheme.typography.labelSmall)
                     }
                 }
                 LazyColumn(
