@@ -53,3 +53,20 @@ internal val agentCommandSuggestions = listOf(
         description = "Задать вопрос о проекте по документации, MCP и RAG"
     )
 )
+
+internal fun shouldShowAgentCommandMenu(
+    text: String,
+    isAgentModeEnabled: Boolean
+): Boolean {
+    if (!isAgentModeEnabled) return false
+    if (!text.startsWith("/")) return false
+    if (text == "/") return true
+    if (text.any { it.isWhitespace() }) return false
+    if (agentCommandSuggestions.any { it.command.equals(text, ignoreCase = true) }) return false
+
+    val commandInput = text.removePrefix("/").lowercase()
+    return agentCommandSuggestions.any { suggestion ->
+        val command = suggestion.command.removePrefix("/").lowercase()
+        command.startsWith(commandInput)
+    }
+}

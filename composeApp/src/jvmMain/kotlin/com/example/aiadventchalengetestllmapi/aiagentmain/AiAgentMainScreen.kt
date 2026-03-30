@@ -352,6 +352,17 @@ private fun AiAgentMainChat(
         return buildAiAgentMainRagPayload(query = query, chunks = rows)
     }
 
+    fun loadAgentRagCatalog(): AgentRagCatalog {
+        val sources = embQueries.selectAll().executeAsList().map { row ->
+            AgentRagSourceMeta(
+                title = row.title,
+                section = row.section,
+                source = row.source
+            )
+        }.distinctBy { "${it.title}|${it.section}|${it.source}" }
+        return AgentRagCatalog(sources = sources)
+    }
+
     fun ensureWebSocketLogChatId(server: McpServerOption, toolName: String): Long {
         val key = websocketChatKey(server.url, toolName)
         val existing = websocketChatIdsByKey[key]
@@ -1182,7 +1193,10 @@ private fun AiAgentMainChat(
 
     fun updateInputText(next: TextFieldValue) {
         inputText = next
-        isAgentCommandMenuExpanded = agentModeState.isEnabled && next.text.startsWith("/")
+        isAgentCommandMenuExpanded = shouldShowAgentCommandMenu(
+            text = next.text,
+            isAgentModeEnabled = agentModeState.isEnabled
+        )
     }
 
     fun appendRegularMessage(chatId: Long, message: AiAgentMessage) {
@@ -1330,17 +1344,69 @@ private fun AiAgentMainChat(
                                     remoteMcpService = remoteMcpService,
                                     servers = mcpServerOptions
                                 )
+                                val ragCatalog = loadAgentRagCatalog()
                                 val requestApi = selectedApi
                                 val model = modelInput.trim().ifEmpty { requestApi.defaultModel }
                                 val apiKey = aiAgentReadApiKey(requestApi.envVar)
                                 if (apiKey.isBlank()) error("Нет API ключа. Проверьте ${requestApi.envVar}")
                                 isErrorState = false
                                 agentHelpCommandUseCase.execute(
-                                    projectFolderPath = projectFolderPath,
-                                    userQuestion = command.question,
-                                    ragPayload = ragPayload,
+                                    request = AgentHelpRequest(
+                                        projectFolderPath = projectFolderPath,
+                                        userQuestion = command.question?.trim().orEmpty().ifBlank {
+                                            "Дай общий обзор проекта: назначение, основные модули и точки входа."
+                                        }
+                                    ),
                                     mcpContext = mcpContext,
-                                    callModel = { requestMessages ->
+                                    ragCatalog = ragCatalog,
+                                    runMcpTool = { plan ->
+                                        val target = mcpContext.snapshots
+                                            .asSequence()
+                                            .filter { it.error == null }
+                                            .filter { snapshot ->
+                                                snapshot.tools.any { it.name.equals(plan.toolName, ignoreCase = true) }
+                                            }
+                                            .firstOrNull { snapshot ->
+                                                val endpoint = plan.endpoint?.trim()
+                                                endpoint.isNullOrBlank() || endpointMatchesServer(endpoint, snapshot.url)
+                                            }
+                                        if (target == null) {
+                                            AgentMcpExecutionResult(
+                                                request = plan,
+                                                output = null,
+                                                error = "Инструмент недоступен в MCP контексте"
+                                            )
+                                        } else {
+                                            runCatching {
+                                                remoteMcpService.callTool(
+                                                    serverUrl = target.url,
+                                                    toolName = plan.toolName,
+                                                    arguments = plan.arguments
+                                                )
+                                            }.fold(
+                                                onSuccess = { output ->
+                                                    AgentMcpExecutionResult(
+                                                        request = plan,
+                                                        output = output
+                                                    )
+                                                },
+                                                onFailure = { error ->
+                                                    AgentMcpExecutionResult(
+                                                        request = plan,
+                                                        output = null,
+                                                        error = error.message ?: error::class.simpleName ?: "unknown"
+                                                    )
+                                                }
+                                            )
+                                        }
+                                    },
+                                    runRagQuery = { query ->
+                                        AgentRagExecutionResult(
+                                            query = query,
+                                            payload = buildRagPayloadForPrompt(query = query, forceEnabled = true)
+                                        )
+                                    },
+                                    callPlanningModel = { requestMessages ->
                                         callAiAgentMainApi(
                                             requestApi = requestApi,
                                             model = model,
@@ -1350,7 +1416,31 @@ private fun AiAgentMainChat(
                                             openAiApi = openAiApi,
                                             gigaChatApi = gigaChatApi,
                                             proxyOpenAiApi = proxyOpenAiApi,
-                                            localLlmApi = localLlmApi
+                                            localLlmApi = localLlmApi,
+                                            options = AgentModelRequestOptions(
+                                                temperature = 0.05,
+                                                topP = 0.1,
+                                                maxTokens = 1200,
+                                                responseFormat = DeepSeekResponseFormat(type = "json_object")
+                                            )
+                                        )
+                                    },
+                                    callAnsweringModel = { requestMessages ->
+                                        callAiAgentMainApi(
+                                            requestApi = requestApi,
+                                            model = model,
+                                            apiKey = apiKey,
+                                            requestMessages = requestMessages,
+                                            deepSeekApi = deepSeekApi,
+                                            openAiApi = openAiApi,
+                                            gigaChatApi = gigaChatApi,
+                                            proxyOpenAiApi = proxyOpenAiApi,
+                                            localLlmApi = localLlmApi,
+                                            options = AgentModelRequestOptions(
+                                                temperature = 0.2,
+                                                topP = 0.8,
+                                                maxTokens = 4000
+                                            )
                                         )
                                     }
                                 )
@@ -2889,7 +2979,10 @@ private fun AiAgentMainChat(
                                 if (checked && isStateMachineEnabled) {
                                     setStateMachineEnabled(false)
                                 }
-                                isAgentCommandMenuExpanded = checked && inputText.text.startsWith("/")
+                                isAgentCommandMenuExpanded = shouldShowAgentCommandMenu(
+                                    text = inputText.text,
+                                    isAgentModeEnabled = checked
+                                )
                             },
                             enabled = !isLoading
                         )
@@ -3362,6 +3455,23 @@ private fun AiAgentMainChat(
 
                 // State machine action area
                 if (!isStateMachineEnabled) {
+                    AiAgentMainCommandMenu(
+                        expanded = isAgentCommandMenuExpanded,
+                        suggestions = agentCommandSuggestions,
+                        modifier = Modifier.fillMaxWidth(),
+                        onDismiss = { isAgentCommandMenuExpanded = false },
+                        onSelect = { suggestion ->
+                            val value = "${suggestion.command} "
+                            updateInputText(
+                                TextFieldValue(
+                                    text = value,
+                                    selection = TextRange(value.length)
+                                )
+                            )
+                            inputFocusRequester.requestFocus()
+                            isAgentCommandMenuExpanded = false
+                        }
+                    )
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.Bottom,
@@ -3400,21 +3510,6 @@ private fun AiAgentMainChat(
                             enabled = inputText.text.isNotBlank() && !isLoading
                         ) { Text("Отправить") }
                     }
-                    AiAgentMainCommandMenu(
-                        expanded = isAgentCommandMenuExpanded,
-                        suggestions = agentCommandSuggestions,
-                        onDismiss = { isAgentCommandMenuExpanded = false },
-                        onSelect = { suggestion ->
-                            val value = "${suggestion.command} "
-                            updateInputText(
-                                TextFieldValue(
-                                    text = value,
-                                    selection = TextRange(value.length)
-                                )
-                            )
-                            isAgentCommandMenuExpanded = false
-                        }
-                    )
                 } else when {
                     (agentState == AgentState.Execution || agentState == AgentState.Checking) && isLoading -> {
                         Row(

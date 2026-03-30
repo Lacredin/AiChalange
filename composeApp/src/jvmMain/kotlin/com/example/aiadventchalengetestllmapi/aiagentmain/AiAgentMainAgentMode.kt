@@ -4,8 +4,13 @@ import com.example.aiadventchalengetestllmapi.mcp.McpToolInfo
 import com.example.aiadventchalengetestllmapi.mcp.RemoteMcpService
 import com.example.aiadventchalengetestllmapi.network.DeepSeekChatRequest
 import com.example.aiadventchalengetestllmapi.network.DeepSeekMessage
+import com.example.aiadventchalengetestllmapi.network.DeepSeekResponseFormat
 import java.io.File
 import javax.swing.JFileChooser
+import kotlinx.coroutines.async
+import kotlinx.coroutines.supervisorScope
+
+internal const val AGENT_NO_CONTEXT_MESSAGE = "Нет контекста для выполнения запроса. Переформулируйте."
 
 internal data class AgentModeState(
     val isEnabled: Boolean = false,
@@ -28,6 +33,39 @@ internal data class AgentProjectContext(
     val rootPath: String,
     val treePreview: String,
     val snippetsPreview: String
+)
+
+internal data class AgentRagSourceMeta(
+    val title: String,
+    val section: String,
+    val source: String
+)
+
+internal data class AgentRagCatalog(
+    val sources: List<AgentRagSourceMeta>
+)
+
+internal data class AgentHelpRequest(
+    val projectFolderPath: String,
+    val userQuestion: String
+)
+
+internal data class AgentMcpExecutionResult(
+    val request: AgentMcpRequestPlan,
+    val output: String?,
+    val error: String? = null
+)
+
+internal data class AgentRagExecutionResult(
+    val query: String,
+    val payload: AiAgentMainRagPayload?
+)
+
+internal data class AgentModelRequestOptions(
+    val temperature: Double? = null,
+    val topP: Double? = null,
+    val maxTokens: Int? = null,
+    val responseFormat: DeepSeekResponseFormat? = null
 )
 
 internal class AgentProjectContextProvider {
@@ -66,9 +104,7 @@ internal class AgentProjectContextProvider {
             val relative = child.relativeTo(root).invariantSeparatorsPath
             val prefix = "  ".repeat(depth)
             into += if (child.isDirectory) "$prefix- $relative/" else "$prefix- $relative"
-            if (child.isDirectory) {
-                buildTreePreview(root, child, depth + 1, maxDepth, maxEntries, into)
-            }
+            if (child.isDirectory) buildTreePreview(root, child, depth + 1, maxDepth, maxEntries, into)
         }
     }
 
@@ -99,10 +135,9 @@ internal class AgentProjectContextProvider {
         candidates.distinctBy { it.absolutePath }.take(10).forEach { file ->
             val text = runCatching { file.readText() }.getOrDefault("")
             if (text.isBlank()) return@forEach
-            val normalized = text.replace(Regex("\\s+"), " ").trim()
-            val preview = normalized.take(700)
+            val normalized = text.replace(Regex("\\s+"), " ").trim().take(700)
             sb.appendLine("FILE: ${file.relativeTo(root).invariantSeparatorsPath}")
-            sb.appendLine(preview)
+            sb.appendLine(normalized)
             sb.appendLine()
         }
         return sb.toString().trim()
@@ -113,53 +148,152 @@ internal class AgentHelpCommandUseCase(
     private val projectContextProvider: AgentProjectContextProvider = AgentProjectContextProvider()
 ) {
     suspend fun execute(
-        projectFolderPath: String,
-        userQuestion: String?,
-        ragPayload: AiAgentMainRagPayload?,
-        mcpContext: AgentMcpContext?,
-        callModel: suspend (List<DeepSeekMessage>) -> String
+        request: AgentHelpRequest,
+        mcpContext: AgentMcpContext,
+        ragCatalog: AgentRagCatalog,
+        runMcpTool: suspend (request: AgentMcpRequestPlan) -> AgentMcpExecutionResult,
+        runRagQuery: suspend (query: String) -> AgentRagExecutionResult,
+        callPlanningModel: suspend (messages: List<DeepSeekMessage>) -> String,
+        callAnsweringModel: suspend (messages: List<DeepSeekMessage>) -> String
     ): String {
-        val question = userQuestion?.trim().orEmpty()
-        val effectiveQuestion = if (question.isBlank()) {
-            "Дай общий обзор проекта: назначение, основные модули, точки входа и где искать ключевую бизнес-логику."
-        } else {
-            question
-        }
-        val projectContext = projectContextProvider.load(projectFolderPath)
-        val messages = buildList {
-            add(
-                DeepSeekMessage(
-                    role = "system",
-                    content = AGENT_HELP_SYSTEM_PROMPT
-                )
+        val projectContext = projectContextProvider.load(request.projectFolderPath)
+
+        val planningPrompt = AgentPlanningPromptFactory.create(
+            AgentPlanningPromptInput(
+                userRequest = request.userQuestion,
+                projectFolderPath = projectContext.rootPath,
+                mcpSummary = buildPlanningMcpSummary(mcpContext),
+                ragSourcesSummary = buildPlanningRagSummary(ragCatalog)
             )
-            add(
-                DeepSeekMessage(
-                    role = "system",
-                    content = buildProjectContextPrompt(projectContext)
-                )
-            )
-            mcpContext?.promptContext
-                ?.takeIf { it.isNotBlank() }
-                ?.let { add(DeepSeekMessage(role = "system", content = it)) }
-            ragPayload?.promptContext
-                ?.takeIf { it.isNotBlank() }
-                ?.let { add(DeepSeekMessage(role = "system", content = it)) }
-            add(DeepSeekMessage(role = "user", content = effectiveQuestion))
+        )
+
+        val planningRaw = callPlanningModel(
+            listOf(DeepSeekMessage(role = "user", content = planningPrompt))
+        )
+        val decision = AgentPlanningParser.parse(planningRaw) ?: return AGENT_NO_CONTEXT_MESSAGE
+        if (!decision.hasContext || decision.strategy == AgentPlanningStrategy.NONE) return AGENT_NO_CONTEXT_MESSAGE
+        if (decision.strategy == AgentPlanningStrategy.MCP && decision.mcpRequests.isEmpty()) return AGENT_NO_CONTEXT_MESSAGE
+        if (decision.strategy == AgentPlanningStrategy.RAG && decision.ragQueries.isEmpty()) return AGENT_NO_CONTEXT_MESSAGE
+        if (decision.strategy == AgentPlanningStrategy.MCP_AND_RAG &&
+            decision.mcpRequests.isEmpty() &&
+            decision.ragQueries.isEmpty()
+        ) {
+            return AGENT_NO_CONTEXT_MESSAGE
         }
-        return callModel(messages)
+
+        val mcpResults: List<AgentMcpExecutionResult>
+        val ragResults: List<AgentRagExecutionResult>
+        when (decision.strategy) {
+            AgentPlanningStrategy.MCP -> {
+                mcpResults = executeMcpBranch(decision, runMcpTool)
+                ragResults = emptyList()
+            }
+
+            AgentPlanningStrategy.RAG -> {
+                mcpResults = emptyList()
+                ragResults = executeRagBranch(decision, runRagQuery)
+            }
+
+            AgentPlanningStrategy.MCP_AND_RAG -> {
+                val parallelResults = supervisorScope {
+                    val mcpDeferred = async { executeMcpBranch(decision, runMcpTool) }
+                    val ragDeferred = async { executeRagBranch(decision, runRagQuery) }
+                    mcpDeferred.await() to ragDeferred.await()
+                }
+                mcpResults = parallelResults.first
+                ragResults = parallelResults.second
+            }
+
+            AgentPlanningStrategy.NONE -> return AGENT_NO_CONTEXT_MESSAGE
+        }
+
+        val mcpContextText = buildMcpExecutionContext(mcpResults)
+        val ragContextText = buildRagExecutionContext(ragResults)
+        val hasUsefulMcp = mcpResults.any { !it.output.isNullOrBlank() }
+        val hasUsefulRag = ragResults.any { !it.payload?.selectedChunks.isNullOrEmpty() }
+        if (!hasUsefulMcp && !hasUsefulRag) return AGENT_NO_CONTEXT_MESSAGE
+
+        val answerPrompt = AgentAnswerPromptFactory.create(
+            AgentAnswerPromptInput(
+                userRequest = request.userQuestion,
+                projectFolderPath = projectContext.rootPath,
+                planningReason = decision.reason,
+                mcpContext = mcpContextText,
+                ragContext = ragContextText
+            )
+        )
+
+        val answer = callAnsweringModel(listOf(DeepSeekMessage(role = "user", content = answerPrompt))).trim()
+        return answer.ifEmpty { AGENT_NO_CONTEXT_MESSAGE }
     }
 
-    private fun buildProjectContextPrompt(context: AgentProjectContext): String = buildString {
-        appendLine("Контекст выбранного проекта (локальная папка):")
-        appendLine("project_root: ${context.rootPath}")
-        appendLine()
-        appendLine("Структура каталогов/файлов (ограниченный превью):")
-        appendLine(context.treePreview)
-        appendLine()
-        appendLine("Фрагменты ключевых файлов:")
-        appendLine(context.snippetsPreview)
-    }.trim()
+    private suspend fun executeMcpBranch(
+        decision: AgentRoutingDecision,
+        runMcpTool: suspend (request: AgentMcpRequestPlan) -> AgentMcpExecutionResult
+    ): List<AgentMcpExecutionResult> {
+        if (decision.mcpRequests.isEmpty()) return emptyList()
+        return decision.mcpRequests.map { request -> runMcpTool(request) }
+    }
+
+    private suspend fun executeRagBranch(
+        decision: AgentRoutingDecision,
+        runRagQuery: suspend (query: String) -> AgentRagExecutionResult
+    ): List<AgentRagExecutionResult> {
+        if (decision.ragQueries.isEmpty()) return emptyList()
+        return decision.ragQueries.distinct().map { query -> runRagQuery(query) }
+    }
+
+    private fun buildPlanningMcpSummary(context: AgentMcpContext): String {
+        if (context.snapshots.isEmpty()) return "MCP недоступен: серверы не настроены."
+        val lines = mutableListOf<String>()
+        context.snapshots.forEach { snapshot ->
+            if (snapshot.error != null) {
+                lines += "Server ${snapshot.title}: недоступен (${snapshot.error})"
+            } else if (snapshot.tools.isEmpty()) {
+                lines += "Server ${snapshot.title}: инструментов нет"
+            } else {
+                val tools = snapshot.tools.joinToString(", ") { it.name }
+                lines += "Server ${snapshot.title}: $tools"
+            }
+        }
+        return lines.joinToString("\n")
+    }
+
+    private fun buildPlanningRagSummary(catalog: AgentRagCatalog): String {
+        if (catalog.sources.isEmpty()) return "RAG недоступен: индекс пустой."
+        return catalog.sources
+            .distinctBy { "${it.title}|${it.section}|${it.source}" }
+            .take(60)
+            .joinToString("\n") { src -> "${src.title} | ${src.section} | ${src.source}" }
+    }
+
+    private fun buildMcpExecutionContext(results: List<AgentMcpExecutionResult>): String {
+        if (results.isEmpty()) return ""
+        return results.joinToString("\n\n") { result ->
+            buildString {
+                appendLine("tool=${result.request.toolName}")
+                result.request.endpoint?.let { appendLine("endpoint=$it") }
+                if (!result.error.isNullOrBlank()) appendLine("error=${result.error}")
+                if (!result.output.isNullOrBlank()) append("output=${result.output}")
+            }.trim()
+        }
+    }
+
+    private fun buildRagExecutionContext(results: List<AgentRagExecutionResult>): String {
+        if (results.isEmpty()) return ""
+        return results.joinToString("\n\n") { result ->
+            val payload = result.payload
+            if (payload == null) {
+                "query=${result.query}\ncontext=empty"
+            } else {
+                buildString {
+                    appendLine("query=${result.query}")
+                    appendLine("retrieval_info=${payload.retrievalInfo}")
+                    append("context=${payload.promptContext}")
+                }
+            }
+        }
+    }
 }
 
 internal suspend fun collectAgentMcpContext(
@@ -240,9 +374,17 @@ internal suspend fun callAiAgentMainApi(
     openAiApi: com.example.aiadventchalengetestllmapi.network.OpenAiApi,
     gigaChatApi: com.example.aiadventchalengetestllmapi.network.GigaChatApi,
     proxyOpenAiApi: com.example.aiadventchalengetestllmapi.network.ProxyOpenAiApi,
-    localLlmApi: com.example.aiadventchalengetestllmapi.network.LocalLlmApi
+    localLlmApi: com.example.aiadventchalengetestllmapi.network.LocalLlmApi,
+    options: AgentModelRequestOptions = AgentModelRequestOptions()
 ): String {
-    val request = DeepSeekChatRequest(model = model, messages = requestMessages)
+    val request = DeepSeekChatRequest(
+        model = model,
+        messages = requestMessages,
+        temperature = options.temperature,
+        topP = options.topP,
+        maxTokens = options.maxTokens,
+        responseFormat = options.responseFormat
+    )
     val response = when (requestApi) {
         AiAgentApi.DeepSeek -> deepSeekApi.createChatCompletionStreaming(apiKey = apiKey, request = request, onChunk = {})
         AiAgentApi.OpenAI -> openAiApi.createChatCompletionStreaming(apiKey = apiKey, request = request, onChunk = {})
@@ -253,10 +395,3 @@ internal suspend fun callAiAgentMainApi(
     return response.choices.firstOrNull()?.message?.content?.trim().orEmpty()
         .ifEmpty { "Пустой ответ от ${requestApi.label}." }
 }
-
-private const val AGENT_HELP_SYSTEM_PROMPT = """
-Ты работаешь в режиме "Агент" для локального проекта.
-Твоя задача: отвечать строго по контексту выбранной папки проекта, RAG-контексту и MCP-контексту.
-Если данных недостаточно, явно скажи об этом и укажи, какие данные нужны.
-Отвечай на русском языке, структурировано и кратко.
-"""
