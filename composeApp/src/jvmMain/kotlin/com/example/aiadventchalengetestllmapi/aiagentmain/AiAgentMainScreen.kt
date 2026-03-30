@@ -178,6 +178,7 @@ private fun AiAgentMainChat(
 
     // Branching
     val branchesByChat = remember { mutableStateMapOf<Long, SnapshotStateList<AiAgentBranchItem>>() }
+    val regularMessagesByChat = remember { mutableStateMapOf<Long, SnapshotStateList<AiAgentMessage>>() }
     val branchCounterByChat = remember { mutableStateMapOf<Long, Int>() }
     val branchVisibilityByChat = remember { mutableStateMapOf<Long, Boolean>() }
     var selectedBranchNumber by remember { mutableStateOf<Int?>(null) }
@@ -280,6 +281,32 @@ private fun AiAgentMainChat(
             params_info = message.paramsInfo,
             stream = if (message.stream == AiAgentStream.Real) "real" else "raw",
             epoch = message.epoch.toLong(),
+            created_at = message.createdAt
+        )
+    }
+
+    fun loadRegularMessagesForChat(chatId: Long): SnapshotStateList<AiAgentMessage> {
+        val messages = queries.selectMessagesByChat(chatId).executeAsList().map { row ->
+            AiAgentMessage(
+                text = row.message,
+                isUser = row.role == "user",
+                paramsInfo = row.params_info,
+                stream = AiAgentStream.Raw,
+                epoch = 0,
+                createdAt = row.created_at
+            )
+        }
+        return mutableStateListOf<AiAgentMessage>().also { it += messages }
+    }
+
+    fun appendMessageToRegularChat(chatId: Long, message: AiAgentMessage) {
+        queries.insertMessage(
+            chat_id = chatId,
+            api = selectedApi.label,
+            model = modelInput.trim().ifEmpty { selectedApi.defaultModel },
+            role = if (message.isUser) "user" else "assistant",
+            message = message.text,
+            params_info = message.paramsInfo,
             created_at = message.createdAt
         )
     }
@@ -906,19 +933,6 @@ private fun AiAgentMainChat(
         return nextBranchNumber to createStateBranch(chatId, nextBranchNumber, name)
     }
 
-    fun ensureMainBranch(chatId: Long): SnapshotStateList<AiAgentMessage> {
-        val branches = branchesByChat.getOrPut(chatId) {
-            loadBranchesForChat(chatId).ifEmpty { mutableStateListOf() }
-        }
-        branches.firstOrNull { it.number == 1 }?.let { return it.messages }
-        val messages = mutableStateListOf<AiAgentMessage>()
-        branches.add(0, AiAgentBranchItem(number = 1, messages = messages))
-        branchCounterByChat[chatId] = maxOf(branchCounterByChat[chatId] ?: 0, 1)
-        branchVisibilityByChat.putIfAbsent(chatId, true)
-        branchNames[1] = "Основная"
-        return messages
-    }
-
     fun appendValidationRecoveryHistory(
         chatId: Long,
         text: String,
@@ -1119,9 +1133,9 @@ private fun AiAgentMainChat(
         val trimmed = inputText.text.trim()
         if (trimmed.isEmpty() || isLoading) return
 
-        val mainMessages = ensureMainBranch(chatId)
-        isBranchingEnabled = true
-        selectedBranchNumber = 1
+        val regularMessages = regularMessagesByChat.getOrPut(chatId) { loadRegularMessagesForChat(chatId) }
+        isBranchingEnabled = false
+        selectedBranchNumber = null
         agentState = AgentState.Idle
         planClarificationNeeded = null
 
@@ -1133,8 +1147,8 @@ private fun AiAgentMainChat(
             epoch = 0,
             createdAt = System.currentTimeMillis()
         )
-        mainMessages += userMsg
-        appendMessageToBranch(chatId, 1, userMsg)
+        regularMessages += userMsg
+        appendMessageToRegularChat(chatId, userMsg)
         inputText = TextFieldValue("")
 
         scope.launch {
@@ -1142,7 +1156,7 @@ private fun AiAgentMainChat(
             isLoading = true
             val result = try {
                 isErrorState = false
-                callApiWithHistory(mainMessages.toList())
+                callApiWithHistory(regularMessages.toList())
             } catch (e: Exception) {
                 isErrorState = true
                 "Request failed: ${e.message ?: "unknown error"}"
@@ -1157,8 +1171,8 @@ private fun AiAgentMainChat(
                 epoch = 0,
                 createdAt = System.currentTimeMillis()
             )
-            mainMessages += respMsg
-            appendMessageToBranch(chatId, 1, respMsg)
+            regularMessages += respMsg
+            appendMessageToRegularChat(chatId, respMsg)
             isLoading = false
         }
     }
@@ -2308,6 +2322,7 @@ private fun AiAgentMainChat(
         isLoading = false
         isErrorState = false
         activeChatId = null
+        regularMessagesByChat.clear()
         isBranchingEnabled = false
         selectedBranchNumber = null
         agentState = AgentState.Idle
@@ -2340,6 +2355,7 @@ private fun AiAgentMainChat(
         isLoading = false
         activeChatId = chatId
         branchesByChat.remove(chatId)
+        regularMessagesByChat[chatId] = loadRegularMessagesForChat(chatId)
         branchNames.clear()
 
         val branches = loadBranchesForChat(chatId)
@@ -2413,9 +2429,8 @@ private fun AiAgentMainChat(
             validationRecoveryAttempt = 0
             planInvariantCheckFailed = false
             planInvariantViolationByAi = false
-            val hasMainBranch = branchesByChat[chatId]?.any { it.number == 1 } == true
-            selectedBranchNumber = if (hasMainBranch) 1 else null
-            isBranchingEnabled = hasMainBranch
+            selectedBranchNumber = null
+            isBranchingEnabled = false
         }
         selectedProfileId?.let { loadLongTermMemoryForProfile(it) }
     }
@@ -2438,9 +2453,9 @@ private fun AiAgentMainChat(
             planInvariantCheckFailed = false
             planInvariantViolationByAi = false
             activeChatId?.let { chatId ->
-                val mainMessages = ensureMainBranch(chatId)
-                isBranchingEnabled = mainMessages.isNotEmpty() || (branchesByChat[chatId]?.isNotEmpty() == true)
-                selectedBranchNumber = if (isBranchingEnabled) 1 else null
+                regularMessagesByChat[chatId] = loadRegularMessagesForChat(chatId)
+                isBranchingEnabled = false
+                selectedBranchNumber = null
             }
         } else {
             activeChatId?.let(::openChat)
@@ -2468,6 +2483,7 @@ private fun AiAgentMainChat(
         queries.deleteMessagesByChat(chatId)
         queries.deleteChatById(chatId)
         branchesByChat.remove(chatId)
+        regularMessagesByChat.remove(chatId)
         branchVisibilityByChat.remove(chatId)
         branchCounterByChat.remove(chatId)
         websocketChatIdsByKey.entries.removeAll { it.value == chatId }
@@ -2486,6 +2502,7 @@ private fun AiAgentMainChat(
         queries.deleteAllBranchMessages()
         queries.deleteAllChats()
         branchesByChat.clear()
+        regularMessagesByChat.clear()
         branchVisibilityByChat.clear()
         branchCounterByChat.clear()
         websocketChatIdsByKey.clear()
@@ -2517,15 +2534,15 @@ private fun AiAgentMainChat(
         if (!isLoading) inputFocusRequester.requestFocus()
     }
 
-    val displayBranchNumber = if (isStateMachineEnabled) {
-        selectedBranchNumber
-    } else {
-        selectedBranchNumber ?: 1
-    }
+    val displayBranchNumber = selectedBranchNumber
     val displayMessages: List<AiAgentMessage> =
-        if (isBranchingEnabled && displayBranchNumber != null)
+        if (!isStateMachineEnabled) {
+            regularMessagesByChat[activeChatId] ?: emptyList()
+        } else if (isBranchingEnabled && displayBranchNumber != null) {
             branchesByChat[activeChatId]?.firstOrNull { it.number == displayBranchNumber }?.messages ?: emptyList()
-        else emptyList()
+        } else {
+            emptyList()
+        }
 
     val latestExecutionAssistantMessage = displayMessages.lastOrNull { message ->
         !message.isUser && message.paramsInfo.startsWith("stage=execution|step=")
@@ -2539,7 +2556,7 @@ private fun AiAgentMainChat(
     }
 
     val activeChatTitle = chats.firstOrNull { it.id == activeChatId }?.title.orEmpty()
-    val activeBranchName = selectedBranchNumber?.let { branchNames[it] }.orEmpty()
+    val activeBranchName = if (isStateMachineEnabled) selectedBranchNumber?.let { branchNames[it] }.orEmpty() else ""
     val titleSuffix = buildString {
         if (activeChatTitle.isNotBlank()) append(" | $activeChatTitle")
         if (activeBranchName.isNotBlank()) append(" | $activeBranchName")
@@ -2655,7 +2672,7 @@ private fun AiAgentMainChat(
                     items(chats, key = { it.id }) { chat ->
                         val isSelected = chat.id == activeChatId
                         val chatBranches = branchesByChat[chat.id]
-                        val hasBranches = !chatBranches.isNullOrEmpty()
+                        val hasBranches = isStateMachineEnabled && !chatBranches.isNullOrEmpty()
                         val areBranchesVisible = branchVisibilityByChat[chat.id] ?: true
 
                         Column(
