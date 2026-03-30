@@ -110,10 +110,6 @@ internal data class McpServerOption(
 
 internal val mcpServerOptions = listOf(
     McpServerOption(
-        title = "Exa MCP",
-        url = "https://mcp.exa.ai/mcp"
-    ),
-    McpServerOption(
         title = "Local MCP (127.0.0.1)",
         url = "http://127.0.0.1:8080/mcp"
     )
