@@ -70,6 +70,8 @@ import com.example.aiadventchalengetestllmapi.BuildSecrets
 import com.example.aiadventchalengetestllmapi.RootScreen
 import com.example.aiadventchalengetestllmapi.aiagentmaindb.AiAgentMainDatabaseDriverFactory
 import com.example.aiadventchalengetestllmapi.aiagentmaindb.createAiAgentMainDatabase
+import com.example.aiadventchalengetestllmapi.embedinggenerationdb.EmbedingGenerationDatabaseDriverFactory
+import com.example.aiadventchalengetestllmapi.embedinggenerationdb.createEmbedingGenerationDatabase
 import com.example.aiadventchalengetestllmapi.mcp.McpToolInfo
 import com.example.aiadventchalengetestllmapi.mcp.RemoteMcpService
 import com.example.aiadventchalengetestllmapi.network.DeepSeekApi
@@ -132,6 +134,8 @@ private fun AiAgentMainChat(
     val remoteMcpService = remember { RemoteMcpService() }
     val database = remember { createAiAgentMainDatabase(AiAgentMainDatabaseDriverFactory()) }
     val queries = remember(database) { database.chatHistoryQueries }
+    val embDb = remember { createEmbedingGenerationDatabase(EmbedingGenerationDatabaseDriverFactory()) }
+    val embQueries = remember(embDb) { embDb.embeddingChunksQueries }
 
     val chats = remember { mutableStateListOf<AiAgentChatItem>() }
     val listState = rememberLazyListState()
@@ -148,6 +152,7 @@ private fun AiAgentMainChat(
     var isMemoryPanelVisible by remember { mutableStateOf(false) }
     var isMcpPanelVisible by remember { mutableStateOf(false) }
     var isMcpEnabled by remember { mutableStateOf(false) }
+    var isRagEnabled by remember { mutableStateOf(true) }
     val mcpServerEnabled = remember {
         mutableStateMapOf<String, Boolean>().apply {
             mcpServerOptions.forEach { put(it.url, false) }
@@ -316,6 +321,22 @@ private fun AiAgentMainChat(
 
     fun websocketChatTitle(serverTitle: String, toolName: String): String =
         "WebSocket • $serverTitle • $toolName"
+
+    suspend fun buildRagPayloadForPrompt(query: String): AiAgentMainRagPayload? {
+        if (!isRagEnabled || query.isBlank()) return null
+        val rows = embQueries.selectAll().executeAsList().map { row ->
+            AiAgentMainEmbeddingChunkRecord(
+                source = row.source,
+                title = row.title,
+                section = row.section,
+                chunkId = row.chunk_id,
+                strategy = row.strategy,
+                chunkText = row.chunk_text,
+                embeddingJson = row.embedding_json
+            )
+        }
+        return buildAiAgentMainRagPayload(query = query, chunks = rows)
+    }
 
     fun ensureWebSocketLogChatId(server: McpServerOption, toolName: String): Long {
         val key = websocketChatKey(server.url, toolName)
@@ -957,10 +978,13 @@ private fun AiAgentMainChat(
         val model = modelInput.trim().ifEmpty { requestApi.defaultModel }
         val apiKey = aiAgentReadApiKey(requestApi.envVar)
         if (apiKey.isBlank()) error("Нет API ключа. Проверьте ${requestApi.envVar}")
-        val promptText = PLANNING_PROMPT_TEMPLATE.replace("{user_query}", userQuery)
+        val ragPayload = buildRagPayloadForPrompt(userQuery)
+        val basePrompt = PLANNING_PROMPT_TEMPLATE.replace("{user_query}", userQuery)
+        val promptText = if (ragPayload == null) basePrompt else "$basePrompt\n\n${ragPayload.promptContext}"
         val messages = buildList {
             buildLtmSystemMessage()?.let { add(it) }
             buildMcpSystemMessageCached()?.let { add(it) }
+            ragPayload?.let { add(DeepSeekMessage(role = "system", content = it.promptContext)) }
             add(DeepSeekMessage(role = "user", content = promptText))
         }
         val request = DeepSeekChatRequest(
@@ -993,14 +1017,21 @@ private fun AiAgentMainChat(
         val model = modelInput.trim().ifEmpty { requestApi.defaultModel }
         val apiKey = aiAgentReadApiKey(requestApi.envVar)
         if (apiKey.isBlank()) error("Нет API ключа. Проверьте ${requestApi.envVar}")
-        val promptText = CLARIFICATION_FOLLOW_UP_PROMPT_TEMPLATE
+        val ragPayload = buildRagPayloadForPrompt(
+            listOf(originalUserQuery, clarificationQuestion, userClarificationResponse)
+                .filter { it.isNotBlank() }
+                .joinToString("\n")
+        )
+        val basePrompt = CLARIFICATION_FOLLOW_UP_PROMPT_TEMPLATE
             .replace("{original_user_query}", originalUserQuery)
             .replace("{clarification_question}", clarificationQuestion)
             .replace("{user_clarification_response}", userClarificationResponse)
             .replace("{available_tools_formatted}", buildMcpToolsContextCached())
+        val promptText = if (ragPayload == null) basePrompt else "$basePrompt\n\n${ragPayload.promptContext}"
         val messages = buildList {
             buildLtmSystemMessage()?.let { add(it) }
             buildMcpSystemMessageCached()?.let { add(it) }
+            ragPayload?.let { add(DeepSeekMessage(role = "system", content = it.promptContext)) }
             add(DeepSeekMessage(role = "user", content = promptText))
         }
         val request = DeepSeekChatRequest(
@@ -1051,9 +1082,11 @@ private fun AiAgentMainChat(
         val promptText = PLAN_EDIT_PROMPT_TEMPLATE
             .replace("{original_plan_json}", originalPlanJson)
             .replace("{user_edit_text}", userEditText)
+        val ragPayload = buildRagPayloadForPrompt(promptText)
         val messages = buildList {
             buildLtmSystemMessage()?.let { add(it) }
             buildMcpSystemMessageCached()?.let { add(it) }
+            ragPayload?.let { add(DeepSeekMessage(role = "system", content = it.promptContext)) }
             add(DeepSeekMessage(role = "user", content = promptText))
         }
         val request = DeepSeekChatRequest(
@@ -1082,9 +1115,11 @@ private fun AiAgentMainChat(
         val model = modelInput.trim().ifEmpty { requestApi.defaultModel }
         val apiKey = aiAgentReadApiKey(requestApi.envVar)
         if (apiKey.isBlank()) error("Нет API ключа. Проверьте ${requestApi.envVar}")
+        val ragPayload = buildRagPayloadForPrompt(userMessageText)
         val messages = buildList {
             buildLtmSystemMessage()?.let { add(it) }
             buildMcpSystemMessageCached()?.let { add(it) }
+            ragPayload?.let { add(DeepSeekMessage(role = "system", content = it.promptContext)) }
             add(DeepSeekMessage(role = "user", content = userMessageText))
         }
         val request = DeepSeekChatRequest(model = model, messages = messages)
@@ -1104,9 +1139,12 @@ private fun AiAgentMainChat(
         val model = modelInput.trim().ifEmpty { requestApi.defaultModel }
         val apiKey = aiAgentReadApiKey(requestApi.envVar)
         if (apiKey.isBlank()) error("Нет API ключа. Проверьте ${requestApi.envVar}")
+        val latestUserQuery = history.lastOrNull { it.isUser }?.text.orEmpty()
+        val ragPayload = buildRagPayloadForPrompt(latestUserQuery)
         val messages = buildList {
             buildLtmSystemMessage()?.let { add(it) }
             buildMcpSystemMessageCached()?.let { add(it) }
+            ragPayload?.let { add(DeepSeekMessage(role = "system", content = it.promptContext)) }
             history.forEach { message ->
                 add(
                     DeepSeekMessage(
@@ -1189,6 +1227,11 @@ private fun AiAgentMainChat(
         val model = modelInput.trim().ifEmpty { requestApi.defaultModel }
         val apiKey = aiAgentReadApiKey(requestApi.envVar)
         if (apiKey.isBlank()) error("Нет API ключа. Проверьте ${requestApi.envVar}")
+        val ragPayload = buildRagPayloadForPrompt(
+            listOf(taskContext, stepDescription, previousResultsFormatted)
+                .filter { it.isNotBlank() }
+                .joinToString("\n")
+        )
         val promptText = EXECUTION_STEP_PROMPT_TEMPLATE
             .replace("{task_context}", taskContext)
             .replace("{recovery_context}", recoveryContext?.ifBlank { "нет" } ?: "нет")
@@ -1201,6 +1244,7 @@ private fun AiAgentMainChat(
             buildLtmSystemMessage()?.let { add(it) }
             buildMcpSystemMessageCached()?.let { add(it) }
             buildInvariantsSystemMessage()?.let { add(it) }
+            ragPayload?.let { add(DeepSeekMessage(role = "system", content = it.promptContext)) }
             add(DeepSeekMessage(role = "user", content = promptText))
         }
         val request = DeepSeekChatRequest(
@@ -2517,6 +2561,7 @@ private fun AiAgentMainChat(
         isStateMachineEnabled = appSettingBool("state_machine_enabled", default = true)
         isMcpEnabled = appSettingBool("mcp_enabled", default = false)
         isInvariantsEnabled = appSettingBool("invariants_enabled", default = true)
+        isRagEnabled = loadAiAgentMainRagEnabled()
         mcpServerOptions.forEach { server ->
             mcpServerEnabled[server.url] = appSettingBool(
                 key = mcpServerSettingKey(server.url),
@@ -2658,6 +2703,21 @@ private fun AiAgentMainChat(
                     verticalArrangement = Arrangement.spacedBy(2.dp)
                 ) {
                     Text("Screen Features", style = MaterialTheme.typography.labelSmall)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Checkbox(
+                            checked = isRagEnabled,
+                            onCheckedChange = {
+                                isRagEnabled = it
+                                saveAiAgentMainRagEnabled(it)
+                            },
+                            enabled = !isLoading
+                        )
+                        Text("RAG", style = MaterialTheme.typography.labelSmall)
+                    }
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
