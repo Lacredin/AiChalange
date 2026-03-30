@@ -40,8 +40,8 @@ internal data class AgentPlanningPromptInput(
 
 internal object AgentPlanningPromptFactory {
     fun create(input: AgentPlanningPromptInput): String = buildString {
-        appendLine("Ты router/planner для команды /help. Ты НЕ отвечаешь пользователю.")
-        appendLine("Твоя задача: выбрать стратегию контекста и вернуть ТОЛЬКО JSON.")
+        appendLine("Ты router/planner для команды /help. Ты не отвечаешь пользователю.")
+        appendLine("Твоя задача: выбрать стратегию контекста и вернуть только JSON.")
         appendLine()
         appendLine("Правила:")
         appendLine("1) Верни только JSON, без markdown и пояснений.")
@@ -56,6 +56,14 @@ internal object AgentPlanningPromptFactory {
         appendLine("7) strategy=MCP => ragQueries пустой.")
         appendLine("8) strategy=RAG => mcpRequests пустой.")
         appendLine("9) strategy=NONE => mcpRequests и ragQueries пустые.")
+        appendLine("10) Всегда учитывай путь проекта из projectFolderPath как корневой путь.")
+        appendLine("11) Если выбранный MCP инструмент принимает путь в arguments, обязательно передай projectFolderPath в arguments.")
+        appendLine("12) Для пути используй подходящий ключ из схемы инструмента: path, projectPath, rootPath, workspacePath, directory, filePath.")
+        appendLine("13) Если MCP стратегия требует путь, но путь не передан в arguments, это невалидный план: верни hasContext=false и strategy=NONE.")
+        appendLine("14) mcpRequests.arguments формируй строго по input_schema инструмента от MCP сервера: типы, required-поля, структура объекта.")
+        appendLine("15) Не добавляй аргументы, которых нет в input_schema, и не нарушай типы полей.")
+        appendLine("16) Если невозможно сформировать валидные arguments по input_schema, не выбирай MCP: верни hasContext=false и strategy=NONE.")
+        appendLine("17) При выборе MCP используй endpoint строго из списка серверов MCP (или null), не выдумывай endpoint.")
         appendLine()
         appendLine("Запрос пользователя:")
         appendLine(input.userRequest)

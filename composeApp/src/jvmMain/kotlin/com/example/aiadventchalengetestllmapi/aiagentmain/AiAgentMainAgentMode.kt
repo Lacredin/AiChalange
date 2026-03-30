@@ -162,7 +162,7 @@ internal class AgentHelpCommandUseCase(
             AgentPlanningPromptInput(
                 userRequest = request.userQuestion,
                 projectFolderPath = projectContext.rootPath,
-                mcpSummary = buildPlanningMcpSummary(mcpContext),
+                mcpSummary = buildPlanningMcpSummaryForPrompt(mcpContext),
                 ragSourcesSummary = buildPlanningRagSummary(ragCatalog)
             )
         )
@@ -257,6 +257,36 @@ internal class AgentHelpCommandUseCase(
             }
         }
         return lines.joinToString("\n")
+    }
+
+    private fun buildPlanningMcpSummaryForPrompt(context: AgentMcpContext): String {
+        if (context.snapshots.isEmpty()) return "MCP недоступен: серверы не настроены."
+        return buildString {
+            context.snapshots.forEach { snapshot ->
+                appendLine("server.title: ${snapshot.title}")
+                appendLine("server.endpoint: ${snapshot.url}")
+                if (snapshot.error != null) {
+                    appendLine("server.status: unavailable")
+                    appendLine("server.error: ${snapshot.error}")
+                    appendLine()
+                    return@forEach
+                }
+                if (snapshot.tools.isEmpty()) {
+                    appendLine("server.status: available")
+                    appendLine("server.tools: []")
+                    appendLine()
+                    return@forEach
+                }
+                appendLine("server.status: available")
+                snapshot.tools.forEach { tool ->
+                    appendLine("tool.name: ${tool.name}")
+                    appendLine("tool.description: ${tool.description.ifBlank { "(empty)" }}")
+                    appendLine("tool.supportsWebSocket: ${tool.supportsWebSocket}")
+                    appendLine("tool.input_schema: ${tool.inputSchema}")
+                    appendLine()
+                }
+            }
+        }.trim()
     }
 
     private fun buildPlanningRagSummary(catalog: AgentRagCatalog): String {
