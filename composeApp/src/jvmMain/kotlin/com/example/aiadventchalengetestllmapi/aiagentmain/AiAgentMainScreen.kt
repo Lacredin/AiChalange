@@ -141,6 +141,7 @@ private fun AiAgentMainChat(
     val listState = rememberLazyListState()
     val inputFocusRequester = remember { FocusRequester() }
     var inputText by remember { mutableStateOf(TextFieldValue("")) }
+    var isAgentCommandMenuExpanded by remember { mutableStateOf(false) }
     var screensMenuExpanded by remember { mutableStateOf(false) }
     var selectedApi by remember { mutableStateOf(AiAgentApi.DeepSeek) }
     var apiSelectorExpanded by remember { mutableStateOf(false) }
@@ -213,6 +214,8 @@ private fun AiAgentMainChat(
     var invariantViolationPreviousState by remember { mutableStateOf(AgentState.Idle) }
     var planInvariantCheckFailed by remember { mutableStateOf(false) }
     var planInvariantViolationByAi by remember { mutableStateOf(false) }
+    var agentModeState by remember { mutableStateOf(AgentModeState()) }
+    val agentHelpCommandUseCase = remember { AgentHelpCommandUseCase() }
 
     // State machine
     var agentState by remember { mutableStateOf(AgentState.Idle) }
@@ -232,6 +235,7 @@ private fun AiAgentMainChat(
     var validationRecoveryAttempt by remember { mutableStateOf(0) }
     var isPaused by remember { mutableStateOf(false) }
     var planClarificationNeeded by remember { mutableStateOf<String?>(null) }
+    var startPlanningPhaseHandler: (() -> Unit)? = null
 
     // ─── DB helpers ────────────────────────────────────────────────────────────
 
@@ -251,6 +255,16 @@ private fun AiAgentMainChat(
         queries.upsertAppSetting(
             setting_key = key,
             setting_value = if (value) "1" else "0"
+        )
+    }
+
+    fun appSettingString(key: String, default: String = ""): String =
+        queries.selectAppSettingByKey(setting_key = key).executeAsOneOrNull()?.setting_value ?: default
+
+    fun saveAppSettingString(key: String, value: String) {
+        queries.upsertAppSetting(
+            setting_key = key,
+            setting_value = value
         )
     }
 
@@ -322,8 +336,8 @@ private fun AiAgentMainChat(
     fun websocketChatTitle(serverTitle: String, toolName: String): String =
         "WebSocket • $serverTitle • $toolName"
 
-    suspend fun buildRagPayloadForPrompt(query: String): AiAgentMainRagPayload? {
-        if (!isRagEnabled || query.isBlank()) return null
+    suspend fun buildRagPayloadForPrompt(query: String, forceEnabled: Boolean = false): AiAgentMainRagPayload? {
+        if ((!isRagEnabled && !forceEnabled) || query.isBlank()) return null
         val rows = embQueries.selectAll().executeAsList().map { row ->
             AiAgentMainEmbeddingChunkRecord(
                 source = row.source,
@@ -1166,9 +1180,20 @@ private fun AiAgentMainChat(
             .ifEmpty { "Пустой ответ от ${requestApi.label}." }
     }
 
-    fun sendRegularChatMessage() {
+    fun updateInputText(next: TextFieldValue) {
+        inputText = next
+        isAgentCommandMenuExpanded = agentModeState.isEnabled && next.text.startsWith("/")
+    }
+
+    fun appendRegularMessage(chatId: Long, message: AiAgentMessage) {
+        val regularMessages = regularMessagesByChat.getOrPut(chatId) { loadRegularMessagesForChat(chatId) }
+        regularMessages += message
+        appendMessageToRegularChat(chatId, message)
+    }
+
+    fun sendRegularChatMessage(messageText: String = inputText.text.trim()) {
         val chatId = activeChatId ?: return
-        val trimmed = inputText.text.trim()
+        val trimmed = messageText.trim()
         if (trimmed.isEmpty() || isLoading) return
 
         val regularMessages = regularMessagesByChat.getOrPut(chatId) { loadRegularMessagesForChat(chatId) }
@@ -1187,7 +1212,7 @@ private fun AiAgentMainChat(
         )
         regularMessages += userMsg
         appendMessageToRegularChat(chatId, userMsg)
-        inputText = TextFieldValue("")
+        updateInputText(TextFieldValue(""))
 
         scope.launch {
             val sessionId = chatSessionId
@@ -1212,6 +1237,145 @@ private fun AiAgentMainChat(
             regularMessages += respMsg
             appendMessageToRegularChat(chatId, respMsg)
             isLoading = false
+        }
+    }
+
+    fun sendPrimaryInput() {
+        val chatId = activeChatId ?: return
+        val rawInput = inputText.text
+        val trimmed = rawInput.trim()
+        if (trimmed.isEmpty() || isLoading) return
+
+        if (!agentModeState.isEnabled) {
+            if (isStateMachineEnabled) {
+                startPlanningPhaseHandler?.invoke() ?: sendRegularChatMessage(trimmed)
+            } else {
+                sendRegularChatMessage(trimmed)
+            }
+            return
+        }
+
+        val parseResult = AgentSlashCommandParser.parse(rawInput)
+        when (parseResult) {
+            AgentSlashParseResult.NotSlash -> {
+                sendRegularChatMessage(trimmed)
+            }
+
+            is AgentSlashParseResult.Error -> {
+                isBranchingEnabled = false
+                selectedBranchNumber = null
+                agentState = AgentState.Idle
+                planClarificationNeeded = null
+                val now = System.currentTimeMillis()
+                appendRegularMessage(
+                    chatId = chatId,
+                    message = AiAgentMessage(
+                        text = trimmed,
+                        isUser = true,
+                        paramsInfo = "stage=agent|command",
+                        stream = AiAgentStream.Raw,
+                        epoch = 0,
+                        createdAt = now
+                    )
+                )
+                appendRegularMessage(
+                    chatId = chatId,
+                    message = AiAgentMessage(
+                        text = parseResult.message,
+                        isUser = false,
+                        paramsInfo = "stage=agent|error",
+                        stream = AiAgentStream.Raw,
+                        epoch = 0,
+                        createdAt = now + 1
+                    )
+                )
+                updateInputText(TextFieldValue(""))
+            }
+
+            is AgentSlashParseResult.Parsed -> {
+                when (val command = parseResult.command) {
+                    is AgentSlashCommand.Help -> {
+                        isBranchingEnabled = false
+                        selectedBranchNumber = null
+                        agentState = AgentState.Idle
+                        planClarificationNeeded = null
+                        val userMessage = AiAgentMessage(
+                            text = trimmed,
+                            isUser = true,
+                            paramsInfo = "stage=agent|help",
+                            stream = AiAgentStream.Raw,
+                            epoch = 0,
+                            createdAt = System.currentTimeMillis()
+                        )
+                        appendRegularMessage(chatId, userMessage)
+                        updateInputText(TextFieldValue(""))
+
+                        scope.launch {
+                            val sessionId = chatSessionId
+                            isLoading = true
+                            val result = try {
+                                val projectFolderPath = agentModeState.projectFolderPath.trim()
+                                if (projectFolderPath.isEmpty()) {
+                                    error("Для команды /help нужно выбрать папку проекта в режиме Агент.")
+                                }
+                                val ragQuery = listOfNotNull(
+                                    command.question,
+                                    "Контекст проекта: $projectFolderPath"
+                                ).joinToString("\n")
+                                val ragPayload = buildRagPayloadForPrompt(
+                                    query = ragQuery,
+                                    forceEnabled = true
+                                )
+                                val mcpContext = collectAgentMcpContext(
+                                    remoteMcpService = remoteMcpService,
+                                    servers = mcpServerOptions
+                                )
+                                val requestApi = selectedApi
+                                val model = modelInput.trim().ifEmpty { requestApi.defaultModel }
+                                val apiKey = aiAgentReadApiKey(requestApi.envVar)
+                                if (apiKey.isBlank()) error("Нет API ключа. Проверьте ${requestApi.envVar}")
+                                isErrorState = false
+                                agentHelpCommandUseCase.execute(
+                                    projectFolderPath = projectFolderPath,
+                                    userQuestion = command.question,
+                                    ragPayload = ragPayload,
+                                    mcpContext = mcpContext,
+                                    callModel = { requestMessages ->
+                                        callAiAgentMainApi(
+                                            requestApi = requestApi,
+                                            model = model,
+                                            apiKey = apiKey,
+                                            requestMessages = requestMessages,
+                                            deepSeekApi = deepSeekApi,
+                                            openAiApi = openAiApi,
+                                            gigaChatApi = gigaChatApi,
+                                            proxyOpenAiApi = proxyOpenAiApi,
+                                            localLlmApi = localLlmApi
+                                        )
+                                    }
+                                )
+                            } catch (e: Exception) {
+                                isErrorState = true
+                                "Request failed: ${e.message ?: "unknown error"}"
+                            }
+                            if (sessionId != chatSessionId) { isLoading = false; return@launch }
+
+                            appendRegularMessage(
+                                chatId = chatId,
+                                message = AiAgentMessage(
+                                    text = result,
+                                    isUser = false,
+                                    paramsInfo = "stage=agent|help",
+                                    stream = AiAgentStream.Raw,
+                                    epoch = 0,
+                                    createdAt = System.currentTimeMillis()
+                                )
+                            )
+                            isLoading = false
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1863,7 +2027,7 @@ private fun AiAgentMainChat(
         if (trimmed.isEmpty() || isLoading) return
 
         userRequestText = trimmed
-        inputText = TextFieldValue("")
+        updateInputText(TextFieldValue(""))
         isBranchingEnabled = true
 
         val now = System.currentTimeMillis()
@@ -1924,6 +2088,8 @@ private fun AiAgentMainChat(
             isLoading = false
         }
     }
+
+    startPlanningPhaseHandler = ::startPlanningPhase
 
     fun onPlanApproved() {
         val chatId = activeChatId ?: return
@@ -2109,7 +2275,7 @@ private fun AiAgentMainChat(
         val currentClarification = planClarificationNeeded ?: return
         val planningMessages = branchesByChat[chatId]?.firstOrNull { it.number == 2 }?.messages ?: return
 
-        inputText = TextFieldValue("")
+        updateInputText(TextFieldValue(""))
 
         scope.launch {
             val sessionId = chatSessionId
@@ -2374,7 +2540,7 @@ private fun AiAgentMainChat(
         planText = ""
         executionText = ""
         branchNames.clear()
-        inputText = TextFieldValue("")
+        updateInputText(TextFieldValue(""))
         planEditInput = TextFieldValue("")
         lastPlanEditText = ""
         executionSteps.clear()
@@ -2459,7 +2625,7 @@ private fun AiAgentMainChat(
             executionText = ""
         }
 
-        inputText = TextFieldValue("")
+        updateInputText(TextFieldValue(""))
         invariantViolations = emptyList()
         apiSelectorExpanded = false
         modelSelectorExpanded = false
@@ -2562,6 +2728,13 @@ private fun AiAgentMainChat(
         isMcpEnabled = appSettingBool("mcp_enabled", default = false)
         isInvariantsEnabled = appSettingBool("invariants_enabled", default = true)
         isRagEnabled = loadAiAgentMainRagEnabled()
+        agentModeState = AgentModeState(
+            isEnabled = appSettingBool("agent_mode_enabled", default = false),
+            projectFolderPath = appSettingString("agent_project_folder", default = "")
+        )
+        if (agentModeState.isEnabled && isStateMachineEnabled) {
+            setStateMachineEnabled(false)
+        }
         mcpServerOptions.forEach { server ->
             mcpServerEnabled[server.url] = appSettingBool(
                 key = mcpServerSettingKey(server.url),
@@ -2709,12 +2882,31 @@ private fun AiAgentMainChat(
                         horizontalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
                         Checkbox(
+                            checked = agentModeState.isEnabled,
+                            onCheckedChange = { checked ->
+                                agentModeState = agentModeState.copy(isEnabled = checked)
+                                saveAppSettingBool("agent_mode_enabled", checked)
+                                if (checked && isStateMachineEnabled) {
+                                    setStateMachineEnabled(false)
+                                }
+                                isAgentCommandMenuExpanded = checked && inputText.text.startsWith("/")
+                            },
+                            enabled = !isLoading
+                        )
+                        Text("Агент", style = MaterialTheme.typography.labelSmall)
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Checkbox(
                             checked = isRagEnabled,
                             onCheckedChange = {
                                 isRagEnabled = it
                                 saveAiAgentMainRagEnabled(it)
                             },
-                            enabled = !isLoading
+                            enabled = !isLoading && !agentModeState.isEnabled
                         )
                         Text("RAG", style = MaterialTheme.typography.labelSmall)
                     }
@@ -2726,7 +2918,7 @@ private fun AiAgentMainChat(
                         Checkbox(
                             checked = isStateMachineEnabled,
                             onCheckedChange = { setStateMachineEnabled(it) },
-                            enabled = !isLoading
+                            enabled = !isLoading && !agentModeState.isEnabled
                         )
                         Text("State machine", style = MaterialTheme.typography.labelSmall)
                     }
@@ -2738,7 +2930,7 @@ private fun AiAgentMainChat(
                         Checkbox(
                             checked = isInvariantPanelVisible,
                             onCheckedChange = { isInvariantPanelVisible = it },
-                            enabled = !isLoading
+                            enabled = !isLoading && !agentModeState.isEnabled
                         )
                         Text("Invariants panel", style = MaterialTheme.typography.labelSmall)
                     }
@@ -2750,7 +2942,7 @@ private fun AiAgentMainChat(
                         Checkbox(
                             checked = isMemoryPanelVisible,
                             onCheckedChange = { isMemoryPanelVisible = it },
-                            enabled = !isLoading
+                            enabled = !isLoading && !agentModeState.isEnabled
                         )
                         Text("Memory panel", style = MaterialTheme.typography.labelSmall)
                     }
@@ -2762,7 +2954,7 @@ private fun AiAgentMainChat(
                         Checkbox(
                             checked = isMcpPanelVisible,
                             onCheckedChange = { isMcpPanelVisible = it },
-                            enabled = !isLoading
+                            enabled = !isLoading && !agentModeState.isEnabled
                         )
                         Text("MCP panel", style = MaterialTheme.typography.labelSmall)
                     }
@@ -2968,6 +3160,54 @@ private fun AiAgentMainChat(
                     }
                 }
 
+                if (agentModeState.isEnabled) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(8.dp))
+                            .padding(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(
+                            text = "Режим Агент: выберите папку проекта (обязательно для /help)",
+                            style = MaterialTheme.typography.labelMedium
+                        )
+                        OutlinedTextField(
+                            value = agentModeState.projectFolderPath,
+                            onValueChange = {},
+                            modifier = Modifier.fillMaxWidth(),
+                            readOnly = true,
+                            enabled = !isLoading,
+                            placeholder = { Text("Папка проекта не выбрана") },
+                            textStyle = MaterialTheme.typography.labelSmall
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(
+                                onClick = {
+                                    pickProjectDirectory(agentModeState.projectFolderPath)?.let { selectedPath ->
+                                        agentModeState = agentModeState.copy(projectFolderPath = selectedPath)
+                                        saveAppSettingString("agent_project_folder", selectedPath)
+                                    }
+                                },
+                                enabled = !isLoading
+                            ) {
+                                Text("Выбрать папку")
+                            }
+                            if (agentModeState.projectFolderPath.isNotBlank()) {
+                                TextButton(
+                                    onClick = {
+                                        agentModeState = agentModeState.copy(projectFolderPath = "")
+                                        saveAppSettingString("agent_project_folder", "")
+                                    },
+                                    enabled = !isLoading
+                                ) {
+                                    Text("Очистить")
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Messages
                 LazyColumn(
                     modifier = Modifier.weight(1f).fillMaxWidth(),
@@ -3129,7 +3369,7 @@ private fun AiAgentMainChat(
                     ) {
                         OutlinedTextField(
                             value = inputText,
-                            onValueChange = { inputText = it },
+                            onValueChange = { updateInputText(it) },
                             modifier = Modifier
                                 .weight(1f)
                                 .focusRequester(inputFocusRequester)
@@ -3140,13 +3380,15 @@ private fun AiAgentMainChat(
                                     if (keyEvent.isAltPressed || keyEvent.isShiftPressed || keyEvent.isCtrlPressed) {
                                         val start = inputText.selection.min
                                         val end = inputText.selection.max
-                                        inputText = inputText.copy(
-                                            text = inputText.text.replaceRange(start, end, "\n"),
-                                            selection = TextRange(start + 1)
+                                        updateInputText(
+                                            inputText.copy(
+                                                text = inputText.text.replaceRange(start, end, "\n"),
+                                                selection = TextRange(start + 1)
+                                            )
                                         )
                                         return@onPreviewKeyEvent true
                                     }
-                                    sendRegularChatMessage()
+                                    sendPrimaryInput()
                                     true
                                 },
                             enabled = !isLoading,
@@ -3154,10 +3396,25 @@ private fun AiAgentMainChat(
                             maxLines = 4
                         )
                         Button(
-                            onClick = ::sendRegularChatMessage,
+                            onClick = ::sendPrimaryInput,
                             enabled = inputText.text.isNotBlank() && !isLoading
                         ) { Text("Отправить") }
                     }
+                    AiAgentMainCommandMenu(
+                        expanded = isAgentCommandMenuExpanded,
+                        suggestions = agentCommandSuggestions,
+                        onDismiss = { isAgentCommandMenuExpanded = false },
+                        onSelect = { suggestion ->
+                            val value = "${suggestion.command} "
+                            updateInputText(
+                                TextFieldValue(
+                                    text = value,
+                                    selection = TextRange(value.length)
+                                )
+                            )
+                            isAgentCommandMenuExpanded = false
+                        }
+                    )
                 } else when {
                     (agentState == AgentState.Execution || agentState == AgentState.Checking) && isLoading -> {
                         Row(
@@ -3188,7 +3445,7 @@ private fun AiAgentMainChat(
                             ) {
                                 OutlinedTextField(
                                     value = inputText,
-                                    onValueChange = { inputText = it },
+                                    onValueChange = { updateInputText(it) },
                                     modifier = Modifier
                                         .weight(1f)
                                         .focusRequester(inputFocusRequester)
@@ -3199,9 +3456,11 @@ private fun AiAgentMainChat(
                                             if (keyEvent.isAltPressed || keyEvent.isShiftPressed || keyEvent.isCtrlPressed) {
                                                 val start = inputText.selection.min
                                                 val end = inputText.selection.max
-                                                inputText = inputText.copy(
-                                                    text = inputText.text.replaceRange(start, end, "\n"),
-                                                    selection = TextRange(start + 1)
+                                                updateInputText(
+                                                    inputText.copy(
+                                                        text = inputText.text.replaceRange(start, end, "\n"),
+                                                        selection = TextRange(start + 1)
+                                                    )
                                                 )
                                                 return@onPreviewKeyEvent true
                                             }
@@ -3366,7 +3625,7 @@ private fun AiAgentMainChat(
                         ) {
                             OutlinedTextField(
                                 value = inputText,
-                                onValueChange = { inputText = it },
+                                onValueChange = { updateInputText(it) },
                                 modifier = Modifier
                                     .weight(1f)
                                     .focusRequester(inputFocusRequester)
@@ -3377,13 +3636,15 @@ private fun AiAgentMainChat(
                                         if (keyEvent.isAltPressed || keyEvent.isShiftPressed || keyEvent.isCtrlPressed) {
                                             val start = inputText.selection.min
                                             val end = inputText.selection.max
-                                            inputText = inputText.copy(
-                                                text = inputText.text.replaceRange(start, end, "\n"),
-                                                selection = TextRange(start + 1)
+                                            updateInputText(
+                                                inputText.copy(
+                                                    text = inputText.text.replaceRange(start, end, "\n"),
+                                                    selection = TextRange(start + 1)
+                                                )
                                             )
                                             return@onPreviewKeyEvent true
                                         }
-                                        if (isStateMachineEnabled) startPlanningPhase() else sendRegularChatMessage()
+                                        sendPrimaryInput()
                                         true
                                     },
                                 enabled = !isLoading,
@@ -3392,7 +3653,7 @@ private fun AiAgentMainChat(
                             )
                             Button(
                                 onClick = {
-                                    if (isStateMachineEnabled) startPlanningPhase() else sendRegularChatMessage()
+                                    sendPrimaryInput()
                                 },
                                 enabled = inputText.text.isNotBlank() && !isLoading
                             ) { Text("Отправить") }
