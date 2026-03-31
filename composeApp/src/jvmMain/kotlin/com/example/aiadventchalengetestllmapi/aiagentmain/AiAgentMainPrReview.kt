@@ -500,6 +500,12 @@ internal class AgentPrReviewUseCase {
             gitContext = gitContext,
             queries = ragQueries
         )
+        val coverageNote = buildCoverageNote(
+            gitContext = gitContext,
+            semanticRagQueries = ragQueries,
+            semanticChunksSelected = semanticRagResults.sumOf { it.payload?.selectedChunks?.size ?: 0 },
+            lexicalRag = lexicalRag
+        )
         val ragContext = buildString {
             appendLine("Semantic RAG available: ${if (hasSemanticRag) "yes" else "no"}")
             if (!hasSemanticRag) appendLine("Semantic retrieval empty -> lexical fallback is active.")
@@ -515,35 +521,63 @@ internal class AgentPrReviewUseCase {
         val rawReview = callReviewModel(listOf(DeepSeekMessage(role = "user", content = prompt))).trim()
         val structuredReview = parseStructuredReview(rawReview)
             ?: return "Модель вернула невалидный формат ревью. Ожидался JSON с полями potential_bugs, architecture_issues, recommendations, summary, confidence."
-        val reviewBody = renderStructuredReview(structuredReview)
+        val reviewBodyBase = renderStructuredReview(structuredReview, coverageNote)
 
-        if (!target.publishResult || gitContext.prNumber == null) {
-            return reviewBody
+        if (!target.publishResult) {
+            return renderFinalReport(
+                reviewBody = reviewBodyBase,
+                analysisStatus = "выполнен",
+                publishStatus = "не запрошена"
+            )
+        }
+
+        if (gitContext.prNumber == null) {
+            return renderFinalReport(
+                reviewBody = reviewBodyBase,
+                analysisStatus = "выполнен",
+                publishStatus = "не выполнена (не указан pr_number)"
+            )
         }
 
         val submitResult = gitGateway.submitReview(
             AgentSubmitPrReviewRequest(
                 repoUrl = gitContext.repoUrl,
                 prNumber = gitContext.prNumber,
-                reviewBody = reviewBody,
+                reviewBody = reviewBodyBase,
                 mode = "comment"
             )
         )
 
         return when (submitResult) {
             is AgentSubmitPrReviewResult.Success -> {
-                val published = submitResult.url?.let { "\n\nОпубликовано в PR: $it" }.orEmpty()
-                reviewBody + published
+                val status = if (submitResult.url.isNullOrBlank()) "опубликована" else "опубликована (${submitResult.url})"
+                renderFinalReport(
+                    reviewBody = reviewBodyBase,
+                    analysisStatus = "выполнен",
+                    publishStatus = status
+                )
             }
 
             is AgentSubmitPrReviewResult.MissingToken ->
-                reviewBody + "\n\nПубликация не выполнена: нет токена (${submitResult.requiredTokenType}). ${submitResult.hint}"
+                renderFinalReport(
+                    reviewBody = reviewBodyBase,
+                    analysisStatus = "выполнен",
+                    publishStatus = "не выполнена: нет токена (${submitResult.requiredTokenType}). ${submitResult.hint}"
+                )
 
             is AgentSubmitPrReviewResult.AccessDenied ->
-                reviewBody + "\n\nПубликация не выполнена [${submitResult.code}]: ${submitResult.details}. ${submitResult.hint}"
+                renderFinalReport(
+                    reviewBody = reviewBodyBase,
+                    analysisStatus = "выполнен",
+                    publishStatus = "не выполнена [${submitResult.code}]: ${submitResult.details}. ${submitResult.hint}"
+                )
 
             is AgentSubmitPrReviewResult.Failure ->
-                reviewBody + "\n\nПубликация не выполнена: ${submitResult.details}"
+                renderFinalReport(
+                    reviewBody = reviewBodyBase,
+                    analysisStatus = "выполнен",
+                    publishStatus = "не выполнена: ${submitResult.details}"
+                )
         }
     }
 
@@ -638,7 +672,10 @@ internal class AgentPrReviewUseCase {
         appendLine("Баги: ${review.potentialBugs.size}, архитектурные проблемы: ${review.architectureIssues.size}, рекомендации: ${review.recommendations.size}")
     }.trim()
 
-    private fun renderStructuredReview(review: AgentStructuredPrReview): String = buildString {
+    private fun renderStructuredReview(
+        review: AgentStructuredPrReview,
+        coverageNote: String
+    ): String = buildString {
         appendLine("**Потенциальные баги**")
         if (review.potentialBugs.isEmpty()) {
             appendLine("- Не выявлены.")
@@ -672,7 +709,41 @@ internal class AgentPrReviewUseCase {
             }
         }
         appendLine()
+        appendLine("**Покрытие анализа**")
+        appendLine(coverageNote)
+        appendLine()
         append(renderStructuredReviewSummary(review))
+    }.trim()
+
+    private fun buildCoverageNote(
+        gitContext: AgentGitPrContext,
+        semanticRagQueries: List<String>,
+        semanticChunksSelected: Int,
+        lexicalRag: AgentPrLexicalRagPayload
+    ): String = buildString {
+        appendLine("- Репозиторий: ${gitContext.repoUrl}")
+        appendLine("- PR: ${gitContext.prNumber?.toString() ?: "не указан"}")
+        appendLine("- Измененные файлы: ${gitContext.changedFiles.size}")
+        appendLine("- Загружено содержимое файлов: ${gitContext.files.size}")
+        appendLine("- Diff усечен: ${if (gitContext.truncatedDiff) "да" else "нет"}")
+        if (gitContext.truncatedFiles.isNotEmpty()) {
+            appendLine("- Усеченные файлы: ${gitContext.truncatedFiles.joinToString(", ")}")
+        }
+        appendLine("- Semantic RAG запросов: ${semanticRagQueries.size}")
+        appendLine("- Semantic RAG чанков: $semanticChunksSelected")
+        appendLine("- Lexical fallback использован: ${if (lexicalRag.fallbackUsed) "да" else "нет"}")
+        append("- Lexical RAG чанков: ${lexicalRag.selectedChunks.size}")
+    }.trim()
+
+    private fun renderFinalReport(
+        reviewBody: String,
+        analysisStatus: String,
+        publishStatus: String
+    ): String = buildString {
+        appendLine("**Статус анализа:** $analysisStatus")
+        appendLine("**Статус публикации в PR:** $publishStatus")
+        appendLine()
+        append(reviewBody)
     }.trim()
 
     private fun severityLabelRu(raw: String): String = when (raw.lowercase()) {
