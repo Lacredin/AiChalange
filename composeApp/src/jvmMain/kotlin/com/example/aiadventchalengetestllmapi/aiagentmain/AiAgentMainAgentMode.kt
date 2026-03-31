@@ -304,7 +304,12 @@ internal class AgentHelpCommandUseCase(
                 appendLine("tool=${result.request.toolName}")
                 result.request.endpoint?.let { appendLine("endpoint=$it") }
                 if (!result.error.isNullOrBlank()) appendLine("error=${result.error}")
-                if (!result.output.isNullOrBlank()) append("output=${result.output}")
+                if (!result.output.isNullOrBlank()) {
+                    appendLine("=== КРИТИЧЕСКИЙ РЕЗУЛЬТАТ ИНСТРУМЕНТА ===")
+                    appendLine("Ответ, полученный от инструмента '${result.request.toolName}', равен:")
+                    appendLine(result.output)
+                    append("=== КОНЕЦ РЕЗУЛЬТАТА ИНСТРУМЕНТА ===")
+                }
             }.trim()
         }
     }
