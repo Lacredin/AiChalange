@@ -216,6 +216,8 @@ private fun AiAgentMainChat(
     var planInvariantViolationByAi by remember { mutableStateOf(false) }
     var agentModeState by remember { mutableStateOf(AgentModeState()) }
     val agentHelpCommandUseCase = remember { AgentHelpCommandUseCase() }
+    val agentPrReviewUseCase = remember { AgentPrReviewUseCase() }
+    val agentAuthTokenUseCase = remember { AgentAuthTokenUseCase(remoteMcpService) }
 
     // State machine
     var agentState by remember { mutableStateOf(AgentState.Idle) }
@@ -1456,6 +1458,165 @@ private fun AiAgentMainChat(
                                     text = result,
                                     isUser = false,
                                     paramsInfo = "stage=agent|help",
+                                    stream = AiAgentStream.Raw,
+                                    epoch = 0,
+                                    createdAt = System.currentTimeMillis()
+                                )
+                            )
+                            isLoading = false
+                        }
+                    }
+
+                    is AgentSlashCommand.ReviewPr -> {
+                        isBranchingEnabled = false
+                        selectedBranchNumber = null
+                        agentState = AgentState.Idle
+                        planClarificationNeeded = null
+                        val userMessage = AiAgentMessage(
+                            text = trimmed,
+                            isUser = true,
+                            paramsInfo = "stage=agent|review-pr",
+                            stream = AiAgentStream.Raw,
+                            epoch = 0,
+                            createdAt = System.currentTimeMillis()
+                        )
+                        appendRegularMessage(chatId, userMessage)
+                        updateInputText(TextFieldValue(""))
+
+                        scope.launch {
+                            val sessionId = chatSessionId
+                            isLoading = true
+                            val result = try {
+                                val projectFolderPath = agentModeState.projectFolderPath.trim()
+                                if (projectFolderPath.isEmpty()) {
+                                    error("Для команды /review-pr нужно выбрать папку проекта в режиме Агент.")
+                                }
+
+                                val requestApi = selectedApi
+                                val model = modelInput.trim().ifEmpty { requestApi.defaultModel }
+                                val apiKey = aiAgentReadApiKey(requestApi.envVar)
+                                if (apiKey.isBlank()) error("Нет API ключа. Проверьте ${requestApi.envVar}")
+                                isErrorState = false
+
+                                val reviewMcpServers = mcpServerOptions.filter { server ->
+                                    mcpServerEnabled[server.url] == true
+                                }.ifEmpty { mcpServerOptions }
+                                val reviewMcpContext = collectAgentMcpContext(
+                                    remoteMcpService = remoteMcpService,
+                                    servers = reviewMcpServers
+                                )
+                                val githubTokenProvider = {
+                                    BuildSecrets.apiKeyFor("GITHUB_PERSONAL_ACCESS_TOKEN").trim()
+                                        .ifBlank {
+                                            System.getenv("GITHUB_PERSONAL_ACCESS_TOKEN")?.trim().orEmpty()
+                                        }
+                                        .ifBlank {
+                                            System.getenv("GITHUB_TOKEN")?.trim().orEmpty()
+                                        }
+                                        .ifBlank {
+                                            System.getenv("GH_TOKEN")?.trim().orEmpty()
+                                        }
+                                }
+
+                                agentPrReviewUseCase.execute(
+                                    request = AgentPrReviewRequest(
+                                        projectFolderPath = projectFolderPath,
+                                        commandArguments = command.arguments.orEmpty()
+                                    ),
+                                    gitGateway = AgentMcpPrReviewGitGateway(
+                                        remoteMcpService = remoteMcpService,
+                                        servers = reviewMcpContext.snapshots,
+                                        githubTokenProvider = githubTokenProvider
+                                    ),
+                                    runRagQuery = { query ->
+                                        AgentRagExecutionResult(
+                                            query = query,
+                                            payload = buildRagPayloadForPrompt(query = query, forceEnabled = true)
+                                        )
+                                    },
+                                    callReviewModel = { requestMessages ->
+                                        callAiAgentMainApi(
+                                            requestApi = requestApi,
+                                            model = model,
+                                            apiKey = apiKey,
+                                            requestMessages = requestMessages,
+                                            deepSeekApi = deepSeekApi,
+                                            openAiApi = openAiApi,
+                                            gigaChatApi = gigaChatApi,
+                                            proxyOpenAiApi = proxyOpenAiApi,
+                                            localLlmApi = localLlmApi,
+                                            options = AgentModelRequestOptions(
+                                                temperature = 0.2,
+                                                topP = 0.8,
+                                                maxTokens = 4000
+                                            )
+                                        )
+                                    }
+                                )
+                            } catch (e: Exception) {
+                                isErrorState = true
+                                "Request failed: ${e.message ?: "unknown error"}"
+                            }
+                            if (sessionId != chatSessionId) { isLoading = false; return@launch }
+
+                            appendRegularMessage(
+                                chatId = chatId,
+                                message = AiAgentMessage(
+                                    text = result,
+                                    isUser = false,
+                                    paramsInfo = "stage=agent|review-pr",
+                                    stream = AiAgentStream.Raw,
+                                    epoch = 0,
+                                    createdAt = System.currentTimeMillis()
+                                )
+                            )
+                            isLoading = false
+                        }
+                    }
+
+                    is AgentSlashCommand.AuthToken -> {
+                        isBranchingEnabled = false
+                        selectedBranchNumber = null
+                        agentState = AgentState.Idle
+                        planClarificationNeeded = null
+                        val userMessage = AiAgentMessage(
+                            text = trimmed,
+                            isUser = true,
+                            paramsInfo = "stage=agent|auth-token",
+                            stream = AiAgentStream.Raw,
+                            epoch = 0,
+                            createdAt = System.currentTimeMillis()
+                        )
+                        appendRegularMessage(chatId, userMessage)
+                        updateInputText(TextFieldValue(""))
+
+                        scope.launch {
+                            val sessionId = chatSessionId
+                            isLoading = true
+                            val result = try {
+                                val authServers = mcpServerOptions.filter { server ->
+                                    mcpServerEnabled[server.url] == true
+                                }.ifEmpty { mcpServerOptions }
+                                val authMcpContext = collectAgentMcpContext(
+                                    remoteMcpService = remoteMcpService,
+                                    servers = authServers
+                                )
+                                agentAuthTokenUseCase.execute(
+                                    arguments = command.arguments.orEmpty(),
+                                    servers = authMcpContext.snapshots
+                                )
+                            } catch (e: Exception) {
+                                isErrorState = true
+                                "Request failed: ${e.message ?: "unknown error"}"
+                            }
+                            if (sessionId != chatSessionId) { isLoading = false; return@launch }
+
+                            appendRegularMessage(
+                                chatId = chatId,
+                                message = AiAgentMessage(
+                                    text = result,
+                                    isUser = false,
+                                    paramsInfo = "stage=agent|auth-token",
                                     stream = AiAgentStream.Raw,
                                     epoch = 0,
                                     createdAt = System.currentTimeMillis()

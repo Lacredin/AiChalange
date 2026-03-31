@@ -1,4 +1,4 @@
-package com.example.aiadventchalengetestllmapi.aiagentmain
+﻿package com.example.aiadventchalengetestllmapi.aiagentmain
 
 internal data class AgentCommandSuggestion(
     val command: String,
@@ -8,6 +8,8 @@ internal data class AgentCommandSuggestion(
 
 internal sealed interface AgentSlashCommand {
     data class Help(val question: String?) : AgentSlashCommand
+    data class ReviewPr(val arguments: String?) : AgentSlashCommand
+    data class AuthToken(val arguments: String?) : AgentSlashCommand
 }
 
 internal sealed interface AgentSlashParseResult {
@@ -28,7 +30,9 @@ internal object AgentSlashCommandParser {
         }
 
         val match = commandPattern.matchEntire(trimmed)
-            ?: return AgentSlashParseResult.Error("Некорректный формат команды. Используйте: /help [вопрос].")
+            ?: return AgentSlashParseResult.Error(
+                "Некорректный формат команды. Используйте: /help [вопрос] или /review-pr <repo_url> [pr_number]."
+            )
 
         val command = match.groupValues.getOrNull(1)?.lowercase().orEmpty()
         val rawArgs = match.groupValues.getOrNull(2)?.trim().orEmpty()
@@ -41,7 +45,15 @@ internal object AgentSlashCommandParser {
                 AgentSlashCommand.Help(question = rawArgs.ifBlank { null })
             )
 
-            else -> AgentSlashParseResult.Error("Неизвестная команда: /$command. Доступно: /help.")
+            "review-pr" -> AgentSlashParseResult.Parsed(
+                AgentSlashCommand.ReviewPr(arguments = rawArgs.ifBlank { null })
+            )
+
+            "auth-token" -> AgentSlashParseResult.Parsed(
+                AgentSlashCommand.AuthToken(arguments = rawArgs.ifBlank { null })
+            )
+
+            else -> AgentSlashParseResult.Error("Неизвестная команда: /$command. Доступно: /help, /review-pr, /auth-token.")
         }
     }
 }
@@ -51,6 +63,16 @@ internal val agentCommandSuggestions = listOf(
         command = "/help",
         hint = "/help [вопрос о проекте]",
         description = "Задать вопрос о проекте по документации, MCP и RAG"
+    ),
+    AgentCommandSuggestion(
+        command = "/review-pr",
+        hint = "/review-pr <repo_url> [pr_number] [--publish]",
+        description = "Запустить AI-ревью pull request через MCP Git workflow"
+    ),
+    AgentCommandSuggestion(
+        command = "/auth-token",
+        hint = "/auth-token <repo_url|owner:ORG|global> <token> [token_type]",
+        description = "Сохранить GitHub токен через auth.upsert_token"
     )
 )
 
