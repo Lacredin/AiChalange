@@ -2,10 +2,13 @@
 
 import com.example.aiadventchalengetestllmapi.mcp.RemoteMcpService
 import com.example.aiadventchalengetestllmapi.network.DeepSeekMessage
+import kotlinx.serialization.SerialName
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -53,6 +56,26 @@ internal data class AgentGitPrContext(
     val files: List<AgentGitFileContent>,
     val truncatedDiff: Boolean,
     val truncatedFiles: List<String>
+)
+
+@Serializable
+internal data class AgentStructuredReviewPoint(
+    val title: String,
+    val details: String,
+    val evidence: String = "",
+    val files: List<String> = emptyList(),
+    val severity: String = "medium"
+)
+
+@Serializable
+internal data class AgentStructuredPrReview(
+    @SerialName("potential_bugs")
+    val potentialBugs: List<AgentStructuredReviewPoint>,
+    @SerialName("architecture_issues")
+    val architectureIssues: List<AgentStructuredReviewPoint>,
+    val recommendations: List<String>,
+    val summary: String,
+    val confidence: Double
 )
 
 internal data class AgentGitPrContextRequest(
@@ -467,15 +490,32 @@ internal class AgentPrReviewUseCase {
             }
         }.distinct()
 
-        val ragResults = ragQueries.map { runRagQuery(it) }
-        val ragContext = ragResults
+        val semanticRagResults = ragQueries.map { runRagQuery(it) }
+        val semanticRagContext = semanticRagResults
             .mapNotNull { it.payload?.promptContext?.takeIf(String::isNotBlank) }
             .joinToString("\n\n")
-            .ifBlank { "RAG context is empty." }
+        val hasSemanticRag = semanticRagResults.any { !it.payload?.selectedChunks.isNullOrEmpty() }
+        val lexicalRag = buildAgentPrLexicalRagPayload(
+            projectFolderPath = request.projectFolderPath,
+            gitContext = gitContext,
+            queries = ragQueries
+        )
+        val ragContext = buildString {
+            appendLine("Semantic RAG available: ${if (hasSemanticRag) "yes" else "no"}")
+            if (!hasSemanticRag) appendLine("Semantic retrieval empty -> lexical fallback is active.")
+            appendLine()
+            appendLine("=== SEMANTIC RAG ===")
+            appendLine(semanticRagContext.ifBlank { "empty" })
+            appendLine()
+            appendLine("=== LEXICAL RAG ===")
+            appendLine(lexicalRag.promptContext)
+        }.trim()
 
         val prompt = buildReviewPrompt(gitContext, ragContext)
-        val reviewBody = callReviewModel(listOf(DeepSeekMessage(role = "user", content = prompt))).trim()
-            .ifBlank { "Пустой ответ модели при ревью PR." }
+        val rawReview = callReviewModel(listOf(DeepSeekMessage(role = "user", content = prompt))).trim()
+        val structuredReview = parseStructuredReview(rawReview)
+            ?: return "Модель вернула невалидный формат ревью. Ожидался JSON с полями potential_bugs, architecture_issues, recommendations, summary, confidence."
+        val reviewBody = renderStructuredReview(structuredReview)
 
         if (!target.publishResult || gitContext.prNumber == null) {
             return reviewBody
@@ -512,11 +552,14 @@ internal class AgentPrReviewUseCase {
         ragContext: String
     ): String = buildString {
         appendLine("Ты выполняешь AI-ревью pull request.")
-        appendLine("Верни ответ на русском языке в markdown.")
-        appendLine("Структура ответа строго:")
-        appendLine("1) Потенциальные баги")
-        appendLine("2) Архитектурные проблемы")
-        appendLine("3) Рекомендации")
+        appendLine("Верни ответ строго в JSON без markdown и без пояснений.")
+        appendLine("Весь текст во всех строковых полях должен быть только на русском языке.")
+        appendLine("Используй только этот контракт:")
+        appendLine("""{"potential_bugs":[{"title":"...","details":"...","evidence":"...","files":["..."],"severity":"low|medium|high"}],"architecture_issues":[{"title":"...","details":"...","evidence":"...","files":["..."],"severity":"low|medium|high"}],"recommendations":["..."],"summary":"...","confidence":0.0}""")
+        appendLine("Правила:")
+        appendLine("1) confidence в диапазоне 0.0..1.0")
+        appendLine("2) Если список пуст, верни []")
+        appendLine("3) Не выдумывай факты вне diff/RAG")
         appendLine()
         appendLine("PR:")
         appendLine("- repo: ${context.repoUrl}")
@@ -536,6 +579,107 @@ internal class AgentPrReviewUseCase {
         appendLine("RAG:")
         appendLine(ragContext.take(80_000))
     }.trim()
+
+    private fun parseStructuredReview(raw: String): AgentStructuredPrReview? {
+        val root = tryParseJsonExecution(raw)?.jsonObject ?: return null
+        val potentialBugs = parsePoints(root["potential_bugs"]?.jsonArray) ?: return null
+        val architectureIssues = parsePoints(root["architecture_issues"]?.jsonArray) ?: return null
+        val recommendations = parseRecommendations(root["recommendations"]?.jsonArray) ?: return null
+        val summary = root["summary"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+        if (summary.isBlank()) return null
+        val confidenceRaw = root["confidence"]?.jsonPrimitive?.doubleOrNull
+            ?: root["confidence"]?.jsonPrimitive?.contentOrNull?.toDoubleOrNull()
+            ?: return null
+        return AgentStructuredPrReview(
+            potentialBugs = potentialBugs,
+            architectureIssues = architectureIssues,
+            recommendations = recommendations,
+            summary = summary,
+            confidence = confidenceRaw.coerceIn(0.0, 1.0)
+        )
+    }
+
+    private fun parsePoints(array: JsonArray?): List<AgentStructuredReviewPoint>? {
+        if (array == null) return null
+        return array.mapNotNull { item ->
+            val obj = item as? JsonObject ?: return@mapNotNull null
+            val title = obj["title"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+            val details = obj["details"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+            if (title.isBlank() || details.isBlank()) return@mapNotNull null
+            val evidence = obj["evidence"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+            val files = obj["files"]?.jsonArray.orEmpty()
+                .mapNotNull { it.jsonPrimitive.contentOrNull?.trim()?.ifBlank { null } }
+                .distinct()
+            val severityRaw = obj["severity"]?.jsonPrimitive?.contentOrNull?.lowercase().orEmpty()
+            val severity = when (severityRaw) {
+                "low", "medium", "high" -> severityRaw
+                else -> "medium"
+            }
+            AgentStructuredReviewPoint(
+                title = title,
+                details = details,
+                evidence = evidence,
+                files = files,
+                severity = severity
+            )
+        }
+    }
+
+    private fun parseRecommendations(array: JsonArray?): List<String>? {
+        if (array == null) return null
+        return array
+            .mapNotNull { it.jsonPrimitive.contentOrNull?.trim()?.ifBlank { null } }
+            .distinct()
+    }
+
+    private fun renderStructuredReviewSummary(review: AgentStructuredPrReview): String = buildString {
+        appendLine("Сводка: ${review.summary}")
+        appendLine("Уверенность: ${"%.2f".format(review.confidence)}")
+        appendLine("Баги: ${review.potentialBugs.size}, архитектурные проблемы: ${review.architectureIssues.size}, рекомендации: ${review.recommendations.size}")
+    }.trim()
+
+    private fun renderStructuredReview(review: AgentStructuredPrReview): String = buildString {
+        appendLine("**Потенциальные баги**")
+        if (review.potentialBugs.isEmpty()) {
+            appendLine("- Не выявлены.")
+        } else {
+            review.potentialBugs.forEachIndexed { index, bug ->
+                appendLine("${index + 1}. [${severityLabelRu(bug.severity)}] ${bug.title}")
+                appendLine("   ${bug.details}")
+                if (bug.evidence.isNotBlank()) appendLine("   Доказательство: ${bug.evidence}")
+                if (bug.files.isNotEmpty()) appendLine("   Файлы: ${bug.files.joinToString(", ")}")
+            }
+        }
+        appendLine()
+        appendLine("**Архитектурные проблемы**")
+        if (review.architectureIssues.isEmpty()) {
+            appendLine("- Не выявлены.")
+        } else {
+            review.architectureIssues.forEachIndexed { index, issue ->
+                appendLine("${index + 1}. [${severityLabelRu(issue.severity)}] ${issue.title}")
+                appendLine("   ${issue.details}")
+                if (issue.evidence.isNotBlank()) appendLine("   Доказательство: ${issue.evidence}")
+                if (issue.files.isNotEmpty()) appendLine("   Файлы: ${issue.files.joinToString(", ")}")
+            }
+        }
+        appendLine()
+        appendLine("**Рекомендации**")
+        if (review.recommendations.isEmpty()) {
+            appendLine("- Нет рекомендаций.")
+        } else {
+            review.recommendations.forEachIndexed { index, recommendation ->
+                appendLine("${index + 1}. $recommendation")
+            }
+        }
+        appendLine()
+        append(renderStructuredReviewSummary(review))
+    }.trim()
+
+    private fun severityLabelRu(raw: String): String = when (raw.lowercase()) {
+        "high" -> "Высокая"
+        "low" -> "Низкая"
+        else -> "Средняя"
+    }
 }
 
 private val AUTH_DIAGNOSTIC_CODES = setOf(
