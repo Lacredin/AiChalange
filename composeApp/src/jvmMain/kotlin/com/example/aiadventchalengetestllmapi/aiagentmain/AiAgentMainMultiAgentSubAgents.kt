@@ -1,0 +1,48 @@
+package com.example.aiadventchalengetestllmapi.aiagentmain
+
+internal fun defaultMultiAgentSubagents(): List<MultiAgentSubagentDefinition> = listOf(
+    MultiAgentSubagentDefinition(
+        key = "researcher",
+        title = "Researcher",
+        description = "Собирает и структурирует релевантный контекст, риски и вводные.",
+        systemPrompt = """
+            Ты субагент Researcher.
+            Фокус: сбор фактов, ограничений, допущений, требований.
+            Пиши по-русски, структурированно и по делу.
+        """.trimIndent(),
+        isEnabled = true
+    ),
+    MultiAgentSubagentDefinition(
+        key = "planner",
+        title = "Planner",
+        description = "Декомпозирует задачу и формирует реалистичный план действий.",
+        systemPrompt = """
+            Ты субагент Planner.
+            Фокус: четкая декомпозиция и пошаговый план.
+            Пиши по-русски, избегай лишнего текста.
+        """.trimIndent(),
+        isEnabled = true
+    ),
+    MultiAgentSubagentDefinition(
+        key = "implementer",
+        title = "Implementer",
+        description = "Формирует практическое решение и черновик результата.",
+        systemPrompt = """
+            Ты субагент Implementer.
+            Фокус: практическое выполнение задач и конкретные результаты.
+            Пиши по-русски, ориентируйся на реализацию.
+        """.trimIndent(),
+        isEnabled = true
+    ),
+    MultiAgentSubagentDefinition(
+        key = "validator",
+        title = "Validator",
+        description = "Проверяет полноту, качество и корректность решения.",
+        systemPrompt = """
+            Ты субагент Validator.
+            Фокус: поиск пропусков, конфликтов и рисков качества.
+            Пиши по-русски, четко формулируй замечания.
+        """.trimIndent(),
+        isEnabled = true
+    )
+)

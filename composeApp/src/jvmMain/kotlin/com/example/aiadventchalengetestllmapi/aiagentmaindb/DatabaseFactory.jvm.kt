@@ -76,13 +76,57 @@ actual class AiAgentMainDatabaseDriverFactory {
                 "created_at"
             ),
             "memory_entries" to setOf("id", "profile_id", "entry_key", "entry_value", "created_at", "updated_at"),
-            "invariant_entries" to setOf("id", "entry_key", "entry_value", "created_at", "updated_at")
+            "invariant_entries" to setOf("id", "entry_key", "entry_value", "created_at", "updated_at"),
+            "multi_agent_subagents" to setOf(
+                "id",
+                "agent_key",
+                "title",
+                "description",
+                "is_enabled",
+                "system_prompt",
+                "created_at",
+                "updated_at"
+            ),
+            "multi_agent_runs" to setOf(
+                "id",
+                "chat_id",
+                "user_request",
+                "status",
+                "resolution_type",
+                "created_at",
+                "updated_at"
+            ),
+            "multi_agent_steps" to setOf(
+                "id",
+                "run_id",
+                "step_index",
+                "title",
+                "assignee_agent_key",
+                "status",
+                "input_payload",
+                "output_payload",
+                "validation_note",
+                "created_at",
+                "updated_at"
+            ),
+            "multi_agent_events" to setOf(
+                "id",
+                "run_id",
+                "chat_id",
+                "channel",
+                "actor_type",
+                "actor_key",
+                "role",
+                "message",
+                "metadata_json",
+                "created_at"
+            )
         )
         val actualTables = mutableSetOf<String>()
         val connectionUrl = "jdbc:sqlite:$dbPath"
         DriverManager.getConnection(connectionUrl).use { connection ->
             connection.prepareStatement(
-                "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('chats', 'chat_messages', 'chat_profiles', 'chat_branch_messages', 'memory_entries', 'invariant_entries');"
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('chats', 'chat_messages', 'chat_profiles', 'chat_branch_messages', 'memory_entries', 'invariant_entries', 'multi_agent_subagents', 'multi_agent_runs', 'multi_agent_steps', 'multi_agent_events');"
             ).use { statement ->
                 statement.executeQuery().use { resultSet ->
                     while (resultSet.next()) {

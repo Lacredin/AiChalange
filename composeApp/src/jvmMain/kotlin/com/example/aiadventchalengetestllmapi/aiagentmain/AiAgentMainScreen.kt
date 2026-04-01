@@ -190,6 +190,7 @@ private fun AiAgentMainChat(
     var selectedBranchNumber by remember { mutableStateOf<Int?>(null) }
     var isBranchingEnabled by remember { mutableStateOf(false) }
     val branchNames = remember { mutableStateMapOf<Int, String>() }
+    val multiAgentTraceMessagesByChat = remember { mutableStateMapOf<Long, SnapshotStateList<AiAgentMessage>>() }
 
     // Long-term memory
     var selectedProfileId by remember { mutableStateOf<Long?>(null) }
@@ -215,9 +216,14 @@ private fun AiAgentMainChat(
     var planInvariantCheckFailed by remember { mutableStateOf(false) }
     var planInvariantViolationByAi by remember { mutableStateOf(false) }
     var agentModeState by remember { mutableStateOf(AgentModeState()) }
+    var isMultiAgentEnabled by remember { mutableStateOf(false) }
+    var isMultiAgentTraceMode by remember { mutableStateOf(false) }
+    var isMultiAgentSettingsVisible by remember { mutableStateOf(false) }
+    val multiAgentSubagents = remember { mutableStateListOf<MultiAgentSubagentDefinition>() }
     val agentHelpCommandUseCase = remember { AgentHelpCommandUseCase() }
     val agentPrReviewUseCase = remember { AgentPrReviewUseCase() }
     val agentAuthTokenUseCase = remember { AgentAuthTokenUseCase(remoteMcpService) }
+    val multiAgentOrchestrator = remember { MultiAgentOrchestrator() }
 
     // State machine
     var agentState by remember { mutableStateOf(AgentState.Idle) }
@@ -330,6 +336,90 @@ private fun AiAgentMainChat(
             params_info = message.paramsInfo,
             created_at = message.createdAt
         )
+    }
+
+    fun loadMultiAgentTraceMessagesForChat(chatId: Long): SnapshotStateList<AiAgentMessage> {
+        val rows = queries.selectMultiAgentEventsByChat(chat_id = chatId).executeAsList()
+        val messages = rows.map { row ->
+            AiAgentMessage(
+                text = "[${row.actor_type}:${row.actor_key}] ${row.message}",
+                isUser = row.role == "user",
+                paramsInfo = "stage=multiagent|trace|channel=${row.channel}",
+                stream = AiAgentStream.Raw,
+                epoch = 0,
+                createdAt = row.created_at
+            )
+        }
+        return mutableStateListOf<AiAgentMessage>().also { it += messages }
+    }
+
+    fun refreshMultiAgentSubagents() {
+        val fromDb = queries.selectAllMultiAgentSubagents().executeAsList().map { row ->
+            MultiAgentSubagentDefinition(
+                key = row.agent_key,
+                title = row.title,
+                description = row.description,
+                systemPrompt = row.system_prompt,
+                isEnabled = row.is_enabled == 1L
+            )
+        }
+        multiAgentSubagents.clear()
+        multiAgentSubagents += fromDb
+    }
+
+    fun ensureDefaultMultiAgentSubagents() {
+        val existing = queries.selectAllMultiAgentSubagents().executeAsList()
+        if (existing.isNotEmpty()) return
+        val now = System.currentTimeMillis()
+        defaultMultiAgentSubagents().forEach { subagent ->
+            queries.insertMultiAgentSubagent(
+                agent_key = subagent.key,
+                title = subagent.title,
+                description = subagent.description,
+                is_enabled = if (subagent.isEnabled) 1 else 0,
+                system_prompt = subagent.systemPrompt,
+                created_at = now,
+                updated_at = now
+            )
+        }
+    }
+
+    fun updateMultiAgentSubagentEnabled(agentKey: String, enabled: Boolean) {
+        queries.updateMultiAgentSubagentEnabledByKey(
+            is_enabled = if (enabled) 1 else 0,
+            updated_at = System.currentTimeMillis(),
+            agent_key = agentKey
+        )
+        refreshMultiAgentSubagents()
+    }
+
+    fun appendMultiAgentEvent(
+        chatId: Long,
+        runId: Long?,
+        event: MultiAgentEvent
+    ) {
+        val now = System.currentTimeMillis()
+        queries.insertMultiAgentEvent(
+            run_id = runId,
+            chat_id = chatId,
+            channel = event.channel.name.lowercase(),
+            actor_type = event.actorType,
+            actor_key = event.actorKey,
+            role = event.role,
+            message = event.message,
+            metadata_json = event.metadataJson,
+            created_at = now
+        )
+        val traceMessages = multiAgentTraceMessagesByChat.getOrPut(chatId) { mutableStateListOf() }
+        val traceMessage = AiAgentMessage(
+            text = "[${event.actorType}:${event.actorKey}] ${event.message}",
+            isUser = event.role == "user",
+            paramsInfo = "stage=multiagent|trace|channel=${event.channel.name.lowercase()}",
+            stream = AiAgentStream.Raw,
+            epoch = 0,
+            createdAt = now
+        )
+        traceMessages += traceMessage
     }
 
     fun websocketChatKey(serverUrl: String, toolName: String): String =
@@ -1256,6 +1346,178 @@ private fun AiAgentMainChat(
         }
     }
 
+    fun sendMultiAgentMessage(messageText: String = inputText.text.trim()) {
+        val chatId = activeChatId ?: return
+        val trimmed = messageText.trim()
+        if (trimmed.isEmpty() || isLoading) return
+
+        val regularMessages = regularMessagesByChat.getOrPut(chatId) { loadRegularMessagesForChat(chatId) }
+        isBranchingEnabled = false
+        selectedBranchNumber = null
+        agentState = AgentState.Idle
+        planClarificationNeeded = null
+
+        val userMsg = AiAgentMessage(
+            text = trimmed,
+            isUser = true,
+            paramsInfo = "stage=multiagent|user",
+            stream = AiAgentStream.Raw,
+            epoch = 0,
+            createdAt = System.currentTimeMillis()
+        )
+        regularMessages += userMsg
+        appendMessageToRegularChat(chatId, userMsg)
+        updateInputText(TextFieldValue(""))
+
+        scope.launch {
+            val sessionId = chatSessionId
+            isLoading = true
+            var runId: Long? = null
+            val stepRowIdByIndex = mutableMapOf<Int, Long>()
+            val result = try {
+                isErrorState = false
+                val now = System.currentTimeMillis()
+                queries.insertMultiAgentRun(
+                    chat_id = chatId,
+                    user_request = trimmed,
+                    status = MultiAgentRunStatus.RUNNING.name.lowercase(),
+                    resolution_type = "pending",
+                    created_at = now,
+                    updated_at = now
+                )
+                runId = queries.selectLastInsertedMultiAgentRunId().executeAsOne()
+
+                appendMultiAgentEvent(
+                    chatId = chatId,
+                    runId = runId,
+                    event = MultiAgentEvent(
+                        channel = MultiAgentEventChannel.TRACE,
+                        actorType = "user",
+                        actorKey = "user",
+                        role = "user",
+                        message = trimmed
+                    )
+                )
+
+                val requestApi = selectedApi
+                val model = modelInput.trim().ifEmpty { requestApi.defaultModel }
+                val apiKey = aiAgentReadApiKey(requestApi.envVar)
+                if (apiKey.isBlank()) error("Нет API ключа. Проверьте ${requestApi.envVar}")
+
+                val summary = multiAgentOrchestrator.execute(
+                    request = MultiAgentRequest(
+                        userRequest = trimmed,
+                        projectFolderPath = agentModeState.projectFolderPath.trim(),
+                        subagents = multiAgentSubagents.filter { it.isEnabled }
+                    ),
+                    callModel = { call ->
+                        callAiAgentMainApi(
+                            requestApi = requestApi,
+                            model = model,
+                            apiKey = apiKey,
+                            requestMessages = call.messages,
+                            deepSeekApi = deepSeekApi,
+                            openAiApi = openAiApi,
+                            gigaChatApi = gigaChatApi,
+                            proxyOpenAiApi = proxyOpenAiApi,
+                            localLlmApi = localLlmApi,
+                            options = AgentModelRequestOptions(
+                                temperature = call.temperature,
+                                topP = call.topP,
+                                maxTokens = call.maxTokens,
+                                responseFormat = if (call.responseAsJson) {
+                                    DeepSeekResponseFormat(type = "json_object")
+                                } else {
+                                    null
+                                }
+                            )
+                        )
+                    },
+                    onEvent = { event ->
+                        appendMultiAgentEvent(chatId = chatId, runId = runId, event = event)
+                        if (event.channel == MultiAgentEventChannel.USER) {
+                            val msg = AiAgentMessage(
+                                text = event.message,
+                                isUser = false,
+                                paramsInfo = "stage=multiagent|status",
+                                stream = AiAgentStream.Raw,
+                                epoch = 0,
+                                createdAt = System.currentTimeMillis()
+                            )
+                            regularMessages += msg
+                            appendMessageToRegularChat(chatId, msg)
+                        }
+                    },
+                    onPlanningReady = { planning ->
+                        if (runId == null) return@execute
+                        val nowPlan = System.currentTimeMillis()
+                        planning.planSteps.forEach { step ->
+                            queries.insertMultiAgentStep(
+                                run_id = runId!!,
+                                step_index = step.index.toLong(),
+                                title = step.title,
+                                assignee_agent_key = step.assigneeKey,
+                                status = MultiAgentStepStatus.planned.name,
+                                input_payload = step.taskInput,
+                                output_payload = "",
+                                validation_note = "",
+                                created_at = nowPlan,
+                                updated_at = nowPlan
+                            )
+                        }
+                        val rows = queries.selectMultiAgentStepsByRun(run_id = runId!!).executeAsList()
+                        stepRowIdByIndex.clear()
+                        rows.forEach { row -> stepRowIdByIndex[row.step_index.toInt()] = row.id }
+                    },
+                    onStepReady = { step ->
+                        val rowId = stepRowIdByIndex[step.step.index] ?: return@execute
+                        queries.updateMultiAgentStepById(
+                            status = step.status.name,
+                            output_payload = step.output,
+                            validation_note = step.validationNote,
+                            updated_at = System.currentTimeMillis(),
+                            id = rowId
+                        )
+                    }
+                )
+
+                if (runId != null) {
+                    queries.updateMultiAgentRunStatus(
+                        status = summary.runStatus.name.lowercase(),
+                        resolution_type = summary.resolutionType.name.lowercase(),
+                        updated_at = System.currentTimeMillis(),
+                        id = runId!!
+                    )
+                }
+                summary.finalUserMessage
+            } catch (e: Exception) {
+                isErrorState = true
+                if (runId != null) {
+                    queries.updateMultiAgentRunStatus(
+                        status = MultiAgentRunStatus.FAILED.name.lowercase(),
+                        resolution_type = MultiAgentResolutionType.FAILED.name.lowercase(),
+                        updated_at = System.currentTimeMillis(),
+                        id = runId!!
+                    )
+                }
+                "Request failed: ${e.message ?: "unknown error"}"
+            }
+
+            if (sessionId != chatSessionId) { isLoading = false; return@launch }
+            val finalMsg = AiAgentMessage(
+                text = result,
+                isUser = false,
+                paramsInfo = "stage=multiagent|final",
+                stream = AiAgentStream.Raw,
+                epoch = 0,
+                createdAt = System.currentTimeMillis()
+            )
+            regularMessages += finalMsg
+            appendMessageToRegularChat(chatId, finalMsg)
+            isLoading = false
+        }
+    }
+
     fun sendPrimaryInput() {
         val chatId = activeChatId ?: return
         val rawInput = inputText.text
@@ -1274,7 +1536,8 @@ private fun AiAgentMainChat(
         val parseResult = AgentSlashCommandParser.parse(rawInput)
         when (parseResult) {
             AgentSlashParseResult.NotSlash -> {
-                sendRegularChatMessage(trimmed)
+                if (isMultiAgentEnabled) sendMultiAgentMessage(trimmed)
+                else sendRegularChatMessage(trimmed)
             }
 
             is AgentSlashParseResult.Error -> {
@@ -2784,6 +3047,7 @@ private fun AiAgentMainChat(
         isErrorState = false
         activeChatId = null
         regularMessagesByChat.clear()
+        multiAgentTraceMessagesByChat.clear()
         isBranchingEnabled = false
         selectedBranchNumber = null
         agentState = AgentState.Idle
@@ -2817,6 +3081,7 @@ private fun AiAgentMainChat(
         activeChatId = chatId
         branchesByChat.remove(chatId)
         regularMessagesByChat[chatId] = loadRegularMessagesForChat(chatId)
+        multiAgentTraceMessagesByChat[chatId] = loadMultiAgentTraceMessagesForChat(chatId)
         branchNames.clear()
 
         val branches = loadBranchesForChat(chatId)
@@ -2940,11 +3205,14 @@ private fun AiAgentMainChat(
     fun deleteChat(chatId: Long) {
         if (isLoading) return
         val wasActive = activeChatId == chatId
+        queries.deleteMultiAgentEventsByChat(chat_id = chatId)
+        queries.deleteMultiAgentRunsByChat(chat_id = chatId)
         queries.deleteBranchMessagesByChat(chat_id = chatId)
         queries.deleteMessagesByChat(chatId)
         queries.deleteChatById(chatId)
         branchesByChat.remove(chatId)
         regularMessagesByChat.remove(chatId)
+        multiAgentTraceMessagesByChat.remove(chatId)
         branchVisibilityByChat.remove(chatId)
         branchCounterByChat.remove(chatId)
         websocketChatIdsByKey.entries.removeAll { it.value == chatId }
@@ -2961,9 +3229,13 @@ private fun AiAgentMainChat(
         if (isLoading) return
         queries.deleteAllMessages()
         queries.deleteAllBranchMessages()
+        queries.deleteAllMultiAgentEvents()
+        queries.deleteAllMultiAgentSteps()
+        queries.deleteAllMultiAgentRuns()
         queries.deleteAllChats()
         branchesByChat.clear()
         regularMessagesByChat.clear()
+        multiAgentTraceMessagesByChat.clear()
         branchVisibilityByChat.clear()
         branchCounterByChat.clear()
         websocketChatIdsByKey.clear()
@@ -2983,9 +3255,13 @@ private fun AiAgentMainChat(
             isEnabled = appSettingBool("agent_mode_enabled", default = false),
             projectFolderPath = appSettingString("agent_project_folder", default = "")
         )
+        isMultiAgentEnabled = appSettingBool("multi_agent_enabled", default = false)
+        isMultiAgentTraceMode = appSettingBool("multi_agent_trace_mode", default = false)
         if (agentModeState.isEnabled && isStateMachineEnabled) {
             setStateMachineEnabled(false)
         }
+        ensureDefaultMultiAgentSubagents()
+        refreshMultiAgentSubagents()
         mcpServerOptions.forEach { server ->
             mcpServerEnabled[server.url] = appSettingBool(
                 key = mcpServerSettingKey(server.url),
@@ -3005,7 +3281,9 @@ private fun AiAgentMainChat(
 
     val displayBranchNumber = selectedBranchNumber
     val displayMessages: List<AiAgentMessage> =
-        if (!isStateMachineEnabled) {
+        if (agentModeState.isEnabled && isMultiAgentEnabled && isMultiAgentTraceMode) {
+            multiAgentTraceMessagesByChat[activeChatId] ?: emptyList()
+        } else if (!isStateMachineEnabled) {
             regularMessagesByChat[activeChatId] ?: emptyList()
         } else if (isBranchingEnabled && displayBranchNumber != null) {
             branchesByChat[activeChatId]?.firstOrNull { it.number == displayBranchNumber }?.messages ?: emptyList()
@@ -3137,6 +3415,10 @@ private fun AiAgentMainChat(
                             onCheckedChange = { checked ->
                                 agentModeState = agentModeState.copy(isEnabled = checked)
                                 saveAppSettingBool("agent_mode_enabled", checked)
+                                if (!checked && isMultiAgentEnabled) {
+                                    isMultiAgentEnabled = false
+                                    saveAppSettingBool("multi_agent_enabled", false)
+                                }
                                 if (checked && isStateMachineEnabled) {
                                     setStateMachineEnabled(false)
                                 }
@@ -3148,6 +3430,53 @@ private fun AiAgentMainChat(
                             enabled = !isLoading
                         )
                         Text("Агент", style = MaterialTheme.typography.labelSmall)
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Checkbox(
+                            checked = isMultiAgentEnabled,
+                            onCheckedChange = { checked ->
+                                isMultiAgentEnabled = checked
+                                saveAppSettingBool("multi_agent_enabled", checked)
+                                if (checked && isStateMachineEnabled) {
+                                    setStateMachineEnabled(false)
+                                }
+                            },
+                            enabled = !isLoading && agentModeState.isEnabled
+                        )
+                        Text("Мультиагентность", style = MaterialTheme.typography.labelSmall)
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Checkbox(
+                            checked = isMultiAgentTraceMode,
+                            onCheckedChange = { checked ->
+                                isMultiAgentTraceMode = checked
+                                saveAppSettingBool("multi_agent_trace_mode", checked)
+                            },
+                            enabled = !isLoading && agentModeState.isEnabled && isMultiAgentEnabled
+                        )
+                        Text("Trace чат", style = MaterialTheme.typography.labelSmall)
+                    }
+                    if (agentModeState.isEnabled) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Checkbox(
+                                checked = isMultiAgentSettingsVisible,
+                                onCheckedChange = { isMultiAgentSettingsVisible = it },
+                                enabled = !isLoading
+                            )
+                            Text("Панель мультиагентов", style = MaterialTheme.typography.labelSmall)
+                        }
                     }
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -3456,6 +3785,53 @@ private fun AiAgentMainChat(
                                     enabled = !isLoading
                                 ) {
                                     Text("Очистить")
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (agentModeState.isEnabled && isMultiAgentSettingsVisible) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(8.dp))
+                            .padding(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(
+                            text = "Настройки мультиагентности",
+                            style = MaterialTheme.typography.labelMedium
+                        )
+                        if (multiAgentSubagents.isEmpty()) {
+                            Text(
+                                text = "Субагенты не загружены",
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        } else {
+                            multiAgentSubagents.forEach { subagent ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Checkbox(
+                                        checked = subagent.isEnabled,
+                                        onCheckedChange = { checked ->
+                                            updateMultiAgentSubagentEnabled(subagent.key, checked)
+                                        },
+                                        enabled = !isLoading
+                                    )
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = "${subagent.title} (${subagent.key})",
+                                            style = MaterialTheme.typography.labelSmall
+                                        )
+                                        Text(
+                                            text = subagent.description,
+                                            style = MaterialTheme.typography.bodySmall
+                                        )
+                                    }
                                 }
                             }
                         }
