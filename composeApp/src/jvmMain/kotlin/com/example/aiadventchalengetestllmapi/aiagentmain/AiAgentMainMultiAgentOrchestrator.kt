@@ -293,6 +293,15 @@ internal class MultiAgentOrchestrator(
                 )
             )
             onStepReady(MultiAgentStepExecution(step = step, status = MultiAgentStepStatus.running, output = ""))
+            val traceGroupId = buildSubagentTraceGroupId(step = step, subagent = subagent)
+            emitSubagentTraceEvent(
+                onEvent = onEvent,
+                subagent = subagent,
+                step = step,
+                traceGroupId = traceGroupId,
+                phase = MultiAgentTracePhase.STEP_START,
+                message = "step_start: ${step.title}"
+            )
 
             val stepTools = preflight.toolPlan
                 ?.tools
@@ -301,9 +310,25 @@ internal class MultiAgentOrchestrator(
             val stepToolCallRefs = mutableListOf<Long>()
             val stepToolOutputs = mutableListOf<String>()
             val isMcpExecutor = subagent.key.equals("mcp_executor", ignoreCase = true)
+            emitSubagentTraceEvent(
+                onEvent = onEvent,
+                subagent = subagent,
+                step = step,
+                traceGroupId = traceGroupId,
+                phase = MultiAgentTracePhase.TOOL_SELECTION,
+                message = MultiAgentTraceFormatter.formatToolSelection(stepTools)
+            )
 
             stepTools.forEach { tool ->
                 if (isMcpExecutor && tool.toolKind != MultiAgentToolKind.MCP_CALL) return@forEach
+                emitSubagentTraceEvent(
+                    onEvent = onEvent,
+                    subagent = subagent,
+                    step = step,
+                    traceGroupId = traceGroupId,
+                    phase = MultiAgentTracePhase.TOOL_CALL_REQUEST,
+                    message = MultiAgentTraceFormatter.formatToolCallRequest(tool)
+                )
                 val toolResult = executeTool(
                     ToolGatewayRequest(
                         toolKind = tool.toolKind,
@@ -333,6 +358,24 @@ internal class MultiAgentOrchestrator(
                         message = "STEP=${step.index}\n$line"
                     )
                 )
+                emitSubagentTraceEvent(
+                    onEvent = onEvent,
+                    subagent = subagent,
+                    step = step,
+                    traceGroupId = traceGroupId,
+                    phase = MultiAgentTracePhase.TOOL_CALL_RESPONSE,
+                    message = MultiAgentTraceFormatter.formatToolCallResponse(toolResult)
+                )
+                if (!toolResult.success) {
+                    emitSubagentTraceEvent(
+                        onEvent = onEvent,
+                        subagent = subagent,
+                        step = step,
+                        traceGroupId = traceGroupId,
+                        phase = MultiAgentTracePhase.ERROR,
+                        message = "tool_error: ${toolResult.errorCode.ifBlank { "UNKNOWN" }} ${toolResult.errorMessage}"
+                    )
+                }
             }
 
             if (isMcpExecutor) {
@@ -352,6 +395,22 @@ internal class MultiAgentOrchestrator(
                     output = mcpOutput,
                     toolCallRefs = stepToolCallRefs
                 )
+                emitSubagentTraceEvent(
+                    onEvent = onEvent,
+                    subagent = subagent,
+                    step = step,
+                    traceGroupId = traceGroupId,
+                    phase = MultiAgentTracePhase.SUBAGENT_OUTPUT,
+                    message = MultiAgentTraceFormatter.formatSubagentOutput(mcpOutput)
+                )
+                emitSubagentTraceEvent(
+                    onEvent = onEvent,
+                    subagent = subagent,
+                    step = step,
+                    traceGroupId = traceGroupId,
+                    phase = MultiAgentTracePhase.STEP_FINISH,
+                    message = "step_finish: status=done tool_call_refs=${stepToolCallRefs.joinToString(",")}"
+                )
                 stepsState += done
                 onStepReady(done)
                 return@forEachIndexed
@@ -362,6 +421,17 @@ internal class MultiAgentOrchestrator(
                 step = step,
                 reworkInstruction = null,
                 previousOutput = stepToolOutputs.joinToString("\n").ifBlank { null }
+            )
+            emitSubagentTraceEvent(
+                onEvent = onEvent,
+                subagent = subagent,
+                step = step,
+                traceGroupId = traceGroupId,
+                phase = MultiAgentTracePhase.PROMPT,
+                message = MultiAgentTraceFormatter.formatSubagentPrompt(
+                    systemPrompt = subagent.systemPrompt,
+                    userPrompt = prompt
+                )
             )
             val subagentRaw = callModel(
                 MultiAgentModelCall(
@@ -392,11 +462,27 @@ internal class MultiAgentOrchestrator(
                 }
                 append(subagentRaw.trim().ifBlank { "Пустой ответ субагента ${subagent.key}" })
             }
+            emitSubagentTraceEvent(
+                onEvent = onEvent,
+                subagent = subagent,
+                step = step,
+                traceGroupId = traceGroupId,
+                phase = MultiAgentTracePhase.SUBAGENT_OUTPUT,
+                message = MultiAgentTraceFormatter.formatSubagentOutput(finalOutput)
+            )
             val done = MultiAgentStepExecution(
                 step = step,
                 status = MultiAgentStepStatus.done,
                 output = finalOutput,
                 toolCallRefs = stepToolCallRefs
+            )
+            emitSubagentTraceEvent(
+                onEvent = onEvent,
+                subagent = subagent,
+                step = step,
+                traceGroupId = traceGroupId,
+                phase = MultiAgentTracePhase.STEP_FINISH,
+                message = "step_finish: status=done tool_call_refs=${stepToolCallRefs.joinToString(",")}"
             )
             stepsState += done
             onStepReady(done)
@@ -436,12 +522,32 @@ internal class MultiAgentOrchestrator(
                     updatedSteps += oldStep.copy(status = MultiAgentStepStatus.failed)
                     continue
                 }
+                val reworkTraceGroupId = buildSubagentTraceGroupId(step = oldStep.step, subagent = subagent)
+                emitSubagentTraceEvent(
+                    onEvent = onEvent,
+                    subagent = subagent,
+                    step = oldStep.step,
+                    traceGroupId = reworkTraceGroupId,
+                    phase = MultiAgentTracePhase.STEP_START,
+                    message = "step_start: rework#$attempts ${oldStep.step.title}"
+                )
                 onStepReady(oldStep.copy(status = MultiAgentStepStatus.needs_rework, validationNote = "validator_rework"))
                 val prompt = MultiAgentPromptFactory.subagentTaskPrompt(
                     userRequest = request.userRequest,
                     step = oldStep.step,
                     reworkInstruction = reworkInstruction,
                     previousOutput = oldStep.output
+                )
+                emitSubagentTraceEvent(
+                    onEvent = onEvent,
+                    subagent = subagent,
+                    step = oldStep.step,
+                    traceGroupId = reworkTraceGroupId,
+                    phase = MultiAgentTracePhase.PROMPT,
+                    message = MultiAgentTraceFormatter.formatSubagentPrompt(
+                        systemPrompt = subagent.systemPrompt,
+                        userPrompt = prompt
+                    )
                 )
                 val raw = callModel(
                     MultiAgentModelCall(
@@ -464,10 +570,26 @@ internal class MultiAgentOrchestrator(
                         message = "SUBAGENT_REWORK_PROMPT:\n$prompt\n\nSUBAGENT_REWORK_RAW:\n$raw"
                     )
                 )
+                emitSubagentTraceEvent(
+                    onEvent = onEvent,
+                    subagent = subagent,
+                    step = oldStep.step,
+                    traceGroupId = reworkTraceGroupId,
+                    phase = MultiAgentTracePhase.SUBAGENT_OUTPUT,
+                    message = MultiAgentTraceFormatter.formatSubagentOutput(raw)
+                )
                 val done = oldStep.copy(
                     status = MultiAgentStepStatus.done,
                     output = raw.trim().ifBlank { "Пустой ответ субагента ${subagent.key}" },
                     validationNote = "reworked"
+                )
+                emitSubagentTraceEvent(
+                    onEvent = onEvent,
+                    subagent = subagent,
+                    step = oldStep.step,
+                    traceGroupId = reworkTraceGroupId,
+                    phase = MultiAgentTracePhase.STEP_FINISH,
+                    message = "step_finish: status=done validation_note=reworked"
                 )
                 updatedSteps += done
                 onStepReady(done)
@@ -887,6 +1009,40 @@ internal class MultiAgentOrchestrator(
                 steps = steps
             )
         }
+    }
+
+    private fun emitSubagentTraceEvent(
+        onEvent: (MultiAgentEvent) -> Unit,
+        subagent: MultiAgentSubagentDefinition,
+        step: MultiAgentPlanStep,
+        traceGroupId: String,
+        phase: MultiAgentTracePhase,
+        message: String
+    ) {
+        onEvent(
+            MultiAgentEvent(
+                channel = MultiAgentEventChannel.TRACE,
+                actorType = "subagent",
+                actorKey = subagent.key,
+                role = "assistant",
+                message = message,
+                metadataJson = buildSubagentTraceMetadata(
+                    traceGroupId = traceGroupId,
+                    traceGroupTitle = subagent.title,
+                    phase = phase,
+                    stepIndex = step.index,
+                    extra = mapOf("step_title" to step.title)
+                )
+            )
+        )
+    }
+
+    private fun buildSubagentTraceGroupId(
+        step: MultiAgentPlanStep,
+        subagent: MultiAgentSubagentDefinition
+    ): String {
+        val suffix = System.currentTimeMillis()
+        return "subagent_run:${step.index}:${subagent.key}:$suffix"
     }
 
     private fun extractToolCallId(result: ToolGatewayResult): Long? {

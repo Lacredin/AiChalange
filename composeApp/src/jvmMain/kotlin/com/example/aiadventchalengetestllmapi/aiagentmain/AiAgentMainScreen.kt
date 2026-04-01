@@ -190,7 +190,7 @@ private fun AiAgentMainChat(
     var selectedBranchNumber by remember { mutableStateOf<Int?>(null) }
     var isBranchingEnabled by remember { mutableStateOf(false) }
     val branchNames = remember { mutableStateMapOf<Int, String>() }
-    val multiAgentTraceMessagesByChat = remember { mutableStateMapOf<Long, SnapshotStateList<AiAgentMessage>>() }
+    val multiAgentTraceEventsByChat = remember { mutableStateMapOf<Long, SnapshotStateList<MultiAgentTraceEventRecord>>() }
 
     // Long-term memory
     var selectedProfileId by remember { mutableStateOf<Long?>(null) }
@@ -339,19 +339,27 @@ private fun AiAgentMainChat(
         )
     }
 
-    fun loadMultiAgentTraceMessagesForChat(chatId: Long): SnapshotStateList<AiAgentMessage> {
+    fun loadMultiAgentTraceEventsForChat(chatId: Long): SnapshotStateList<MultiAgentTraceEventRecord> {
         val rows = queries.selectMultiAgentEventsByChat(chat_id = chatId).executeAsList()
-        val messages = rows.map { row ->
-            AiAgentMessage(
-                text = "[${row.actor_type}:${row.actor_key}] ${row.message}",
-                isUser = row.role == "user",
-                paramsInfo = "stage=multiagent|trace|channel=${row.channel}",
-                stream = AiAgentStream.Raw,
-                epoch = 0,
+        val records = rows.map { row ->
+            MultiAgentTraceEventRecord(
+                id = row.id,
+                runId = row.run_id,
+                chatId = row.chat_id,
+                channel = if (row.channel.equals("user", ignoreCase = true)) {
+                    MultiAgentEventChannel.USER
+                } else {
+                    MultiAgentEventChannel.TRACE
+                },
+                actorType = row.actor_type,
+                actorKey = row.actor_key,
+                role = row.role,
+                message = row.message,
+                metadataJson = row.metadata_json,
                 createdAt = row.created_at
             )
         }
-        return mutableStateListOf<AiAgentMessage>().also { it += messages }
+        return mutableStateListOf<MultiAgentTraceEventRecord>().also { it += records }
     }
 
     fun refreshMultiAgentSubagents() {
@@ -412,16 +420,20 @@ private fun AiAgentMainChat(
             metadata_json = event.metadataJson,
             created_at = now
         )
-        val traceMessages = multiAgentTraceMessagesByChat.getOrPut(chatId) { mutableStateListOf() }
-        val traceMessage = AiAgentMessage(
-            text = "[${event.actorType}:${event.actorKey}] ${event.message}",
-            isUser = event.role == "user",
-            paramsInfo = "stage=multiagent|trace|channel=${event.channel.name.lowercase()}",
-            stream = AiAgentStream.Raw,
-            epoch = 0,
+        val traceEvents = multiAgentTraceEventsByChat.getOrPut(chatId) { mutableStateListOf() }
+        val traceEvent = MultiAgentTraceEventRecord(
+            id = null,
+            runId = runId,
+            chatId = chatId,
+            channel = event.channel,
+            actorType = event.actorType,
+            actorKey = event.actorKey,
+            role = event.role,
+            message = event.message,
+            metadataJson = event.metadataJson,
             createdAt = now
         )
-        traceMessages += traceMessage
+        traceEvents += traceEvent
     }
 
     fun buildMultiAgentRunConversationContext(runId: Long): String {
@@ -3319,7 +3331,7 @@ private fun AiAgentMainChat(
         isErrorState = false
         activeChatId = null
         regularMessagesByChat.clear()
-        multiAgentTraceMessagesByChat.clear()
+        multiAgentTraceEventsByChat.clear()
         isBranchingEnabled = false
         selectedBranchNumber = null
         agentState = AgentState.Idle
@@ -3353,7 +3365,7 @@ private fun AiAgentMainChat(
         activeChatId = chatId
         branchesByChat.remove(chatId)
         regularMessagesByChat[chatId] = loadRegularMessagesForChat(chatId)
-        multiAgentTraceMessagesByChat[chatId] = loadMultiAgentTraceMessagesForChat(chatId)
+        multiAgentTraceEventsByChat[chatId] = loadMultiAgentTraceEventsForChat(chatId)
         branchNames.clear()
 
         val branches = loadBranchesForChat(chatId)
@@ -3485,7 +3497,7 @@ private fun AiAgentMainChat(
         queries.deleteChatById(chatId)
         branchesByChat.remove(chatId)
         regularMessagesByChat.remove(chatId)
-        multiAgentTraceMessagesByChat.remove(chatId)
+        multiAgentTraceEventsByChat.remove(chatId)
         branchVisibilityByChat.remove(chatId)
         branchCounterByChat.remove(chatId)
         websocketChatIdsByKey.entries.removeAll { it.value == chatId }
@@ -3509,7 +3521,7 @@ private fun AiAgentMainChat(
         queries.deleteAllChats()
         branchesByChat.clear()
         regularMessagesByChat.clear()
-        multiAgentTraceMessagesByChat.clear()
+        multiAgentTraceEventsByChat.clear()
         branchVisibilityByChat.clear()
         branchCounterByChat.clear()
         websocketChatIdsByKey.clear()
@@ -3554,10 +3566,20 @@ private fun AiAgentMainChat(
     }
 
     val displayBranchNumber = selectedBranchNumber
+    val isTraceChatMode = agentModeState.isEnabled && isMultiAgentEnabled && isMultiAgentTraceMode
+    val displayTraceEvents: List<MultiAgentTraceEventRecord> =
+        if (isTraceChatMode) {
+            multiAgentTraceEventsByChat[activeChatId] ?: emptyList()
+        } else {
+            emptyList()
+        }
+    val traceTimeline = remember(displayTraceEvents.size, displayTraceEvents.lastOrNull()?.createdAt) {
+        buildMultiAgentTraceTimeline(displayTraceEvents)
+    }
+    val traceGroupExpandedById = remember(activeChatId) { mutableStateMapOf<String, Boolean>() }
+
     val displayMessages: List<AiAgentMessage> =
-        if (agentModeState.isEnabled && isMultiAgentEnabled && isMultiAgentTraceMode) {
-            multiAgentTraceMessagesByChat[activeChatId] ?: emptyList()
-        } else if (!isStateMachineEnabled) {
+        if (!isStateMachineEnabled) {
             regularMessagesByChat[activeChatId] ?: emptyList()
         } else if (isBranchingEnabled && displayBranchNumber != null) {
             branchesByChat[activeChatId]?.firstOrNull { it.number == displayBranchNumber }?.messages ?: emptyList()
@@ -3572,8 +3594,13 @@ private fun AiAgentMainChat(
         latestExecutionAssistantMessage?.text?.let(::tryParseJsonExecution)
     }
 
-    LaunchedEffect(displayMessages.size, isLoading) {
-        if (displayMessages.isNotEmpty()) listState.animateScrollToItem(displayMessages.lastIndex)
+    LaunchedEffect(displayMessages.size, traceTimeline.size, isLoading) {
+        val lastIndex = when {
+            isTraceChatMode && traceTimeline.isNotEmpty() -> traceTimeline.lastIndex + 1
+            displayMessages.isNotEmpty() -> displayMessages.lastIndex + 1
+            else -> null
+        }
+        if (lastIndex != null) listState.animateScrollToItem(lastIndex)
     }
 
     val activeChatTitle = chats.firstOrNull { it.id == activeChatId }?.title.orEmpty()
@@ -4127,8 +4154,30 @@ private fun AiAgentMainChat(
                             modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
                         )
                     }
-                    items(displayMessages) { message ->
-                        AiAgentBubble(message = message)
+                    if (isTraceChatMode) {
+                        items(items = traceTimeline) { traceItem ->
+                            when (traceItem) {
+                                is MultiAgentTraceTimelineItem.Group -> {
+                                    val groupId = traceItem.group.traceGroupId
+                                    val expanded = traceGroupExpandedById[groupId] ?: false
+                                    MultiAgentTraceSubagentGroupBlock(
+                                        group = traceItem.group,
+                                        expanded = expanded,
+                                        onToggleExpanded = {
+                                            traceGroupExpandedById[groupId] = !expanded
+                                        }
+                                    )
+                                }
+
+                                is MultiAgentTraceTimelineItem.Event -> {
+                                    MultiAgentTraceEventBubble(event = traceItem.event)
+                                }
+                            }
+                        }
+                    } else {
+                        items(displayMessages) { message ->
+                            AiAgentBubble(message = message)
+                        }
                     }
                     if (isStateMachineEnabled && agentState == AgentState.Execution && parsedExecutionJson != null) {
                         item {
