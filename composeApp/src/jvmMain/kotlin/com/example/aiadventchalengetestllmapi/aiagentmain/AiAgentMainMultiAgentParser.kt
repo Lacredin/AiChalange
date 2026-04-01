@@ -63,6 +63,7 @@ internal object MultiAgentParser {
             impossibleReason = root["impossible_reason"]?.jsonPrimitive?.contentOrNull?.trim()?.ifBlank { null },
             toolCallIds = root["tool_call_ids"]?.jsonArray.orEmpty()
                 .mapNotNull { it.jsonPrimitive.longOrNull }
+                .filter { it > 0L }
                 .distinct(),
             ragEvidence = root["rag_evidence"]?.jsonArray.orEmpty()
                 .mapNotNull { it.jsonPrimitive.contentOrNull?.trim()?.ifBlank { null } }

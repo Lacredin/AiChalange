@@ -144,9 +144,24 @@ internal object MultiAgentPromptFactory {
         } else {
             stepOutputs.forEach { output ->
                 appendLine("STEP #${output.step.index} (${output.step.assigneeKey}) status=${output.status}")
-                if (output.toolCallRefs.isNotEmpty()) appendLine("tool_call_refs=${output.toolCallRefs.joinToString(",")}")
+                val validToolRefs = output.toolCallRefs.filter { it > 0L }
+                if (validToolRefs.isNotEmpty()) appendLine("tool_call_refs=${validToolRefs.joinToString(",")}")
                 appendLine(output.output)
                 appendLine()
+            }
+        }
+        appendLine("Критические итоговые данные (используй этот блок как приоритетный источник для final_answer):")
+        if (stepOutputs.isEmpty()) {
+            appendLine("- нет итоговых данных")
+        } else {
+            stepOutputs.forEach { output ->
+                appendLine("STEP #${output.step.index} final_data:")
+                val highlights = extractCriticalStepHighlights(output.output)
+                if (highlights.isEmpty()) {
+                    appendLine("- (не выделено)")
+                } else {
+                    highlights.forEach { line -> appendLine("- $line") }
+                }
             }
         }
     }.trim()
@@ -196,4 +211,18 @@ internal object MultiAgentPromptFactory {
         appendLine("Контекст диалога:")
         appendLine(conversationContext.ifBlank { "(пусто)" })
     }.trim()
+
+    private fun extractCriticalStepHighlights(output: String): List<String> {
+        val lines = output.lines()
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .filterNot { it.equals("TOOL_CONTEXT:", ignoreCase = true) }
+            .filterNot { it.startsWith("summary:", ignoreCase = true) }
+            .filterNot { it.startsWith("diagnostics:", ignoreCase = true) }
+            .filterNot { it.startsWith("tool_call_refs:", ignoreCase = true) }
+            .filterNot { it.startsWith("- TOOL ", ignoreCase = true) }
+
+        if (lines.isEmpty()) return emptyList()
+        return lines.take(4)
+    }
 }

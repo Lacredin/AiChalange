@@ -382,9 +382,19 @@ internal class MultiAgentOrchestrator(
                 val mcpOutput = if (stepToolOutputs.isEmpty()) {
                     "mcp_executor: инструменты MCP для шага не назначены."
                 } else {
+                    val resultCandidates = stepToolOutputs.mapNotNull { line ->
+                        line.substringAfter(": ", missingDelimiterValue = "")
+                            .trim()
+                            .ifBlank { null }
+                    }.distinct()
+                    val validRefs = stepToolCallRefs.filter { it > 0L }
                     buildString {
                         appendLine("summary: MCP шаг выполнен.")
-                        appendLine("tool_call_refs: ${stepToolCallRefs.joinToString(",")}")
+                        appendLine("tool_call_refs: ${validRefs.joinToString(",")}")
+                        if (resultCandidates.isNotEmpty()) {
+                            appendLine("final_result_candidates:")
+                            resultCandidates.take(3).forEach { appendLine("- $it") }
+                        }
                         appendLine("diagnostics:")
                         stepToolOutputs.forEach { appendLine("- $it") }
                     }.trim()
@@ -393,7 +403,7 @@ internal class MultiAgentOrchestrator(
                     step = step,
                     status = MultiAgentStepStatus.done,
                     output = mcpOutput,
-                    toolCallRefs = stepToolCallRefs
+                    toolCallRefs = stepToolCallRefs.filter { it > 0L }
                 )
                 emitSubagentTraceEvent(
                     onEvent = onEvent,
@@ -409,7 +419,7 @@ internal class MultiAgentOrchestrator(
                     step = step,
                     traceGroupId = traceGroupId,
                     phase = MultiAgentTracePhase.STEP_FINISH,
-                    message = "step_finish: status=done tool_call_refs=${stepToolCallRefs.joinToString(",")}"
+                    message = "step_finish: status=done tool_call_refs=${stepToolCallRefs.filter { it > 0L }.joinToString(",")}"
                 )
                 stepsState += done
                 onStepReady(done)
@@ -474,7 +484,7 @@ internal class MultiAgentOrchestrator(
                 step = step,
                 status = MultiAgentStepStatus.done,
                 output = finalOutput,
-                toolCallRefs = stepToolCallRefs
+                toolCallRefs = stepToolCallRefs.filter { it > 0L }
             )
             emitSubagentTraceEvent(
                 onEvent = onEvent,
@@ -482,7 +492,7 @@ internal class MultiAgentOrchestrator(
                 step = step,
                 traceGroupId = traceGroupId,
                 phase = MultiAgentTracePhase.STEP_FINISH,
-                message = "step_finish: status=done tool_call_refs=${stepToolCallRefs.joinToString(",")}"
+                message = "step_finish: status=done tool_call_refs=${stepToolCallRefs.filter { it > 0L }.joinToString(",")}"
             )
             stepsState += done
             onStepReady(done)
@@ -1050,7 +1060,7 @@ internal class MultiAgentOrchestrator(
         if (metadata.isBlank() || metadata == "{}") return null
         return runCatching {
             json.parseToJsonElement(metadata).jsonObject["toolCallId"]?.jsonPrimitive?.longOrNull
-        }.getOrNull()
+        }.getOrNull()?.takeIf { it > 0L }
     }
 
     private fun extractMetadataField(metadataJson: String, key: String): String {

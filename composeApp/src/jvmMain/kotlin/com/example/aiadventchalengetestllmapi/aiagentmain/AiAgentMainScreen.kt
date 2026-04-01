@@ -489,7 +489,14 @@ private fun AiAgentMainChat(
             latency_ms = log.latencyMs,
             created_at = System.currentTimeMillis()
         )
-        return queries.selectLastInsertedMultiAgentToolCallId().executeAsOne()
+        val insertedId = queries.selectLastInsertedMultiAgentToolCallId().executeAsOne()
+        if (insertedId > 0L) return insertedId
+        return queries.selectMultiAgentToolCallsByRun(run_id = log.runId)
+            .executeAsList()
+            .lastOrNull()
+            ?.id
+            ?.takeIf { it > 0L }
+            ?: 0L
     }
 
     fun websocketChatKey(serverUrl: String, toolName: String): String =
@@ -1674,12 +1681,17 @@ private fun AiAgentMainChat(
                         )
                         val mergedMetadata = run {
                             val base = gatewayResult.metadataJson.trim()
+                            val toolCallIdField = if (toolCallId > 0L) {
+                                "\"toolCallId\":$toolCallId,"
+                            } else {
+                                ""
+                            }
                             if (base.startsWith("{") && base.endsWith("}")) {
                                 val withoutTail = base.removeSuffix("}")
                                 val separator = if (withoutTail.length <= 1) "" else ","
-                                "$withoutTail${separator}\"toolCallId\":$toolCallId,\"preflight\":${toolRequest.preflight}}"
+                                "$withoutTail${separator}${toolCallIdField}\"preflight\":${toolRequest.preflight}}"
                             } else {
-                                """{"toolCallId":$toolCallId,"preflight":${toolRequest.preflight}}"""
+                                """{${toolCallIdField}"preflight":${toolRequest.preflight}}"""
                             }
                         }
                         gatewayResult.copy(
