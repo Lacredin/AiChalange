@@ -73,9 +73,11 @@ internal object MultiAgentParser {
     private fun parseToolPlan(obj: JsonObject?): MultiAgentToolPlan? {
         if (obj == null) return null
         val requiresTools = obj["requires_tools"]?.jsonPrimitive?.booleanOrNull ?: false
-        val fallbackPolicy = when (obj["fallback_policy"]?.jsonPrimitive?.contentOrNull?.trim()?.uppercase()) {
+        val fallbackPolicyRaw = obj["fallback_policy"]?.jsonPrimitive?.contentOrNull?.trim()?.uppercase()
+        val fallbackPolicy = when (fallbackPolicyRaw) {
+            "DEGRADE" -> MultiAgentToolFallbackPolicy.DEGRADE
             "FAIL" -> MultiAgentToolFallbackPolicy.FAIL
-            else -> MultiAgentToolFallbackPolicy.DEGRADE
+            else -> MultiAgentToolFallbackPolicy.FAIL
         }
         val tools = obj["tools"]?.jsonArray.orEmpty().mapNotNull { item ->
             val toolObj = item as? JsonObject ?: return@mapNotNull null
@@ -97,7 +99,8 @@ internal object MultiAgentParser {
         return MultiAgentToolPlan(
             requiresTools = requiresTools || tools.isNotEmpty(),
             tools = tools,
-            fallbackPolicy = fallbackPolicy
+            fallbackPolicy = fallbackPolicy,
+            fallbackPolicyDefaulted = fallbackPolicyRaw == null
         )
     }
 

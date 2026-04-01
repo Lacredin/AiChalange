@@ -2,12 +2,14 @@ package com.example.aiadventchalengetestllmapi.aiagentmain
 
 import com.example.aiadventchalengetestllmapi.network.DeepSeekMessage
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 
 internal class MultiAgentOrchestrator(
-    private val parser: MultiAgentParser = MultiAgentParser
+    private val parser: MultiAgentParser = MultiAgentParser,
+    private val maxReplanAttempts: Int = 2
 ) {
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -66,7 +68,8 @@ internal class MultiAgentOrchestrator(
                 message = "PLANNING_PROMPT:\n$planningPrompt\n\nPLANNING_RAW:\n$planningRaw"
             )
         )
-        val planningDecision = parser.parsePlanning(planningRaw)
+
+        var planningDecision = parser.parsePlanning(planningRaw)
             ?: return MultiAgentRunSummary(
                 runStatus = MultiAgentRunStatus.FAILED,
                 resolutionType = MultiAgentResolutionType.FAILED,
@@ -74,47 +77,12 @@ internal class MultiAgentOrchestrator(
                 planningDecision = null,
                 steps = emptyList()
             )
-
         onPlanningReady(planningDecision)
+        emitFallbackPolicyTrace(planningDecision.toolPlan, onEvent, "initial")
 
-        when (planningDecision.action) {
-            MultiAgentDecisionType.DIRECT_ANSWER -> {
-                val direct = planningDecision.directAnswer?.takeIf { it.isNotBlank() }
-                    ?: buildFallbackDirectAnswer(request.userRequest, callModel, onEvent)
-                return MultiAgentRunSummary(
-                    runStatus = MultiAgentRunStatus.DONE,
-                    resolutionType = MultiAgentResolutionType.DIRECT_ANSWER,
-                    finalUserMessage = direct,
-                    planningDecision = planningDecision,
-                    steps = emptyList()
-                )
-            }
-
-            MultiAgentDecisionType.NEED_CLARIFICATION -> {
-                val question = planningDecision.clarificationQuestion
-                    ?: "Нужны уточнения по задаче. Уточните желаемый результат."
-                return MultiAgentRunSummary(
-                    runStatus = MultiAgentRunStatus.WAITING_USER,
-                    resolutionType = MultiAgentResolutionType.NEED_CLARIFICATION,
-                    finalUserMessage = question,
-                    planningDecision = planningDecision,
-                    steps = emptyList()
-                )
-            }
-
-            MultiAgentDecisionType.IMPOSSIBLE -> {
-                val reason = planningDecision.impossibleReason
-                    ?: "Не могу выполнить задачу в текущих ограничениях."
-                return MultiAgentRunSummary(
-                    runStatus = MultiAgentRunStatus.DONE,
-                    resolutionType = MultiAgentResolutionType.IMPOSSIBLE,
-                    finalUserMessage = reason,
-                    planningDecision = planningDecision,
-                    steps = emptyList()
-                )
-            }
-
-            MultiAgentDecisionType.DELEGATE -> Unit
+        when (val early = resolveEarlyAction(planningDecision, request, callModel, onEvent)) {
+            null -> Unit
+            else -> return early
         }
 
         if (planningDecision.planSteps.isEmpty()) {
@@ -127,34 +95,93 @@ internal class MultiAgentOrchestrator(
             )
         }
 
-        val toolPlanPreflight = preflightToolPlan(
+        var preflight = preflightToolPlan(
             toolPlan = planningDecision.toolPlan,
             executeTool = executeTool,
             onEvent = onEvent
         )
-        when (toolPlanPreflight.kind) {
-            PreflightResultKind.CONTINUE -> Unit
-            PreflightResultKind.NEED_CLARIFICATION -> {
+
+        var replanAttempt = 0
+        while (preflight.unavailable.isNotEmpty() && replanAttempt < maxReplanAttempts) {
+            replanAttempt++
+            onEvent(
+                MultiAgentEvent(
+                    channel = MultiAgentEventChannel.USER,
+                    actorType = "orchestrator",
+                    actorKey = "orchestrator",
+                    role = "assistant",
+                    message = "Часть инструментов недоступна, запускаю replanning ($replanAttempt/$maxReplanAttempts)."
+                )
+            )
+            val replanDecision = replanForAvailableTools(
+                request = request,
+                currentPlan = planningDecision,
+                preflight = preflight,
+                callModel = callModel,
+                onEvent = onEvent
+            ) ?: break
+
+            planningDecision = replanDecision
+            onPlanningReady(planningDecision)
+            emitFallbackPolicyTrace(planningDecision.toolPlan, onEvent, "replan#$replanAttempt")
+
+            when (val early = resolveEarlyAction(planningDecision, request, callModel, onEvent)) {
+                null -> Unit
+                else -> return early
+            }
+
+            if (planningDecision.planSteps.isEmpty()) {
                 return MultiAgentRunSummary(
-                    runStatus = MultiAgentRunStatus.WAITING_USER,
-                    resolutionType = MultiAgentResolutionType.NEED_CLARIFICATION,
-                    finalUserMessage = toolPlanPreflight.message
-                        ?: "Нужны уточнения для продолжения работы.",
+                    runStatus = MultiAgentRunStatus.FAILED,
+                    resolutionType = MultiAgentResolutionType.FAILED,
+                    finalUserMessage = "После replanning оркестратор не построил шаги.",
                     planningDecision = planningDecision,
                     steps = emptyList()
                 )
             }
 
-            PreflightResultKind.IMPOSSIBLE -> {
-                return MultiAgentRunSummary(
-                    runStatus = MultiAgentRunStatus.DONE,
-                    resolutionType = MultiAgentResolutionType.IMPOSSIBLE,
-                    finalUserMessage = toolPlanPreflight.message
-                        ?: "Инструменты недоступны, задача не может быть выполнена.",
-                    planningDecision = planningDecision,
-                    steps = emptyList()
-                )
+            preflight = preflightToolPlan(
+                toolPlan = planningDecision.toolPlan,
+                executeTool = executeTool,
+                onEvent = onEvent
+            )
+        }
+
+        if (preflight.unavailable.isNotEmpty()) {
+            val finalReason = buildUnavailableToolsReason(preflight.unavailable)
+            val needClarification = preflight.unavailable.any {
+                it.result.errorCode == "PROJECT_FS_UNAVAILABLE" || it.result.errorCode == "INVALID_ARGUMENT"
             }
+            val resolutionType = if (needClarification) {
+                MultiAgentResolutionType.NEED_CLARIFICATION
+            } else {
+                MultiAgentResolutionType.IMPOSSIBLE
+            }
+            val runStatus = if (needClarification) {
+                MultiAgentRunStatus.WAITING_USER
+            } else {
+                MultiAgentRunStatus.DONE
+            }
+            onEvent(
+                MultiAgentEvent(
+                    channel = MultiAgentEventChannel.TRACE,
+                    actorType = "orchestrator",
+                    actorKey = "replan",
+                    role = "assistant",
+                    message = "REPLAN_FINAL: unresolved_tools=${preflight.unavailable.size}, resolution=$resolutionType, reason=$finalReason"
+                )
+            )
+            return MultiAgentRunSummary(
+                runStatus = runStatus,
+                resolutionType = resolutionType,
+                finalUserMessage = if (needClarification) {
+                    "Нужны уточнения для продолжения: $finalReason"
+                } else {
+                    "Задача невыполнима с текущей доступностью инструментов: $finalReason"
+                },
+                planningDecision = planningDecision,
+                steps = emptyList()
+            )
         }
 
         val subagentsByKey = enabledSubagents.associateBy { it.key.lowercase() }
@@ -193,15 +220,9 @@ internal class MultiAgentOrchestrator(
                     message = "Шаг ${idx + 1}/${planningDecision.planSteps.size}: ${step.title} (${subagent.title})."
                 )
             )
-            onStepReady(
-                MultiAgentStepExecution(
-                    step = step,
-                    status = MultiAgentStepStatus.running,
-                    output = ""
-                )
-            )
+            onStepReady(MultiAgentStepExecution(step = step, status = MultiAgentStepStatus.running, output = ""))
 
-            val stepTools = toolPlanPreflight.toolPlan
+            val stepTools = preflight.toolPlan
                 ?.tools
                 .orEmpty()
                 .filter { it.stepIndex == null || it.stepIndex == step.index }
@@ -309,7 +330,7 @@ internal class MultiAgentOrchestrator(
             onStepReady(done)
         }
 
-        val toolEvidenceRequired = toolPlanPreflight.toolPlan?.requiresTools == true
+        val toolEvidenceRequired = preflight.toolPlan?.requiresTools == true
         val firstValidation = validate(
             userRequest = request.userRequest,
             planSteps = planningDecision.planSteps,
@@ -343,12 +364,7 @@ internal class MultiAgentOrchestrator(
                     updatedSteps += oldStep.copy(status = MultiAgentStepStatus.failed)
                     continue
                 }
-                onStepReady(
-                    oldStep.copy(
-                        status = MultiAgentStepStatus.needs_rework,
-                        validationNote = "validator_rework"
-                    )
-                )
+                onStepReady(oldStep.copy(status = MultiAgentStepStatus.needs_rework, validationNote = "validator_rework"))
                 val prompt = MultiAgentPromptFactory.subagentTaskPrompt(
                     userRequest = request.userRequest,
                     step = oldStep.step,
@@ -409,16 +425,67 @@ internal class MultiAgentOrchestrator(
         )
     }
 
+    private suspend fun replanForAvailableTools(
+        request: MultiAgentRequest,
+        currentPlan: MultiAgentPlanningDecision,
+        preflight: PreflightResult,
+        callModel: suspend (MultiAgentModelCall) -> String,
+        onEvent: (MultiAgentEvent) -> Unit
+    ): MultiAgentPlanningDecision? {
+        val available = preflight.available.map { it.describe() }
+        val unavailable = preflight.unavailable.map { it.describe(includeError = true) }
+        val prompt = MultiAgentPromptFactory.orchestratorReplanPrompt(
+            userRequest = request.userRequest,
+            currentPlan = currentPlan,
+            availableTools = available,
+            unavailableTools = unavailable
+        )
+        val raw = callModel(
+            MultiAgentModelCall(
+                messages = listOf(DeepSeekMessage(role = "user", content = prompt)),
+                responseAsJson = true,
+                temperature = 0.1,
+                topP = 0.2,
+                maxTokens = 2200
+            )
+        )
+        onEvent(
+            MultiAgentEvent(
+                channel = MultiAgentEventChannel.TRACE,
+                actorType = "orchestrator",
+                actorKey = "replan",
+                role = "assistant",
+                message = "REPLAN_PROMPT:\n$prompt\n\nREPLAN_RAW:\n$raw"
+            )
+        )
+        return parser.parsePlanning(raw)
+    }
+
+    private fun emitFallbackPolicyTrace(
+        toolPlan: MultiAgentToolPlan?,
+        onEvent: (MultiAgentEvent) -> Unit,
+        phase: String
+    ) {
+        if (toolPlan == null) return
+        val source = if (toolPlan.fallbackPolicyDefaulted) "default" else "model"
+        onEvent(
+            MultiAgentEvent(
+                channel = MultiAgentEventChannel.TRACE,
+                actorType = "orchestrator",
+                actorKey = "fallback_policy",
+                role = "assistant",
+                message = "FALLBACK_POLICY phase=$phase value=${toolPlan.fallbackPolicy} source=$source"
+            )
+        )
+    }
+
     private suspend fun preflightToolPlan(
         toolPlan: MultiAgentToolPlan?,
         executeTool: suspend (ToolGatewayRequest) -> ToolGatewayResult,
         onEvent: (MultiAgentEvent) -> Unit
     ): PreflightResult {
         if (toolPlan == null || !toolPlan.requiresTools || toolPlan.tools.isEmpty()) {
-            return PreflightResult(
-                kind = PreflightResultKind.CONTINUE,
-                toolPlan = toolPlan
-            )
+            return PreflightResult(toolPlan = toolPlan, available = emptyList(), unavailable = emptyList())
         }
         onEvent(
             MultiAgentEvent(
@@ -429,8 +496,9 @@ internal class MultiAgentOrchestrator(
                 message = "Проверяю доступность инструментов (preflight)."
             )
         )
-        val availableTools = mutableListOf<MultiAgentToolPlanItem>()
-        val failedTools = mutableListOf<Pair<MultiAgentToolPlanItem, ToolGatewayResult>>()
+
+        val availableTools = mutableListOf<PreflightToolResult>()
+        val failedTools = mutableListOf<PreflightToolResult>()
         toolPlan.tools.forEach { tool ->
             val result = executeTool(
                 ToolGatewayRequest(
@@ -441,67 +509,78 @@ internal class MultiAgentOrchestrator(
                     stepIndex = null
                 )
             )
+            val preflightTool = PreflightToolResult(tool = tool, result = result)
+            val source = extractMetadataField(result.metadataJson, "availability_source")
+            val reason = extractMetadataField(result.metadataJson, "availability_reason")
+            val details = extractMetadataField(result.metadataJson, "availability_details")
             onEvent(
                 MultiAgentEvent(
                     channel = MultiAgentEventChannel.TRACE,
                     actorType = "orchestrator",
                     actorKey = "preflight",
                     role = "assistant",
-                    message = "PREFLIGHT ${tool.toolKind}: success=${result.success}, error=${result.errorCode}:${result.errorMessage}"
+                    message = "PREFLIGHT ${tool.toolKind} success=${result.success} error=${result.errorCode}:${result.errorMessage} source=$source reason=$reason details=$details"
                 )
             )
-            if (result.success) availableTools += tool else failedTools += (tool to result)
+            if (result.success) availableTools += preflightTool else failedTools += preflightTool
         }
-        if (failedTools.isEmpty()) {
-            return PreflightResult(
-                kind = PreflightResultKind.CONTINUE,
-                toolPlan = toolPlan.copy(tools = availableTools)
-            )
-        }
-        val projectMissing = failedTools.any { (tool, result) ->
-            tool.toolKind == MultiAgentToolKind.PROJECT_FS_SUMMARY &&
-                result.errorCode == "PROJECT_FS_UNAVAILABLE"
-        }
-        if (projectMissing) {
-            return PreflightResult(
-                kind = PreflightResultKind.NEED_CLARIFICATION,
-                message = "Укажите папку проекта для анализа и повторите запрос.",
-                toolPlan = toolPlan.copy(tools = availableTools, requiresTools = availableTools.isNotEmpty())
-            )
-        }
-        return when (toolPlan.fallbackPolicy) {
-            MultiAgentToolFallbackPolicy.DEGRADE -> {
-                onEvent(
-                    MultiAgentEvent(
-                        channel = MultiAgentEventChannel.USER,
-                        actorType = "orchestrator",
-                        actorKey = "orchestrator",
-                        role = "assistant",
-                        message = "Часть инструментов недоступна. Продолжаю в деградированном режиме."
-                    )
-                )
-                PreflightResult(
-                    kind = PreflightResultKind.CONTINUE,
-                    toolPlan = toolPlan.copy(tools = availableTools, requiresTools = availableTools.isNotEmpty())
+
+        val filtered = toolPlan.copy(tools = availableTools.map { it.tool })
+        return PreflightResult(toolPlan = filtered, available = availableTools, unavailable = failedTools)
+    }
+
+    private suspend fun resolveEarlyAction(
+        planningDecision: MultiAgentPlanningDecision,
+        request: MultiAgentRequest,
+        callModel: suspend (MultiAgentModelCall) -> String,
+        onEvent: (MultiAgentEvent) -> Unit
+    ): MultiAgentRunSummary? {
+        return when (planningDecision.action) {
+            MultiAgentDecisionType.DIRECT_ANSWER -> {
+                val direct = planningDecision.directAnswer?.takeIf { it.isNotBlank() }
+                    ?: buildFallbackDirectAnswer(request.userRequest, callModel, onEvent)
+                MultiAgentRunSummary(
+                    runStatus = MultiAgentRunStatus.DONE,
+                    resolutionType = MultiAgentResolutionType.DIRECT_ANSWER,
+                    finalUserMessage = direct,
+                    planningDecision = planningDecision,
+                    steps = emptyList()
                 )
             }
 
-            MultiAgentToolFallbackPolicy.FAIL -> {
-                onEvent(
-                    MultiAgentEvent(
-                        channel = MultiAgentEventChannel.USER,
-                        actorType = "orchestrator",
-                        actorKey = "orchestrator",
-                        role = "assistant",
-                        message = "Preflight не пройден. Требуемые инструменты недоступны."
-                    )
-                )
-                PreflightResult(
-                    kind = PreflightResultKind.IMPOSSIBLE,
-                    message = "Preflight не пройден. Требуемые инструменты недоступны.",
-                    toolPlan = toolPlan
+            MultiAgentDecisionType.NEED_CLARIFICATION -> {
+                val question = planningDecision.clarificationQuestion
+                    ?: "Нужны уточнения по задаче. Уточните желаемый результат."
+                MultiAgentRunSummary(
+                    runStatus = MultiAgentRunStatus.WAITING_USER,
+                    resolutionType = MultiAgentResolutionType.NEED_CLARIFICATION,
+                    finalUserMessage = question,
+                    planningDecision = planningDecision,
+                    steps = emptyList()
                 )
             }
+
+            MultiAgentDecisionType.IMPOSSIBLE -> {
+                val reason = planningDecision.impossibleReason
+                    ?: "Не могу выполнить задачу в текущих ограничениях."
+                MultiAgentRunSummary(
+                    runStatus = MultiAgentRunStatus.DONE,
+                    resolutionType = MultiAgentResolutionType.IMPOSSIBLE,
+                    finalUserMessage = reason,
+                    planningDecision = planningDecision,
+                    steps = emptyList()
+                )
+            }
+
+            MultiAgentDecisionType.DELEGATE -> null
+        }
+    }
+
+    private fun buildUnavailableToolsReason(unavailable: List<PreflightToolResult>): String {
+        if (unavailable.isEmpty()) return "нет недоступных инструментов"
+        return unavailable.joinToString("; ") {
+            val err = "${it.result.errorCode}:${it.result.errorMessage}".trim(':')
+            "${it.describe()} ($err)"
         }
     }
 
@@ -638,15 +717,28 @@ internal class MultiAgentOrchestrator(
         }.getOrNull()
     }
 
-    private enum class PreflightResultKind {
-        CONTINUE,
-        NEED_CLARIFICATION,
-        IMPOSSIBLE
+    private fun extractMetadataField(metadataJson: String, key: String): String {
+        val raw = metadataJson.trim()
+        if (raw.isBlank() || raw == "{}") return "-"
+        return runCatching {
+            json.parseToJsonElement(raw).jsonObject[key]?.jsonPrimitive?.contentOrNull ?: "-"
+        }.getOrDefault("-")
+    }
+
+    private data class PreflightToolResult(
+        val tool: MultiAgentToolPlanItem,
+        val result: ToolGatewayResult
+    ) {
+        fun describe(includeError: Boolean = false): String {
+            val base = "${tool.toolKind} step=${tool.stepIndex ?: "-"} reason=${tool.reason}"
+            if (!includeError) return base
+            return "$base error=${result.errorCode}:${result.errorMessage}"
+        }
     }
 
     private data class PreflightResult(
-        val kind: PreflightResultKind,
         val toolPlan: MultiAgentToolPlan?,
-        val message: String? = null
+        val available: List<PreflightToolResult>,
+        val unavailable: List<PreflightToolResult>
     )
 }

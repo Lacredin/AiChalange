@@ -77,7 +77,8 @@ internal data class MultiAgentToolPlanItem(
 internal data class MultiAgentToolPlan(
     val requiresTools: Boolean,
     val tools: List<MultiAgentToolPlanItem>,
-    val fallbackPolicy: MultiAgentToolFallbackPolicy
+    val fallbackPolicy: MultiAgentToolFallbackPolicy,
+    val fallbackPolicyDefaulted: Boolean = false
 )
 
 internal data class MultiAgentPlanningDecision(

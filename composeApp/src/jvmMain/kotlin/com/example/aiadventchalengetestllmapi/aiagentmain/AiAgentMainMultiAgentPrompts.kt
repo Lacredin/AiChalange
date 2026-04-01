@@ -22,11 +22,12 @@ internal object MultiAgentPromptFactory {
             """{"action":"DIRECT_ANSWER|DELEGATE|NEED_CLARIFICATION|IMPOSSIBLE","reason":"...","direct_answer":"...","clarification_question":"...","impossible_reason":"...","plan_steps":[{"title":"...","assignee_key":"...","task_input":"..."}],"tool_plan":{"requires_tools":true,"tools":[{"tool_kind":"RAG_QUERY|MCP_CALL|PROJECT_FS_SUMMARY","reason":"...","params":{"...":"..."},"step_index":1}],"fallback_policy":"DEGRADE|FAIL"}}"""
         )
         appendLine("Правила:")
-        appendLine("1) Если action != DELEGATE, plan_steps должен быть []")
+        appendLine("1) Если action != DELEGATE, plan_steps должен быть [].")
         appendLine("2) При DELEGATE составь пошаговый план и назначь assignee_key только из enabled субагентов.")
         appendLine("3) Если данных не хватает, используй NEED_CLARIFICATION.")
         appendLine("4) Если задача невыполнима в заданных рамках, используй IMPOSSIBLE.")
         appendLine("5) Если нужны инструменты, сформируй tool_plan и привяжи tool к step_index.")
+        appendLine("6) Указывай tool_plan.fallback_policy явно: DEGRADE или FAIL. Если поле пропущено, будет применен FAIL.")
         appendLine()
         appendLine("Папка проекта: $projectFolderPath")
         appendLine()
@@ -40,13 +41,43 @@ internal object MultiAgentPromptFactory {
         if (subagents.isEmpty()) {
             appendLine("- нет")
         } else {
-            subagents.forEach {
-                appendLine("- ${it.key}: ${it.description}")
-            }
+            subagents.forEach { appendLine("- ${it.key}: ${it.description}") }
         }
         appendLine()
         appendLine("Запрос пользователя:")
         append(userRequest)
+    }.trim()
+
+    fun orchestratorReplanPrompt(
+        userRequest: String,
+        currentPlan: MultiAgentPlanningDecision,
+        availableTools: List<String>,
+        unavailableTools: List<String>
+    ): String = buildString {
+        appendLine("Ты оркестратор мультиагентной системы.")
+        appendLine("Нужен replanning: часть инструментов недоступна после preflight.")
+        appendLine("Верни только JSON без markdown по тому же контракту, что и в planning:")
+        appendLine(
+            """{"action":"DIRECT_ANSWER|DELEGATE|NEED_CLARIFICATION|IMPOSSIBLE","reason":"...","direct_answer":"...","clarification_question":"...","impossible_reason":"...","plan_steps":[{"title":"...","assignee_key":"...","task_input":"..."}],"tool_plan":{"requires_tools":true,"tools":[{"tool_kind":"RAG_QUERY|MCP_CALL|PROJECT_FS_SUMMARY","reason":"...","params":{"...":"..."},"step_index":1}],"fallback_policy":"DEGRADE|FAIL"}}"""
+        )
+        appendLine("Правила:")
+        appendLine("1) Используй только доступные инструменты.")
+        appendLine("2) Если можно продолжить без недоступных инструментов, верни новый рабочий plan_steps и tool_plan.")
+        appendLine("3) Если требуются входные данные от пользователя, выбери NEED_CLARIFICATION.")
+        appendLine("4) Если задача невыполнима, выбери IMPOSSIBLE.")
+        appendLine("5) Указывай tool_plan.fallback_policy явно: DEGRADE или FAIL.")
+        appendLine()
+        appendLine("Исходный запрос пользователя:")
+        appendLine(userRequest)
+        appendLine()
+        appendLine("Текущий план (до replanning):")
+        appendLine(currentPlan.toString())
+        appendLine()
+        appendLine("Доступные инструменты:")
+        if (availableTools.isEmpty()) appendLine("- нет") else availableTools.forEach { appendLine("- $it") }
+        appendLine()
+        appendLine("Недоступные инструменты:")
+        if (unavailableTools.isEmpty()) appendLine("- нет") else unavailableTools.forEach { appendLine("- $it") }
     }.trim()
 
     fun subagentTaskPrompt(
@@ -113,9 +144,7 @@ internal object MultiAgentPromptFactory {
         } else {
             stepOutputs.forEach { output ->
                 appendLine("STEP #${output.step.index} (${output.step.assigneeKey}) status=${output.status}")
-                if (output.toolCallRefs.isNotEmpty()) {
-                    appendLine("tool_call_refs=${output.toolCallRefs.joinToString(",")}")
-                }
+                if (output.toolCallRefs.isNotEmpty()) appendLine("tool_call_refs=${output.toolCallRefs.joinToString(",")}")
                 appendLine(output.output)
                 appendLine()
             }

@@ -24,3 +24,10 @@ internal data class ToolGatewayMcpRequest(
     val endpoint: String?,
     val arguments: Map<String, Any?>
 )
+
+internal data class ToolGatewayAvailability(
+    val available: Boolean,
+    val source: String,
+    val reason: String = "",
+    val details: String = ""
+)

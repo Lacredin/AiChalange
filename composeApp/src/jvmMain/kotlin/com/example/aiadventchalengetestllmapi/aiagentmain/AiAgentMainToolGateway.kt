@@ -16,8 +16,8 @@ internal class AiAgentMainToolGateway(
     private val ragExecutor: suspend (query: String) -> String,
     private val mcpExecutor: suspend (request: ToolGatewayMcpRequest) -> String,
     private val projectFsSummaryExecutor: suspend (projectFolderPath: String) -> String,
-    private val isRagAvailable: suspend () -> Boolean,
-    private val isMcpToolAvailable: suspend (toolName: String) -> Boolean,
+    private val ragAvailability: suspend () -> ToolGatewayAvailability,
+    private val mcpAvailability: suspend (toolName: String) -> ToolGatewayAvailability,
     private val isProjectFsAvailable: suspend (projectFolderPath: String) -> Boolean,
     private val mcpTimeoutMs: Long = 25_000L,
     private val mcpRetryCount: Int = 1
@@ -60,16 +60,21 @@ internal class AiAgentMainToolGateway(
             )
         }
         if (request.preflight) {
-            val available = isRagAvailable()
+            val availability = ragAvailability()
+            val available = availability.available
             return ToolGatewayResult(
                 success = available,
                 toolKind = MultiAgentToolKind.RAG_QUERY,
                 normalizedOutput = if (available) "RAG available" else "",
                 rawOutput = "",
                 errorCode = if (available) "" else "RAG_UNAVAILABLE",
-                errorMessage = if (available) "" else "RAG index is unavailable or empty",
+                errorMessage = if (available) "" else availability.reason.ifBlank { "RAG index is unavailable or empty" },
                 latencyMs = System.currentTimeMillis() - start,
-                metadataJson = """{"preflight":true}"""
+                metadataJson = buildPreflightMetadata(
+                    source = availability.source,
+                    reason = availability.reason,
+                    details = availability.details
+                )
             )
         }
         val raw = ragExecutor(query)
@@ -102,16 +107,22 @@ internal class AiAgentMainToolGateway(
             )
         }
         if (request.preflight) {
-            val available = isMcpToolAvailable(toolName)
+            val availability = mcpAvailability(toolName)
+            val available = availability.available
             return ToolGatewayResult(
                 success = available,
                 toolKind = MultiAgentToolKind.MCP_CALL,
                 normalizedOutput = if (available) "MCP tool '$toolName' available" else "",
                 rawOutput = "",
                 errorCode = if (available) "" else "MCP_TOOL_UNAVAILABLE",
-                errorMessage = if (available) "" else "MCP tool '$toolName' unavailable",
+                errorMessage = if (available) "" else availability.reason.ifBlank { "MCP tool '$toolName' unavailable" },
                 latencyMs = System.currentTimeMillis() - start,
-                metadataJson = """{"preflight":true,"toolName":"$toolName"}"""
+                metadataJson = buildPreflightMetadata(
+                    source = availability.source,
+                    reason = availability.reason,
+                    details = availability.details,
+                    extra = ",\"toolName\":\"${escapeJson(toolName)}\""
+                )
             )
         }
 
@@ -202,6 +213,18 @@ internal class AiAgentMainToolGateway(
         if (text.isBlank()) return JsonObject(emptyMap())
         return runCatching { json.parseToJsonElement(text).jsonObject }.getOrDefault(JsonObject(emptyMap()))
     }
+
+    private fun buildPreflightMetadata(
+        source: String,
+        reason: String,
+        details: String,
+        extra: String = ""
+    ): String {
+        return """{"preflight":true$extra,"availability_source":"${escapeJson(source)}","availability_reason":"${escapeJson(reason)}","availability_details":"${escapeJson(details)}"}"""
+    }
+
+    private fun escapeJson(value: String): String =
+        value.replace("\\", "\\\\").replace("\"", "\\\"")
 
     private fun jsonElementToAny(value: JsonElement): Any? {
         val primitive = value.jsonPrimitive
