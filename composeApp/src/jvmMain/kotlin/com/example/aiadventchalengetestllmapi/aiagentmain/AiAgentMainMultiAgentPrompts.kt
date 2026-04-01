@@ -150,4 +150,50 @@ internal object MultiAgentPromptFactory {
             }
         }
     }.trim()
+
+    fun mcpToolSelectionPrompt(
+        userRequest: String,
+        step: MultiAgentPlanStep?,
+        toolReason: String,
+        currentToolParamsJson: String,
+        mcpToolsCatalog: String,
+        conversationContext: String
+    ): String = buildString {
+        appendLine("Ты субагент выбора MCP инструмента и подготовки параметров вызова.")
+        appendLine("Верни только JSON без markdown по контракту:")
+        appendLine(
+            """{"action":"MCP_CALL|NEED_CLARIFICATION|IMPOSSIBLE","reason":"...","mcp_call":{"toolName":"...","endpoint":"...","arguments":{}},"clarification_questions":["..."],"impossible_reason":"..."}"""
+        )
+        appendLine("Правила:")
+        appendLine("1) Если выбираешь MCP_CALL, поле mcp_call.toolName обязательно и непустое.")
+        appendLine("2) arguments должны соответствовать input_schema выбранного tool.")
+        appendLine("3) Если данных не хватает для обязательных аргументов, верни NEED_CLARIFICATION.")
+        appendLine("4) Если ни один доступный tool не подходит, верни IMPOSSIBLE.")
+        appendLine("5) Не придумывай инструменты, которых нет в каталоге.")
+        appendLine()
+        appendLine("Запрос пользователя:")
+        appendLine(userRequest)
+        appendLine()
+        appendLine("Шаг оркестратора:")
+        if (step == null) {
+            appendLine("- step not provided")
+        } else {
+            appendLine("index=${step.index}")
+            appendLine("title=${step.title}")
+            appendLine("assignee_key=${step.assigneeKey}")
+            appendLine("task_input=${step.taskInput}")
+        }
+        appendLine()
+        appendLine("Причина вызова инструмента (от оркестратора):")
+        appendLine(toolReason.ifBlank { "(пусто)" })
+        appendLine()
+        appendLine("Текущие params из tool_plan:")
+        appendLine(currentToolParamsJson.ifBlank { "{}" })
+        appendLine()
+        appendLine("Каталог MCP инструментов (фактическая доступность):")
+        appendLine(mcpToolsCatalog.ifBlank { "(каталог пуст)" })
+        appendLine()
+        appendLine("Контекст диалога:")
+        appendLine(conversationContext.ifBlank { "(пусто)" })
+    }.trim()
 }

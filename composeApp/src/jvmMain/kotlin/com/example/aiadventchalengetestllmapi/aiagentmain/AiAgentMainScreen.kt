@@ -370,9 +370,10 @@ private fun AiAgentMainChat(
 
     fun ensureDefaultMultiAgentSubagents() {
         val existing = queries.selectAllMultiAgentSubagents().executeAsList()
-        if (existing.isNotEmpty()) return
+        val existingKeys = existing.map { it.agent_key.lowercase() }.toSet()
         val now = System.currentTimeMillis()
         defaultMultiAgentSubagents().forEach { subagent ->
+            if (existingKeys.contains(subagent.key.lowercase())) return@forEach
             queries.insertMultiAgentSubagent(
                 agent_key = subagent.key,
                 title = subagent.title,
@@ -917,66 +918,6 @@ private fun AiAgentMainChat(
             endpointTrimmed.equals(serverUrl.replace("https://", "wss://"), ignoreCase = true)
     }
 
-    data class MultiAgentMcpRefreshReport(
-        val didLiveRefresh: Boolean,
-        val lines: List<String>
-    )
-
-    fun allConfiguredMcpServers(): List<McpServerOption> = mcpServerOptions
-
-    fun currentRagChunkCount(): Int = embQueries.selectAll().executeAsList().size
-
-    suspend fun ensureMultiAgentMcpCacheFresh(): MultiAgentMcpRefreshReport {
-        val traceLines = mutableListOf<String>()
-        var didRefresh = false
-
-        if (!hasMultiAgentMcpRefreshedThisSession) {
-            allConfiguredMcpServers().forEach { server ->
-                refreshMcpServerTools(server.url)
-                traceLines += "live-refresh server=${server.title} reason=session_bootstrap"
-            }
-            hasMultiAgentMcpRefreshedThisSession = true
-            didRefresh = allConfiguredMcpServers().isNotEmpty()
-        } else {
-            allConfiguredMcpServers().forEach { server ->
-                val tools = mcpServerTools[server.url].orEmpty()
-                val error = mcpServerErrors[server.url]
-                val refreshReason = when {
-                    error != null -> "previous_error=$error"
-                    tools.isEmpty() -> "empty_cache"
-                    else -> null
-                }
-                if (refreshReason != null) {
-                    refreshMcpServerTools(server.url)
-                    traceLines += "live-refresh server=${server.title} reason=$refreshReason"
-                    didRefresh = true
-                }
-            }
-        }
-
-        if (!didRefresh) {
-            traceLines += "live-refresh skipped reason=cache_ok"
-        }
-        return MultiAgentMcpRefreshReport(
-            didLiveRefresh = didRefresh,
-            lines = traceLines
-        )
-    }
-
-    fun findMcpServerForToolAllConfigured(
-        toolName: String,
-        endpoint: String?
-    ): McpServerOption? {
-        val endpointNormalized = endpoint?.trim()?.ifBlank { null }
-        val servers = allConfiguredMcpServers()
-        return servers.firstOrNull { server ->
-            mcpServerTools[server.url].orEmpty().any { it.equals(toolName, ignoreCase = true) } &&
-                (endpointNormalized == null || endpointMatchesServer(endpointNormalized, server.url))
-        } ?: servers.firstOrNull { server ->
-            mcpServerTools[server.url].orEmpty().any { it.equals(toolName, ignoreCase = true) }
-        }
-    }
-
     suspend fun runMcpToolForExecution(
         step: PlanStepJson,
         taskContext: String,
@@ -1463,6 +1404,20 @@ private fun AiAgentMainChat(
         }
     }
 
+    val multiAgentMcpCoordinator = remember {
+        AiAgentMainMultiAgentMcpCoordinator(
+            allServersProvider = { mcpServerOptions },
+            toolsProvider = { serverUrl -> mcpServerTools[serverUrl].orEmpty() },
+            toolInfosProvider = { serverUrl -> mcpServerToolInfos[serverUrl].orEmpty() },
+            errorProvider = { serverUrl -> mcpServerErrors[serverUrl] },
+            refreshServerTools = { serverUrl -> refreshMcpServerTools(serverUrl) },
+            endpointMatcher = { endpoint, serverUrl -> endpointMatchesServer(endpoint, serverUrl) },
+            ragChunkCountProvider = { embQueries.selectAll().executeAsList().size },
+            isSessionRefreshed = { hasMultiAgentMcpRefreshedThisSession },
+            markSessionRefreshed = { refreshed -> hasMultiAgentMcpRefreshedThisSession = refreshed }
+        )
+    }
+
     fun sendMultiAgentMessage(messageText: String = inputText.text.trim()) {
         val chatId = activeChatId ?: return
         val trimmed = messageText.trim()
@@ -1561,7 +1516,7 @@ private fun AiAgentMainChat(
                 } else {
                     buildRegularConversationContext(regularMessages.toList())
                 }
-                val preflightRefresh = ensureMultiAgentMcpCacheFresh()
+                val preflightRefresh = multiAgentMcpCoordinator.ensureMcpCacheFresh()
                 preflightRefresh.lines.forEach { line ->
                     appendMultiAgentEvent(
                         chatId = chatId,
@@ -1581,7 +1536,7 @@ private fun AiAgentMainChat(
                         buildRagPayloadForPrompt(query = query, forceEnabled = true)?.promptContext.orEmpty()
                     },
                     mcpExecutor = { toolRequest ->
-                        val callRefresh = ensureMultiAgentMcpCacheFresh()
+                        val callRefresh = multiAgentMcpCoordinator.ensureMcpCacheFresh()
                         callRefresh.lines.forEach { line ->
                             appendMultiAgentEvent(
                                 chatId = chatId,
@@ -1597,7 +1552,7 @@ private fun AiAgentMainChat(
                         }
                         val toolName = toolRequest.toolName.trim()
                         val endpoint = toolRequest.endpoint?.trim()
-                        val targetServer = findMcpServerForToolAllConfigured(toolName = toolName, endpoint = endpoint)
+                        val targetServer = multiAgentMcpCoordinator.findServerForTool(toolName = toolName, endpoint = endpoint)
                         if (targetServer == null) {
                             error("MCP tool '$toolName' недоступен на активных серверах.")
                         }
@@ -1619,35 +1574,10 @@ private fun AiAgentMainChat(
                         }.trim()
                     },
                     ragAvailability = {
-                        val chunks = currentRagChunkCount()
-                        ToolGatewayAvailability(
-                            available = chunks > 0,
-                            source = "index availability",
-                            reason = if (chunks > 0) "" else "RAG index has no chunks",
-                            details = "RAG source = index availability; chunks=$chunks"
-                        )
+                        multiAgentMcpCoordinator.buildRagAvailability()
                     },
                     mcpAvailability = { toolName ->
-                        val servers = allConfiguredMcpServers()
-                        val matching = servers.filter { server ->
-                            mcpServerTools[server.url].orEmpty().any { it.equals(toolName, ignoreCase = true) }
-                        }
-                        val serverErrors = servers.mapNotNull { server ->
-                            val error = mcpServerErrors[server.url]
-                            if (error == null) null else "${server.title}: $error"
-                        }
-                        ToolGatewayAvailability(
-                            available = matching.isNotEmpty(),
-                            source = "all configured servers",
-                            reason = if (matching.isNotEmpty()) {
-                                ""
-                            } else if (serverErrors.isNotEmpty()) {
-                                "tool '$toolName' not found; server errors: ${serverErrors.joinToString("; ")}"
-                            } else {
-                                "tool '$toolName' not found in discovered MCP cache"
-                            },
-                            details = "MCP source = all configured servers; checked=${servers.size}; matched=${matching.joinToString(",") { it.title }}"
-                        )
+                        multiAgentMcpCoordinator.buildMcpAvailability(toolName)
                     },
                     isProjectFsAvailable = { folder ->
                         runCatching {
@@ -1664,7 +1594,8 @@ private fun AiAgentMainChat(
                         subagents = multiAgentSubagents.filter { it.isEnabled },
                         conversationContext = conversationContext,
                         pendingQuestion = pendingQuestion,
-                        isContinuation = isContinuationRun
+                        isContinuation = isContinuationRun,
+                        mcpToolsCatalog = multiAgentMcpCoordinator.buildMcpToolsCatalogForSelector()
                     ),
                     callModel = { call ->
                         callAiAgentMainApi(
@@ -1691,7 +1622,7 @@ private fun AiAgentMainChat(
                     },
                     executeTool = { toolRequest ->
                         if (toolRequest.toolKind == MultiAgentToolKind.MCP_CALL) {
-                            val refreshReport = ensureMultiAgentMcpCacheFresh()
+                            val refreshReport = multiAgentMcpCoordinator.ensureMcpCacheFresh()
                             refreshReport.lines.forEach { line ->
                                 appendMultiAgentEvent(
                                     chatId = chatId,

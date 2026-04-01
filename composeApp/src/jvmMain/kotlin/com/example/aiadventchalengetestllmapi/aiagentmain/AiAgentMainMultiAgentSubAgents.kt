@@ -24,6 +24,20 @@ internal fun defaultMultiAgentSubagents(): List<MultiAgentSubagentDefinition> = 
         isEnabled = true
     ),
     MultiAgentSubagentDefinition(
+        key = "mcp_selector",
+        title = "MCP Selector",
+        description = "Выбирает подходящий MCP инструмент и формирует валидные параметры вызова по input_schema.",
+        systemPrompt = """
+            Ты субагент MCP Selector.
+            Фокус: выбор корректного MCP инструмента и подготовка параметров запроса.
+            Нельзя выдумывать инструменты или обязательные аргументы.
+            Если данных недостаточно — возвращай NEED_CLARIFICATION.
+            Если задача невыполнима доступными инструментами — IMPOSSIBLE.
+            Пиши по-русски.
+        """.trimIndent(),
+        isEnabled = true
+    ),
+    MultiAgentSubagentDefinition(
         key = "mcp_executor",
         title = "MCP Executor",
         description = "Выполняет вызовы MCP инструментов и возвращает структурированный результат.",

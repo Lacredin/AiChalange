@@ -1,6 +1,7 @@
 package com.example.aiadventchalengetestllmapi.aiagentmain
 
 import com.example.aiadventchalengetestllmapi.network.DeepSeekMessage
+import kotlinx.serialization.json.JsonObject
 
 internal enum class MultiAgentDecisionType {
     DIRECT_ANSWER,
@@ -123,7 +124,24 @@ internal data class MultiAgentRequest(
     val maxReworkAttempts: Int = 1,
     val conversationContext: String = "",
     val pendingQuestion: String? = null,
-    val isContinuation: Boolean = false
+    val isContinuation: Boolean = false,
+    val mcpToolsCatalog: String = ""
+)
+
+internal enum class MultiAgentMcpSelectionAction {
+    MCP_CALL,
+    NEED_CLARIFICATION,
+    IMPOSSIBLE
+}
+
+internal data class MultiAgentMcpSelectionDecision(
+    val action: MultiAgentMcpSelectionAction,
+    val reason: String,
+    val toolName: String?,
+    val endpoint: String?,
+    val arguments: JsonObject?,
+    val clarificationQuestions: List<String>,
+    val impossibleReason: String?
 )
 
 internal enum class MultiAgentEventChannel {

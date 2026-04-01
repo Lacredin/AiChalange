@@ -2,10 +2,13 @@ package com.example.aiadventchalengetestllmapi.aiagentmain
 
 import com.example.aiadventchalengetestllmapi.network.DeepSeekMessage
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonObject
 
 internal class MultiAgentOrchestrator(
     private val parser: MultiAgentParser = MultiAgentParser,
@@ -79,6 +82,7 @@ internal class MultiAgentOrchestrator(
             )
         onPlanningReady(planningDecision)
         emitFallbackPolicyTrace(planningDecision.toolPlan, onEvent, "initial")
+        val mcpSelector = enabledSubagents.firstOrNull { it.key.equals("mcp_selector", ignoreCase = true) }
 
         when (val early = resolveEarlyAction(planningDecision, request, callModel, onEvent)) {
             null -> Unit
@@ -93,6 +97,40 @@ internal class MultiAgentOrchestrator(
                 planningDecision = planningDecision,
                 steps = emptyList()
             )
+        }
+
+        val initialSelection = resolveMcpCallsBySelector(
+            request = request,
+            planningDecision = planningDecision,
+            mcpSelector = mcpSelector,
+            callModel = callModel,
+            onEvent = onEvent
+        )
+        when (initialSelection.kind) {
+            McpSelectionKind.CONTINUE -> {
+                if (initialSelection.toolPlan != planningDecision.toolPlan) {
+                    planningDecision = planningDecision.copy(toolPlan = initialSelection.toolPlan)
+                    onPlanningReady(planningDecision)
+                }
+            }
+            McpSelectionKind.NEED_CLARIFICATION -> {
+                return MultiAgentRunSummary(
+                    runStatus = MultiAgentRunStatus.WAITING_USER,
+                    resolutionType = MultiAgentResolutionType.NEED_CLARIFICATION,
+                    finalUserMessage = initialSelection.message ?: "Нужны уточнения для выбора MCP инструмента.",
+                    planningDecision = planningDecision,
+                    steps = emptyList()
+                )
+            }
+            McpSelectionKind.IMPOSSIBLE -> {
+                return MultiAgentRunSummary(
+                    runStatus = MultiAgentRunStatus.DONE,
+                    resolutionType = MultiAgentResolutionType.IMPOSSIBLE,
+                    finalUserMessage = initialSelection.message ?: "Не удалось подобрать MCP инструмент для задачи.",
+                    planningDecision = planningDecision,
+                    steps = emptyList()
+                )
+            }
         }
 
         var preflight = preflightToolPlan(
@@ -138,6 +176,40 @@ internal class MultiAgentOrchestrator(
                     planningDecision = planningDecision,
                     steps = emptyList()
                 )
+            }
+
+            val replanSelection = resolveMcpCallsBySelector(
+                request = request,
+                planningDecision = planningDecision,
+                mcpSelector = mcpSelector,
+                callModel = callModel,
+                onEvent = onEvent
+            )
+            when (replanSelection.kind) {
+                McpSelectionKind.CONTINUE -> {
+                    if (replanSelection.toolPlan != planningDecision.toolPlan) {
+                        planningDecision = planningDecision.copy(toolPlan = replanSelection.toolPlan)
+                        onPlanningReady(planningDecision)
+                    }
+                }
+                McpSelectionKind.NEED_CLARIFICATION -> {
+                    return MultiAgentRunSummary(
+                        runStatus = MultiAgentRunStatus.WAITING_USER,
+                        resolutionType = MultiAgentResolutionType.NEED_CLARIFICATION,
+                        finalUserMessage = replanSelection.message ?: "Нужны уточнения для выбора MCP инструмента.",
+                        planningDecision = planningDecision,
+                        steps = emptyList()
+                    )
+                }
+                McpSelectionKind.IMPOSSIBLE -> {
+                    return MultiAgentRunSummary(
+                        runStatus = MultiAgentRunStatus.DONE,
+                        resolutionType = MultiAgentResolutionType.IMPOSSIBLE,
+                        finalUserMessage = replanSelection.message ?: "Не удалось подобрать MCP инструмент для задачи.",
+                        planningDecision = planningDecision,
+                        steps = emptyList()
+                    )
+                }
             }
 
             preflight = preflightToolPlan(
@@ -461,6 +533,114 @@ internal class MultiAgentOrchestrator(
         return parser.parsePlanning(raw)
     }
 
+    private suspend fun resolveMcpCallsBySelector(
+        request: MultiAgentRequest,
+        planningDecision: MultiAgentPlanningDecision,
+        mcpSelector: MultiAgentSubagentDefinition?,
+        callModel: suspend (MultiAgentModelCall) -> String,
+        onEvent: (MultiAgentEvent) -> Unit
+    ): McpSelectionResult {
+        val toolPlan = planningDecision.toolPlan ?: return McpSelectionResult(kind = McpSelectionKind.CONTINUE, toolPlan = null)
+        if (toolPlan.tools.none { it.toolKind == MultiAgentToolKind.MCP_CALL }) {
+            return McpSelectionResult(kind = McpSelectionKind.CONTINUE, toolPlan = toolPlan)
+        }
+        if (mcpSelector == null) {
+            onEvent(
+                MultiAgentEvent(
+                    channel = MultiAgentEventChannel.TRACE,
+                    actorType = "orchestrator",
+                    actorKey = "mcp_selector",
+                    role = "assistant",
+                    message = "MCP selector subagent is not configured; keeping original MCP params from tool_plan."
+                )
+            )
+            return McpSelectionResult(kind = McpSelectionKind.CONTINUE, toolPlan = toolPlan)
+        }
+
+        val stepByIndex = planningDecision.planSteps.associateBy { it.index }
+        val rewrittenTools = mutableListOf<MultiAgentToolPlanItem>()
+        for (tool in toolPlan.tools) {
+            if (tool.toolKind != MultiAgentToolKind.MCP_CALL) {
+                rewrittenTools += tool
+                continue
+            }
+            val step = tool.stepIndex?.let { stepByIndex[it] }
+            val selectorPrompt = MultiAgentPromptFactory.mcpToolSelectionPrompt(
+                userRequest = request.userRequest,
+                step = step,
+                toolReason = tool.reason,
+                currentToolParamsJson = tool.paramsJson,
+                mcpToolsCatalog = request.mcpToolsCatalog,
+                conversationContext = request.conversationContext
+            )
+            val selectorRaw = callModel(
+                MultiAgentModelCall(
+                    messages = listOf(
+                        DeepSeekMessage(role = "system", content = mcpSelector.systemPrompt),
+                        DeepSeekMessage(role = "user", content = selectorPrompt)
+                    ),
+                    responseAsJson = true,
+                    temperature = 0.1,
+                    topP = 0.2,
+                    maxTokens = 1800
+                )
+            )
+            onEvent(
+                MultiAgentEvent(
+                    channel = MultiAgentEventChannel.TRACE,
+                    actorType = "subagent",
+                    actorKey = mcpSelector.key,
+                    role = "assistant",
+                    message = "MCP_SELECTOR_PROMPT:\n$selectorPrompt\n\nMCP_SELECTOR_RAW:\n$selectorRaw"
+                )
+            )
+            val selection = parser.parseMcpSelection(selectorRaw)
+            if (selection == null) {
+                rewrittenTools += tool
+                continue
+            }
+            when (selection.action) {
+                MultiAgentMcpSelectionAction.NEED_CLARIFICATION -> {
+                    val question = selection.clarificationQuestions.firstOrNull()
+                        ?: "Нужны уточнения для выбора MCP инструмента."
+                    return McpSelectionResult(
+                        kind = McpSelectionKind.NEED_CLARIFICATION,
+                        toolPlan = toolPlan,
+                        message = question
+                    )
+                }
+                MultiAgentMcpSelectionAction.IMPOSSIBLE -> {
+                    return McpSelectionResult(
+                        kind = McpSelectionKind.IMPOSSIBLE,
+                        toolPlan = toolPlan,
+                        message = selection.impossibleReason ?: "Не удалось подобрать MCP инструмент."
+                    )
+                }
+                MultiAgentMcpSelectionAction.MCP_CALL -> {
+                    val selectedToolName = selection.toolName
+                    if (selectedToolName.isNullOrBlank()) {
+                        rewrittenTools += tool
+                        continue
+                    }
+                    val params = buildJsonObject {
+                        put("toolName", selectedToolName)
+                        if (!selection.endpoint.isNullOrBlank()) put("endpoint", selection.endpoint)
+                        if (selection.arguments != null) {
+                            put("arguments", selection.arguments)
+                        } else {
+                            putJsonObject("arguments") { }
+                        }
+                    }
+                    rewrittenTools += tool.copy(paramsJson = params.toString())
+                }
+            }
+        }
+        return McpSelectionResult(
+            kind = McpSelectionKind.CONTINUE,
+            toolPlan = toolPlan.copy(tools = rewrittenTools)
+        )
+    }
+
     private fun emitFallbackPolicyTrace(
         toolPlan: MultiAgentToolPlan?,
         onEvent: (MultiAgentEvent) -> Unit,
@@ -740,5 +920,17 @@ internal class MultiAgentOrchestrator(
         val toolPlan: MultiAgentToolPlan?,
         val available: List<PreflightToolResult>,
         val unavailable: List<PreflightToolResult>
+    )
+
+    private enum class McpSelectionKind {
+        CONTINUE,
+        NEED_CLARIFICATION,
+        IMPOSSIBLE
+    }
+
+    private data class McpSelectionResult(
+        val kind: McpSelectionKind,
+        val toolPlan: MultiAgentToolPlan?,
+        val message: String? = null
     )
 }

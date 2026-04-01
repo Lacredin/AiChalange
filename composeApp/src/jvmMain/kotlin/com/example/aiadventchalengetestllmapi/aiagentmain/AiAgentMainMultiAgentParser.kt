@@ -70,6 +70,28 @@ internal object MultiAgentParser {
         )
     }
 
+    fun parseMcpSelection(raw: String): MultiAgentMcpSelectionDecision? {
+        val root = parseJsonObject(raw) ?: return null
+        val action = when (root["action"]?.jsonPrimitive?.contentOrNull?.trim()?.uppercase()) {
+            "MCP_CALL" -> MultiAgentMcpSelectionAction.MCP_CALL
+            "NEED_CLARIFICATION" -> MultiAgentMcpSelectionAction.NEED_CLARIFICATION
+            "IMPOSSIBLE" -> MultiAgentMcpSelectionAction.IMPOSSIBLE
+            else -> return null
+        }
+        val mcpCall = root["mcp_call"] as? JsonObject
+        return MultiAgentMcpSelectionDecision(
+            action = action,
+            reason = root["reason"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty(),
+            toolName = mcpCall?.get("toolName")?.jsonPrimitive?.contentOrNull?.trim()?.ifBlank { null },
+            endpoint = mcpCall?.get("endpoint")?.jsonPrimitive?.contentOrNull?.trim()?.ifBlank { null },
+            arguments = mcpCall?.get("arguments")?.jsonObject,
+            clarificationQuestions = root["clarification_questions"]?.jsonArray.orEmpty()
+                .mapNotNull { it.jsonPrimitive.contentOrNull?.trim()?.ifBlank { null } }
+                .distinct(),
+            impossibleReason = root["impossible_reason"]?.jsonPrimitive?.contentOrNull?.trim()?.ifBlank { null }
+        )
+    }
+
     private fun parseToolPlan(obj: JsonObject?): MultiAgentToolPlan? {
         if (obj == null) return null
         val requiresTools = obj["requires_tools"]?.jsonPrimitive?.booleanOrNull ?: false
