@@ -90,9 +90,12 @@ actual class AiAgentMainDatabaseDriverFactory {
             "multi_agent_runs" to setOf(
                 "id",
                 "chat_id",
+                "parent_run_id",
                 "user_request",
                 "status",
                 "resolution_type",
+                "pending_question",
+                "state_json",
                 "created_at",
                 "updated_at"
             ),
@@ -120,13 +123,26 @@ actual class AiAgentMainDatabaseDriverFactory {
                 "message",
                 "metadata_json",
                 "created_at"
+            ),
+            "multi_agent_tool_calls" to setOf(
+                "id",
+                "run_id",
+                "step_id",
+                "tool_kind",
+                "request_payload",
+                "response_payload",
+                "status",
+                "error_code",
+                "error_message",
+                "latency_ms",
+                "created_at"
             )
         )
         val actualTables = mutableSetOf<String>()
         val connectionUrl = "jdbc:sqlite:$dbPath"
         DriverManager.getConnection(connectionUrl).use { connection ->
             connection.prepareStatement(
-                "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('chats', 'chat_messages', 'chat_profiles', 'chat_branch_messages', 'memory_entries', 'invariant_entries', 'multi_agent_subagents', 'multi_agent_runs', 'multi_agent_steps', 'multi_agent_events');"
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('chats', 'chat_messages', 'chat_profiles', 'chat_branch_messages', 'memory_entries', 'invariant_entries', 'multi_agent_subagents', 'multi_agent_runs', 'multi_agent_steps', 'multi_agent_events', 'multi_agent_tool_calls');"
             ).use { statement ->
                 statement.executeQuery().use { resultSet ->
                     while (resultSet.next()) {

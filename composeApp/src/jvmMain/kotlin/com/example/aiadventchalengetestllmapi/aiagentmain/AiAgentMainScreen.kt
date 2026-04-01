@@ -422,6 +422,62 @@ private fun AiAgentMainChat(
         traceMessages += traceMessage
     }
 
+    fun buildMultiAgentRunConversationContext(runId: Long): String {
+        val events = queries.selectMultiAgentEventsByRun(run_id = runId).executeAsList()
+        val steps = queries.selectMultiAgentStepsByRun(run_id = runId).executeAsList()
+        return buildString {
+            appendLine("Run #$runId")
+            appendLine("Events:")
+            if (events.isEmpty()) {
+                appendLine("- нет событий")
+            } else {
+                events.takeLast(120).forEach { event ->
+                    appendLine("[${event.channel}] ${event.actor_type}:${event.actor_key} (${event.role})")
+                    appendLine(event.message)
+                    appendLine()
+                }
+            }
+            appendLine("Steps:")
+            if (steps.isEmpty()) {
+                appendLine("- нет шагов")
+            } else {
+                steps.forEach { step ->
+                    appendLine("#${step.step_index} [${step.status}] ${step.assignee_agent_key}: ${step.title}")
+                    if (step.input_payload.isNotBlank()) appendLine("input: ${step.input_payload}")
+                    if (step.output_payload.isNotBlank()) appendLine("output: ${step.output_payload}")
+                    if (step.validation_note.isNotBlank()) appendLine("note: ${step.validation_note}")
+                    appendLine()
+                }
+            }
+        }.trim()
+    }
+
+    fun buildRegularConversationContext(messages: List<AiAgentMessage>): String {
+        return messages.takeLast(20).joinToString("\n") { msg ->
+            val role = if (msg.isUser) "user" else "assistant"
+            "$role: ${msg.text}"
+        }
+    }
+
+    fun escapeJsonValue(raw: String): String =
+        raw.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")
+
+    fun insertMultiAgentToolCall(log: MultiAgentToolCallLog): Long {
+        queries.insertMultiAgentToolCall(
+            run_id = log.runId,
+            step_id = log.stepId,
+            tool_kind = log.toolKind.name,
+            request_payload = log.requestPayload,
+            response_payload = log.responsePayload,
+            status = log.status,
+            error_code = log.errorCode,
+            error_message = log.errorMessage,
+            latency_ms = log.latencyMs,
+            created_at = System.currentTimeMillis()
+        )
+        return queries.selectLastInsertedMultiAgentToolCallId().executeAsOne()
+    }
+
     fun websocketChatKey(serverUrl: String, toolName: String): String =
         "${serverUrl.trim().lowercase()}::${toolName.trim().lowercase()}"
 
@@ -1373,19 +1429,54 @@ private fun AiAgentMainChat(
             val sessionId = chatSessionId
             isLoading = true
             var runId: Long? = null
+            var isContinuationRun = false
+            var pendingQuestion: String? = null
             val stepRowIdByIndex = mutableMapOf<Int, Long>()
             val result = try {
                 isErrorState = false
                 val now = System.currentTimeMillis()
-                queries.insertMultiAgentRun(
-                    chat_id = chatId,
-                    user_request = trimmed,
-                    status = MultiAgentRunStatus.RUNNING.name.lowercase(),
-                    resolution_type = "pending",
-                    created_at = now,
-                    updated_at = now
-                )
-                runId = queries.selectLastInsertedMultiAgentRunId().executeAsOne()
+                val latestRun = queries.selectLatestMultiAgentRunByChat(chat_id = chatId).executeAsOneOrNull()
+                val canResume = latestRun != null &&
+                    latestRun.status.equals(MultiAgentRunStatus.WAITING_USER.name.lowercase(), ignoreCase = true) &&
+                    latestRun.pending_question.isNotBlank()
+
+                if (canResume) {
+                    runId = latestRun!!.id
+                    isContinuationRun = true
+                    pendingQuestion = latestRun.pending_question
+                    queries.updateMultiAgentRunStatus(
+                        status = MultiAgentRunStatus.RUNNING.name.lowercase(),
+                        resolution_type = "continuation",
+                        pending_question = "",
+                        state_json = """{"phase":"resume_started"}""",
+                        updated_at = now,
+                        id = runId!!
+                    )
+                    appendMultiAgentEvent(
+                        chatId = chatId,
+                        runId = runId,
+                        event = MultiAgentEvent(
+                            channel = MultiAgentEventChannel.USER,
+                            actorType = "orchestrator",
+                            actorKey = "orchestrator",
+                            role = "assistant",
+                            message = "Продолжаю текущий run #$runId по вашему уточнению."
+                        )
+                    )
+                } else {
+                    queries.insertMultiAgentRun(
+                        chat_id = chatId,
+                        parent_run_id = latestRun?.id,
+                        user_request = trimmed,
+                        status = MultiAgentRunStatus.RUNNING.name.lowercase(),
+                        resolution_type = "pending",
+                        pending_question = "",
+                        state_json = """{"phase":"new"}""",
+                        created_at = now,
+                        updated_at = now
+                    )
+                    runId = queries.selectLastInsertedMultiAgentRunId().executeAsOne()
+                }
 
                 appendMultiAgentEvent(
                     chatId = chatId,
@@ -1403,12 +1494,72 @@ private fun AiAgentMainChat(
                 val model = modelInput.trim().ifEmpty { requestApi.defaultModel }
                 val apiKey = aiAgentReadApiKey(requestApi.envVar)
                 if (apiKey.isBlank()) error("Нет API ключа. Проверьте ${requestApi.envVar}")
+                val projectFolderPath = agentModeState.projectFolderPath.trim()
+                val conversationContext = if (isContinuationRun && runId != null) {
+                    buildMultiAgentRunConversationContext(runId!!)
+                } else {
+                    buildRegularConversationContext(regularMessages.toList())
+                }
+                val projectContextProvider = AgentProjectContextProvider()
+                val toolGateway = AiAgentMainToolGateway(
+                    ragExecutor = { query ->
+                        buildRagPayloadForPrompt(query = query, forceEnabled = true)?.promptContext.orEmpty()
+                    },
+                    mcpExecutor = { toolRequest ->
+                        val toolName = toolRequest.toolName.trim()
+                        val endpoint = toolRequest.endpoint?.trim()
+                        val targetServer = enabledMcpServers().firstOrNull { server ->
+                            mcpServerTools[server.url].orEmpty().any { it.equals(toolName, ignoreCase = true) } &&
+                                (endpoint.isNullOrBlank() || endpointMatchesServer(endpoint, server.url))
+                        } ?: enabledMcpServers().firstOrNull { server ->
+                            mcpServerTools[server.url].orEmpty().any { it.equals(toolName, ignoreCase = true) }
+                        }
+                        if (targetServer == null) {
+                            error("MCP tool '$toolName' недоступен на активных серверах.")
+                        }
+                        remoteMcpService.callTool(
+                            serverUrl = targetServer.url,
+                            toolName = toolName,
+                            arguments = toolRequest.arguments
+                        )
+                    },
+                    projectFsSummaryExecutor = { folder ->
+                        val ctx = projectContextProvider.load(folder)
+                        buildString {
+                            appendLine("root: ${ctx.rootPath}")
+                            appendLine("tree:")
+                            appendLine(ctx.treePreview)
+                            appendLine()
+                            appendLine("snippets:")
+                            append(ctx.snippetsPreview)
+                        }.trim()
+                    },
+                    isRagAvailable = {
+                        buildRagPayloadForPrompt(query = "healthcheck", forceEnabled = true)
+                            ?.selectedChunks
+                            ?.isNotEmpty() == true
+                    },
+                    isMcpToolAvailable = { toolName ->
+                        enabledMcpServers().any { server ->
+                            mcpServerTools[server.url].orEmpty().any { it.equals(toolName, ignoreCase = true) }
+                        }
+                    },
+                    isProjectFsAvailable = { folder ->
+                        runCatching {
+                            val dir = java.io.File(folder)
+                            dir.exists() && dir.isDirectory
+                        }.getOrDefault(false)
+                    }
+                )
 
                 val summary = multiAgentOrchestrator.execute(
                     request = MultiAgentRequest(
                         userRequest = trimmed,
-                        projectFolderPath = agentModeState.projectFolderPath.trim(),
-                        subagents = multiAgentSubagents.filter { it.isEnabled }
+                        projectFolderPath = projectFolderPath,
+                        subagents = multiAgentSubagents.filter { it.isEnabled },
+                        conversationContext = conversationContext,
+                        pendingQuestion = pendingQuestion,
+                        isContinuation = isContinuationRun
                     ),
                     callModel = { call ->
                         callAiAgentMainApi(
@@ -1433,6 +1584,34 @@ private fun AiAgentMainChat(
                             )
                         )
                     },
+                    executeTool = { toolRequest ->
+                        val gatewayResult = toolGateway.execute(toolRequest)
+                        val stepId = toolRequest.stepIndex?.let { stepRowIdByIndex[it] }
+                        val requestPayload = buildString {
+                            val safeReason = toolRequest.reason.replace("\"", "\\\"")
+                            append("{")
+                            append("\"preflight\":${toolRequest.preflight},")
+                            append("\"reason\":\"$safeReason\",")
+                            append("\"params\":${toolRequest.paramsJson}")
+                            append("}")
+                        }
+                        val toolCallId = insertMultiAgentToolCall(
+                            MultiAgentToolCallLog(
+                                runId = runId ?: error("runId is null while logging tool call"),
+                                stepId = stepId,
+                                toolKind = toolRequest.toolKind,
+                                requestPayload = requestPayload,
+                                responsePayload = gatewayResult.rawOutput.ifBlank { gatewayResult.normalizedOutput },
+                                status = if (gatewayResult.success) "success" else "error",
+                                errorCode = gatewayResult.errorCode,
+                                errorMessage = gatewayResult.errorMessage,
+                                latencyMs = gatewayResult.latencyMs
+                            )
+                        )
+                        gatewayResult.copy(
+                            metadataJson = """{"toolCallId":$toolCallId,"preflight":${toolRequest.preflight}}"""
+                        )
+                    },
                     onEvent = { event ->
                         appendMultiAgentEvent(chatId = chatId, runId = runId, event = event)
                         if (event.channel == MultiAgentEventChannel.USER) {
@@ -1451,19 +1630,32 @@ private fun AiAgentMainChat(
                     onPlanningReady = { planning ->
                         if (runId == null) return@execute
                         val nowPlan = System.currentTimeMillis()
+                        val existingRows = queries.selectMultiAgentStepsByRun(run_id = runId!!).executeAsList()
+                        val existingByStepIndex = existingRows.associateBy { it.step_index.toInt() }
                         planning.planSteps.forEach { step ->
-                            queries.insertMultiAgentStep(
-                                run_id = runId!!,
-                                step_index = step.index.toLong(),
-                                title = step.title,
-                                assignee_agent_key = step.assigneeKey,
-                                status = MultiAgentStepStatus.planned.name,
-                                input_payload = step.taskInput,
-                                output_payload = "",
-                                validation_note = "",
-                                created_at = nowPlan,
-                                updated_at = nowPlan
-                            )
+                            val existing = existingByStepIndex[step.index]
+                            if (existing == null) {
+                                queries.insertMultiAgentStep(
+                                    run_id = runId!!,
+                                    step_index = step.index.toLong(),
+                                    title = step.title,
+                                    assignee_agent_key = step.assigneeKey,
+                                    status = MultiAgentStepStatus.planned.name,
+                                    input_payload = step.taskInput,
+                                    output_payload = "",
+                                    validation_note = "",
+                                    created_at = nowPlan,
+                                    updated_at = nowPlan
+                                )
+                            } else {
+                                queries.updateMultiAgentStepById(
+                                    status = MultiAgentStepStatus.planned.name,
+                                    output_payload = "",
+                                    validation_note = "replanned",
+                                    updated_at = nowPlan,
+                                    id = existing.id
+                                )
+                            }
                         }
                         val rows = queries.selectMultiAgentStepsByRun(run_id = runId!!).executeAsList()
                         stepRowIdByIndex.clear()
@@ -1482,9 +1674,25 @@ private fun AiAgentMainChat(
                 )
 
                 if (runId != null) {
+                    val pendingQ = if (summary.runStatus == MultiAgentRunStatus.WAITING_USER) {
+                        summary.finalUserMessage
+                    } else {
+                        ""
+                    }
+                    val stateJson = buildString {
+                        append("{")
+                        append("\"isContinuation\":$isContinuationRun,")
+                        append("\"runStatus\":\"${summary.runStatus.name.lowercase()}\",")
+                        append("\"resolution\":\"${summary.resolutionType.name.lowercase()}\",")
+                        append("\"steps\":${summary.steps.size},")
+                        append("\"lastMessage\":\"${escapeJsonValue(summary.finalUserMessage)}\"")
+                        append("}")
+                    }
                     queries.updateMultiAgentRunStatus(
                         status = summary.runStatus.name.lowercase(),
                         resolution_type = summary.resolutionType.name.lowercase(),
+                        pending_question = pendingQ,
+                        state_json = stateJson,
                         updated_at = System.currentTimeMillis(),
                         id = runId!!
                     )
@@ -1496,6 +1704,8 @@ private fun AiAgentMainChat(
                     queries.updateMultiAgentRunStatus(
                         status = MultiAgentRunStatus.FAILED.name.lowercase(),
                         resolution_type = MultiAgentResolutionType.FAILED.name.lowercase(),
+                        pending_question = "",
+                        state_json = """{"error":"${escapeJsonValue(e.message ?: "unknown error")}"}""",
                         updated_at = System.currentTimeMillis(),
                         id = runId!!
                     )
@@ -3205,6 +3415,7 @@ private fun AiAgentMainChat(
     fun deleteChat(chatId: Long) {
         if (isLoading) return
         val wasActive = activeChatId == chatId
+        queries.deleteMultiAgentToolCallsByChat(chat_id = chatId)
         queries.deleteMultiAgentEventsByChat(chat_id = chatId)
         queries.deleteMultiAgentRunsByChat(chat_id = chatId)
         queries.deleteBranchMessagesByChat(chat_id = chatId)
@@ -3229,6 +3440,7 @@ private fun AiAgentMainChat(
         if (isLoading) return
         queries.deleteAllMessages()
         queries.deleteAllBranchMessages()
+        queries.deleteAllMultiAgentToolCalls()
         queries.deleteAllMultiAgentEvents()
         queries.deleteAllMultiAgentSteps()
         queries.deleteAllMultiAgentRuns()

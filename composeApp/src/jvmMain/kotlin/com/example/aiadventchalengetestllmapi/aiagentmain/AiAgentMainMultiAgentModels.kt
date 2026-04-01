@@ -52,7 +52,32 @@ internal data class MultiAgentStepExecution(
     val step: MultiAgentPlanStep,
     val status: MultiAgentStepStatus,
     val output: String,
-    val validationNote: String = ""
+    val validationNote: String = "",
+    val toolCallRefs: List<Long> = emptyList()
+)
+
+internal enum class MultiAgentToolKind {
+    RAG_QUERY,
+    MCP_CALL,
+    PROJECT_FS_SUMMARY
+}
+
+internal enum class MultiAgentToolFallbackPolicy {
+    DEGRADE,
+    FAIL
+}
+
+internal data class MultiAgentToolPlanItem(
+    val toolKind: MultiAgentToolKind,
+    val reason: String,
+    val paramsJson: String,
+    val stepIndex: Int? = null
+)
+
+internal data class MultiAgentToolPlan(
+    val requiresTools: Boolean,
+    val tools: List<MultiAgentToolPlanItem>,
+    val fallbackPolicy: MultiAgentToolFallbackPolicy
 )
 
 internal data class MultiAgentPlanningDecision(
@@ -61,7 +86,8 @@ internal data class MultiAgentPlanningDecision(
     val directAnswer: String?,
     val clarificationQuestion: String?,
     val impossibleReason: String?,
-    val planSteps: List<MultiAgentPlanStep>
+    val planSteps: List<MultiAgentPlanStep>,
+    val toolPlan: MultiAgentToolPlan?
 )
 
 internal enum class MultiAgentValidationOutcome {
@@ -76,7 +102,9 @@ internal data class MultiAgentValidationDecision(
     val finalAnswer: String?,
     val reworkInstruction: String?,
     val clarificationQuestion: String?,
-    val impossibleReason: String?
+    val impossibleReason: String?,
+    val toolCallIds: List<Long>,
+    val ragEvidence: List<String>
 )
 
 internal data class MultiAgentModelCall(
@@ -91,7 +119,10 @@ internal data class MultiAgentRequest(
     val userRequest: String,
     val projectFolderPath: String,
     val subagents: List<MultiAgentSubagentDefinition>,
-    val maxReworkAttempts: Int = 1
+    val maxReworkAttempts: Int = 1,
+    val conversationContext: String = "",
+    val pendingQuestion: String? = null,
+    val isContinuation: Boolean = false
 )
 
 internal enum class MultiAgentEventChannel {
@@ -114,4 +145,16 @@ internal data class MultiAgentRunSummary(
     val finalUserMessage: String,
     val planningDecision: MultiAgentPlanningDecision?,
     val steps: List<MultiAgentStepExecution>
+)
+
+internal data class MultiAgentToolCallLog(
+    val runId: Long,
+    val stepId: Long? = null,
+    val toolKind: MultiAgentToolKind,
+    val requestPayload: String,
+    val responsePayload: String,
+    val status: String,
+    val errorCode: String,
+    val errorMessage: String,
+    val latencyMs: Long
 )

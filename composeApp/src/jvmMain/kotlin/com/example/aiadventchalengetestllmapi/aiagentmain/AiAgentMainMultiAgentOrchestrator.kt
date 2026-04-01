@@ -1,13 +1,20 @@
 package com.example.aiadventchalengetestllmapi.aiagentmain
 
 import com.example.aiadventchalengetestllmapi.network.DeepSeekMessage
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 
 internal class MultiAgentOrchestrator(
     private val parser: MultiAgentParser = MultiAgentParser
 ) {
+    private val json = Json { ignoreUnknownKeys = true }
+
     suspend fun execute(
         request: MultiAgentRequest,
         callModel: suspend (MultiAgentModelCall) -> String,
+        executeTool: suspend (ToolGatewayRequest) -> ToolGatewayResult,
         onEvent: (MultiAgentEvent) -> Unit,
         onPlanningReady: (MultiAgentPlanningDecision) -> Unit,
         onStepReady: (MultiAgentStepExecution) -> Unit
@@ -36,7 +43,10 @@ internal class MultiAgentOrchestrator(
         val planningPrompt = MultiAgentPromptFactory.orchestratorPlanningPrompt(
             userRequest = request.userRequest,
             projectFolderPath = request.projectFolderPath,
-            subagents = enabledSubagents
+            subagents = enabledSubagents,
+            conversationContext = request.conversationContext,
+            pendingQuestion = request.pendingQuestion,
+            isContinuation = request.isContinuation
         )
         val planningRaw = callModel(
             MultiAgentModelCall(
@@ -117,8 +127,39 @@ internal class MultiAgentOrchestrator(
             )
         }
 
+        val toolPlanPreflight = preflightToolPlan(
+            toolPlan = planningDecision.toolPlan,
+            executeTool = executeTool,
+            onEvent = onEvent
+        )
+        when (toolPlanPreflight.kind) {
+            PreflightResultKind.CONTINUE -> Unit
+            PreflightResultKind.NEED_CLARIFICATION -> {
+                return MultiAgentRunSummary(
+                    runStatus = MultiAgentRunStatus.WAITING_USER,
+                    resolutionType = MultiAgentResolutionType.NEED_CLARIFICATION,
+                    finalUserMessage = toolPlanPreflight.message
+                        ?: "Нужны уточнения для продолжения работы.",
+                    planningDecision = planningDecision,
+                    steps = emptyList()
+                )
+            }
+
+            PreflightResultKind.IMPOSSIBLE -> {
+                return MultiAgentRunSummary(
+                    runStatus = MultiAgentRunStatus.DONE,
+                    resolutionType = MultiAgentResolutionType.IMPOSSIBLE,
+                    finalUserMessage = toolPlanPreflight.message
+                        ?: "Инструменты недоступны, задача не может быть выполнена.",
+                    planningDecision = planningDecision,
+                    steps = emptyList()
+                )
+            }
+        }
+
         val subagentsByKey = enabledSubagents.associateBy { it.key.lowercase() }
         val stepsState = mutableListOf<MultiAgentStepExecution>()
+        val evidenceToolCallIds = mutableSetOf<Long>()
 
         onEvent(
             MultiAgentEvent(
@@ -142,6 +183,7 @@ internal class MultiAgentOrchestrator(
                 onStepReady(failed)
                 return@forEachIndexed
             }
+
             onEvent(
                 MultiAgentEvent(
                     channel = MultiAgentEventChannel.USER,
@@ -158,11 +200,75 @@ internal class MultiAgentOrchestrator(
                     output = ""
                 )
             )
+
+            val stepTools = toolPlanPreflight.toolPlan
+                ?.tools
+                .orEmpty()
+                .filter { it.stepIndex == null || it.stepIndex == step.index }
+            val stepToolCallRefs = mutableListOf<Long>()
+            val stepToolOutputs = mutableListOf<String>()
+            val isMcpExecutor = subagent.key.equals("mcp_executor", ignoreCase = true)
+
+            stepTools.forEach { tool ->
+                if (isMcpExecutor && tool.toolKind != MultiAgentToolKind.MCP_CALL) return@forEach
+                val toolResult = executeTool(
+                    ToolGatewayRequest(
+                        toolKind = tool.toolKind,
+                        paramsJson = tool.paramsJson,
+                        reason = tool.reason,
+                        preflight = false,
+                        stepIndex = step.index
+                    )
+                )
+                val callId = extractToolCallId(toolResult)
+                if (callId != null) {
+                    stepToolCallRefs += callId
+                    evidenceToolCallIds += callId
+                }
+                val line = buildString {
+                    append("TOOL ${tool.toolKind}: ")
+                    if (toolResult.success) append(toolResult.normalizedOutput)
+                    else append("error=${toolResult.errorCode}: ${toolResult.errorMessage}")
+                }
+                stepToolOutputs += line
+                onEvent(
+                    MultiAgentEvent(
+                        channel = MultiAgentEventChannel.TRACE,
+                        actorType = "tool",
+                        actorKey = tool.toolKind.name.lowercase(),
+                        role = "assistant",
+                        message = "STEP=${step.index}\n$line"
+                    )
+                )
+            }
+
+            if (isMcpExecutor) {
+                val mcpOutput = if (stepToolOutputs.isEmpty()) {
+                    "mcp_executor: инструменты MCP для шага не назначены."
+                } else {
+                    buildString {
+                        appendLine("summary: MCP шаг выполнен.")
+                        appendLine("tool_call_refs: ${stepToolCallRefs.joinToString(",")}")
+                        appendLine("diagnostics:")
+                        stepToolOutputs.forEach { appendLine("- $it") }
+                    }.trim()
+                }
+                val done = MultiAgentStepExecution(
+                    step = step,
+                    status = MultiAgentStepStatus.done,
+                    output = mcpOutput,
+                    toolCallRefs = stepToolCallRefs
+                )
+                stepsState += done
+                onStepReady(done)
+                return@forEachIndexed
+            }
+
             val prompt = MultiAgentPromptFactory.subagentTaskPrompt(
                 userRequest = request.userRequest,
                 step = step,
                 reworkInstruction = null,
-                previousOutput = null
+                previousOutput = stepToolOutputs.joinToString("\n").ifBlank { null }
             )
             val subagentRaw = callModel(
                 MultiAgentModelCall(
@@ -185,21 +291,33 @@ internal class MultiAgentOrchestrator(
                     message = "SUBAGENT_PROMPT:\n$prompt\n\nSUBAGENT_RAW:\n$subagentRaw"
                 )
             )
+            val finalOutput = buildString {
+                if (stepToolOutputs.isNotEmpty()) {
+                    appendLine("TOOL_CONTEXT:")
+                    stepToolOutputs.forEach { appendLine(it) }
+                    appendLine()
+                }
+                append(subagentRaw.trim().ifBlank { "Пустой ответ субагента ${subagent.key}" })
+            }
             val done = MultiAgentStepExecution(
                 step = step,
                 status = MultiAgentStepStatus.done,
-                output = subagentRaw.trim().ifBlank { "Пустой ответ субагента ${subagent.key}" }
+                output = finalOutput,
+                toolCallRefs = stepToolCallRefs
             )
             stepsState += done
             onStepReady(done)
         }
 
+        val toolEvidenceRequired = toolPlanPreflight.toolPlan?.requiresTools == true
         val firstValidation = validate(
             userRequest = request.userRequest,
             planSteps = planningDecision.planSteps,
             stepResults = stepsState,
             callModel = callModel,
-            onEvent = onEvent
+            onEvent = onEvent,
+            toolEvidenceRequired = toolEvidenceRequired,
+            knownToolCallIds = evidenceToolCallIds
         )
         if (firstValidation.outcome != MultiAgentValidationOutcome.REWORK) {
             return buildSummaryFromValidation(firstValidation, planningDecision, stepsState)
@@ -273,7 +391,9 @@ internal class MultiAgentOrchestrator(
                 planSteps = planningDecision.planSteps,
                 stepResults = stepsState,
                 callModel = callModel,
-                onEvent = onEvent
+                onEvent = onEvent,
+                toolEvidenceRequired = toolEvidenceRequired,
+                knownToolCallIds = evidenceToolCallIds
             )
             if (nextValidation.outcome != MultiAgentValidationOutcome.REWORK) {
                 return buildSummaryFromValidation(nextValidation, planningDecision, stepsState)
@@ -289,12 +409,110 @@ internal class MultiAgentOrchestrator(
         )
     }
 
+    private suspend fun preflightToolPlan(
+        toolPlan: MultiAgentToolPlan?,
+        executeTool: suspend (ToolGatewayRequest) -> ToolGatewayResult,
+        onEvent: (MultiAgentEvent) -> Unit
+    ): PreflightResult {
+        if (toolPlan == null || !toolPlan.requiresTools || toolPlan.tools.isEmpty()) {
+            return PreflightResult(
+                kind = PreflightResultKind.CONTINUE,
+                toolPlan = toolPlan
+            )
+        }
+        onEvent(
+            MultiAgentEvent(
+                channel = MultiAgentEventChannel.USER,
+                actorType = "orchestrator",
+                actorKey = "orchestrator",
+                role = "assistant",
+                message = "Проверяю доступность инструментов (preflight)."
+            )
+        )
+        val availableTools = mutableListOf<MultiAgentToolPlanItem>()
+        val failedTools = mutableListOf<Pair<MultiAgentToolPlanItem, ToolGatewayResult>>()
+        toolPlan.tools.forEach { tool ->
+            val result = executeTool(
+                ToolGatewayRequest(
+                    toolKind = tool.toolKind,
+                    paramsJson = tool.paramsJson,
+                    reason = tool.reason,
+                    preflight = true,
+                    stepIndex = null
+                )
+            )
+            onEvent(
+                MultiAgentEvent(
+                    channel = MultiAgentEventChannel.TRACE,
+                    actorType = "orchestrator",
+                    actorKey = "preflight",
+                    role = "assistant",
+                    message = "PREFLIGHT ${tool.toolKind}: success=${result.success}, error=${result.errorCode}:${result.errorMessage}"
+                )
+            )
+            if (result.success) availableTools += tool else failedTools += (tool to result)
+        }
+        if (failedTools.isEmpty()) {
+            return PreflightResult(
+                kind = PreflightResultKind.CONTINUE,
+                toolPlan = toolPlan.copy(tools = availableTools)
+            )
+        }
+        val projectMissing = failedTools.any { (tool, result) ->
+            tool.toolKind == MultiAgentToolKind.PROJECT_FS_SUMMARY &&
+                result.errorCode == "PROJECT_FS_UNAVAILABLE"
+        }
+        if (projectMissing) {
+            return PreflightResult(
+                kind = PreflightResultKind.NEED_CLARIFICATION,
+                message = "Укажите папку проекта для анализа и повторите запрос.",
+                toolPlan = toolPlan.copy(tools = availableTools, requiresTools = availableTools.isNotEmpty())
+            )
+        }
+        return when (toolPlan.fallbackPolicy) {
+            MultiAgentToolFallbackPolicy.DEGRADE -> {
+                onEvent(
+                    MultiAgentEvent(
+                        channel = MultiAgentEventChannel.USER,
+                        actorType = "orchestrator",
+                        actorKey = "orchestrator",
+                        role = "assistant",
+                        message = "Часть инструментов недоступна. Продолжаю в деградированном режиме."
+                    )
+                )
+                PreflightResult(
+                    kind = PreflightResultKind.CONTINUE,
+                    toolPlan = toolPlan.copy(tools = availableTools, requiresTools = availableTools.isNotEmpty())
+                )
+            }
+
+            MultiAgentToolFallbackPolicy.FAIL -> {
+                onEvent(
+                    MultiAgentEvent(
+                        channel = MultiAgentEventChannel.USER,
+                        actorType = "orchestrator",
+                        actorKey = "orchestrator",
+                        role = "assistant",
+                        message = "Preflight не пройден. Требуемые инструменты недоступны."
+                    )
+                )
+                PreflightResult(
+                    kind = PreflightResultKind.IMPOSSIBLE,
+                    message = "Preflight не пройден. Требуемые инструменты недоступны.",
+                    toolPlan = toolPlan
+                )
+            }
+        }
+    }
+
     private suspend fun validate(
         userRequest: String,
         planSteps: List<MultiAgentPlanStep>,
         stepResults: List<MultiAgentStepExecution>,
         callModel: suspend (MultiAgentModelCall) -> String,
-        onEvent: (MultiAgentEvent) -> Unit
+        onEvent: (MultiAgentEvent) -> Unit,
+        toolEvidenceRequired: Boolean,
+        knownToolCallIds: Set<Long>
     ): MultiAgentValidationDecision {
         val prompt = MultiAgentPromptFactory.validationPrompt(
             userRequest = userRequest,
@@ -319,14 +537,28 @@ internal class MultiAgentOrchestrator(
                 message = "VALIDATION_PROMPT:\n$prompt\n\nVALIDATION_RAW:\n$raw"
             )
         )
-        return parser.parseValidation(raw)
+        val parsed = parser.parseValidation(raw)
             ?: MultiAgentValidationDecision(
                 outcome = MultiAgentValidationOutcome.REWORK,
                 finalAnswer = null,
-                reworkInstruction = "Невалидный ответ валидатора. Повтори шаги, сделай итог более структурированным.",
+                reworkInstruction = "Невалидный ответ валидатора. Повтори шаги, добавь доказательства.",
                 clarificationQuestion = null,
-                impossibleReason = null
+                impossibleReason = null,
+                toolCallIds = emptyList(),
+                ragEvidence = emptyList()
             )
+
+        if (parsed.outcome == MultiAgentValidationOutcome.COMPLETE && toolEvidenceRequired) {
+            val hasToolEvidence = parsed.toolCallIds.any { knownToolCallIds.contains(it) }
+            val hasRagEvidence = parsed.ragEvidence.isNotEmpty()
+            if (!hasToolEvidence && !hasRagEvidence) {
+                return parsed.copy(
+                    outcome = MultiAgentValidationOutcome.REWORK,
+                    reworkInstruction = "Недостаточно доказательств. Добавь tool_call_ids и/или rag_evidence."
+                )
+            }
+        }
+        return parsed
     }
 
     private suspend fun buildFallbackDirectAnswer(
@@ -397,4 +629,24 @@ internal class MultiAgentOrchestrator(
             )
         }
     }
+
+    private fun extractToolCallId(result: ToolGatewayResult): Long? {
+        val metadata = result.metadataJson.trim()
+        if (metadata.isBlank() || metadata == "{}") return null
+        return runCatching {
+            json.parseToJsonElement(metadata).jsonObject["toolCallId"]?.jsonPrimitive?.longOrNull
+        }.getOrNull()
+    }
+
+    private enum class PreflightResultKind {
+        CONTINUE,
+        NEED_CLARIFICATION,
+        IMPOSSIBLE
+    }
+
+    private data class PreflightResult(
+        val kind: PreflightResultKind,
+        val toolPlan: MultiAgentToolPlan?,
+        val message: String? = null
+    )
 }

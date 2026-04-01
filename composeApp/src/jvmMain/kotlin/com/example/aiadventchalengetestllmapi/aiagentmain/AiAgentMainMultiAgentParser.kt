@@ -5,6 +5,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -40,7 +41,8 @@ internal object MultiAgentParser {
             directAnswer = root["direct_answer"]?.jsonPrimitive?.contentOrNull?.trim()?.ifBlank { null },
             clarificationQuestion = root["clarification_question"]?.jsonPrimitive?.contentOrNull?.trim()?.ifBlank { null },
             impossibleReason = root["impossible_reason"]?.jsonPrimitive?.contentOrNull?.trim()?.ifBlank { null },
-            planSteps = steps
+            planSteps = steps,
+            toolPlan = parseToolPlan(root["tool_plan"] as? JsonObject)
         )
     }
 
@@ -58,7 +60,44 @@ internal object MultiAgentParser {
             finalAnswer = root["final_answer"]?.jsonPrimitive?.contentOrNull?.trim()?.ifBlank { null },
             reworkInstruction = root["rework_instruction"]?.jsonPrimitive?.contentOrNull?.trim()?.ifBlank { null },
             clarificationQuestion = root["clarification_question"]?.jsonPrimitive?.contentOrNull?.trim()?.ifBlank { null },
-            impossibleReason = root["impossible_reason"]?.jsonPrimitive?.contentOrNull?.trim()?.ifBlank { null }
+            impossibleReason = root["impossible_reason"]?.jsonPrimitive?.contentOrNull?.trim()?.ifBlank { null },
+            toolCallIds = root["tool_call_ids"]?.jsonArray.orEmpty()
+                .mapNotNull { it.jsonPrimitive.longOrNull }
+                .distinct(),
+            ragEvidence = root["rag_evidence"]?.jsonArray.orEmpty()
+                .mapNotNull { it.jsonPrimitive.contentOrNull?.trim()?.ifBlank { null } }
+                .distinct()
+        )
+    }
+
+    private fun parseToolPlan(obj: JsonObject?): MultiAgentToolPlan? {
+        if (obj == null) return null
+        val requiresTools = obj["requires_tools"]?.jsonPrimitive?.booleanOrNull ?: false
+        val fallbackPolicy = when (obj["fallback_policy"]?.jsonPrimitive?.contentOrNull?.trim()?.uppercase()) {
+            "FAIL" -> MultiAgentToolFallbackPolicy.FAIL
+            else -> MultiAgentToolFallbackPolicy.DEGRADE
+        }
+        val tools = obj["tools"]?.jsonArray.orEmpty().mapNotNull { item ->
+            val toolObj = item as? JsonObject ?: return@mapNotNull null
+            val kind = when (toolObj["tool_kind"]?.jsonPrimitive?.contentOrNull?.trim()?.uppercase()) {
+                "RAG_QUERY" -> MultiAgentToolKind.RAG_QUERY
+                "MCP_CALL" -> MultiAgentToolKind.MCP_CALL
+                "PROJECT_FS_SUMMARY" -> MultiAgentToolKind.PROJECT_FS_SUMMARY
+                else -> return@mapNotNull null
+            }
+            val reason = toolObj["reason"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+            val params = toolObj["params"]?.jsonObject ?: JsonObject(emptyMap())
+            MultiAgentToolPlanItem(
+                toolKind = kind,
+                reason = reason,
+                paramsJson = params.toString(),
+                stepIndex = toolObj["step_index"]?.jsonPrimitive?.intOrNull
+            )
+        }
+        return MultiAgentToolPlan(
+            requiresTools = requiresTools || tools.isNotEmpty(),
+            tools = tools,
+            fallbackPolicy = fallbackPolicy
         )
     }
 
