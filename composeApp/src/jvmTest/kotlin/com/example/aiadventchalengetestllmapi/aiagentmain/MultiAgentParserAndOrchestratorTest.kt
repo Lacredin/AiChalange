@@ -333,12 +333,11 @@ class MultiAgentParserAndOrchestratorTest {
 
         assertEquals(MultiAgentRunStatus.DONE, summary.runStatus)
         val planning = planningDecisions.last()
-        assertEquals(4, planning.planSteps.size)
-        assertTrue(planning.planSteps[0].title.contains("A.kt"))
-        assertTrue(planning.planSteps[1].title.contains("B.kt"))
-        assertTrue(planning.planSteps[2].title.contains("C.kt"))
+        assertTrue(planning.planSteps.any { it.title.contains("A.kt") })
+        assertTrue(planning.planSteps.any { it.title.contains("B.kt") })
+        assertTrue(planning.planSteps.any { it.title.contains("C.kt") })
         assertTrue(planning.planSteps.last().title.contains("валидац", ignoreCase = true))
-        assertEquals(3, planning.toolPlan?.tools?.count { it.toolKind == MultiAgentToolKind.MCP_CALL })
+        assertTrue((planning.toolPlan?.tools?.count { it.toolKind == MultiAgentToolKind.MCP_CALL } ?: 0) >= 3)
     }
 
     @Test
@@ -416,10 +415,14 @@ class MultiAgentParserAndOrchestratorTest {
 
         assertEquals(MultiAgentRunStatus.DONE, summary.runStatus)
         val planning = planningDecisions.last()
-        assertEquals(2, planning.planSteps.size)
-        assertTrue(planning.planSteps.first().title.contains("Batch edit"))
+        assertTrue(planning.planSteps.any { it.title.contains("Batch edit") })
         assertTrue(planning.planSteps.last().title.contains("валидац", ignoreCase = true))
-        assertEquals(1, planning.toolPlan?.tools?.count { it.toolKind == MultiAgentToolKind.MCP_CALL })
+        assertTrue(
+            planning.toolPlan?.tools?.any {
+                it.toolKind == MultiAgentToolKind.MCP_CALL &&
+                    it.toolScope == MultiAgentToolScope.MULTI_TARGET
+            } == true
+        )
     }
 
     @Test
@@ -527,5 +530,123 @@ class MultiAgentParserAndOrchestratorTest {
                     it.actorKey == "mcp_selector_autonomy"
             }
         )
+    }
+
+    @Test
+    fun mutationRequest_withoutWriteInPlan_isAutoExpandedWithWriteCapability() = runBlocking {
+        val orchestrator = MultiAgentOrchestrator()
+        val planningDecisions = mutableListOf<MultiAgentPlanningDecision>()
+        var jsonCallCount = 0
+
+        val summary = orchestrator.execute(
+            request = MultiAgentRequest(
+                userRequest = "В документации допиши, что экран требует доработки",
+                projectFolderPath = "C:/tmp/project",
+                subagents = defaultMultiAgentSubagents().filter {
+                    it.key in setOf("planner", "mcp_executor", "validator", "diagnostic")
+                },
+                mcpToolsCatalog = """
+                    server: Local (http://localhost)
+                      - tool: project_write_file
+                      - tool: project_read_file
+                      - tool: explore_directory
+                """.trimIndent()
+            ),
+            callModel = { call ->
+                if (call.responseAsJson) {
+                    jsonCallCount++
+                    if (jsonCallCount == 1) {
+                        """
+                        {
+                          "action":"DELEGATE",
+                          "intent":"MUTATION",
+                          "reason":"update docs",
+                          "execution_plan":{
+                            "plan_steps":[
+                              {"index":1,"title":"Read docs","assignee_key":"planner","task_input":"analyze docs"}
+                            ],
+                            "tool_plan":{
+                              "requires_tools":false,
+                              "tools":[],
+                              "fallback_policy":"DEGRADE"
+                            }
+                          }
+                        }
+                        """.trimIndent()
+                    } else {
+                        """
+                        {
+                          "outcome":"COMPLETE",
+                          "final_answer":"готово",
+                          "tool_call_ids":[11],
+                          "rag_evidence":[]
+                        }
+                        """.trimIndent()
+                    }
+                } else {
+                    "ok"
+                }
+            },
+            executeTool = { toolRequest ->
+                ToolGatewayResult(
+                    success = true,
+                    toolKind = toolRequest.toolKind,
+                    rawOutput = """{"ok":true}""",
+                    normalizedOutput = """{"ok":true}""",
+                    errorCode = "",
+                    errorMessage = "",
+                    latencyMs = 1,
+                    metadataJson = """{"toolCallId":11}"""
+                )
+            },
+            onEvent = {},
+            onPlanningReady = { planningDecisions += it },
+            onStepReady = {}
+        )
+
+        assertEquals(MultiAgentRunStatus.DONE, summary.runStatus)
+        val planning = planningDecisions.last()
+        assertEquals(MultiAgentTaskIntent.MUTATION, planning.intent)
+        assertTrue(planning.toolPlan?.tools?.any { it.toolKind == MultiAgentToolKind.MCP_CALL } == true)
+        assertTrue(planning.toolPlan?.tools?.any { it.capability?.contains("append") == true || it.operationType == MultiAgentToolOperationType.write } == true)
+    }
+
+    @Test
+    fun parser_readsCapabilityOperationAndIntent() {
+        val raw = """
+            {
+              "action":"DELEGATE",
+              "intent":"MUTATION",
+              "reason":"test",
+              "execution_plan":{
+                "plan_steps":[
+                  {"index":1,"title":"Write","assignee_key":"mcp_executor","task_input":"write"}
+                ],
+                "tool_plan":{
+                  "requires_tools":true,
+                  "tools":[
+                    {
+                      "tool_kind":"MCP_CALL",
+                      "tool_scope":"SINGLE_TARGET",
+                      "capability":"append_to_file",
+                      "operation_type":"write",
+                      "reason":"write doc",
+                      "params":{"arguments":{"path":"a.md","content":"x"}},
+                      "step_index":1
+                    }
+                  ],
+                  "fallback_policy":"DEGRADE"
+                }
+              }
+            }
+        """.trimIndent()
+
+        val parsed = MultiAgentParser.parsePlanning(raw)
+        assertNotNull(parsed)
+        assertEquals(MultiAgentTaskIntent.MUTATION, parsed.intent)
+        val tool = parsed.toolPlan?.tools?.firstOrNull()
+        assertNotNull(tool)
+        assertEquals("append_to_file", tool.capability)
+        assertEquals(MultiAgentToolOperationType.write, tool.operationType)
     }
 }

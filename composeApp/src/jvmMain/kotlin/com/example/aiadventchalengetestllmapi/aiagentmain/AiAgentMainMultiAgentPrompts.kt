@@ -16,7 +16,7 @@ internal object MultiAgentPromptFactory {
         appendLine()
         appendLine("Верни только JSON по контракту (без markdown):")
         appendLine(
-            """{"action":"DIRECT_ANSWER|DELEGATE|NEED_CLARIFICATION|IMPOSSIBLE","reason":"...","direct_answer":"...","clarification_question":"...","impossible_reason":"...","global_user_request":{"objective":"...","constraints":["..."],"clarifications":[{"question":"...","answer":"..."}],"assumptions":["..."],"task_messages":["..."],"clarification_messages":["..."],"agent_questions":["..."]},"execution_plan":{"plan_steps":[{"index":1,"title":"...","assignee_key":"...","task_input":"..."}],"tool_plan":{"requires_tools":true,"tools":[{"tool_kind":"RAG_QUERY|MCP_CALL","tool_scope":"SINGLE_TARGET|MULTI_TARGET","reason":"...","params":{"...":"..."},"step_index":1}],"fallback_policy":"DEGRADE|FAIL"}},"tooling_notes":["..."]}"""
+            """{"action":"DIRECT_ANSWER|DELEGATE|NEED_CLARIFICATION|IMPOSSIBLE","intent":"READ_ONLY|MUTATION","reason":"...","direct_answer":"...","clarification_question":"...","impossible_reason":"...","global_user_request":{"objective":"...","constraints":["..."],"clarifications":[{"question":"...","answer":"..."}],"assumptions":["..."],"task_messages":["..."],"clarification_messages":["..."],"agent_questions":["..."]},"execution_plan":{"plan_steps":[{"index":1,"title":"...","assignee_key":"...","task_input":"..."}],"tool_plan":{"requires_tools":true,"tools":[{"tool_kind":"RAG_QUERY|MCP_CALL","tool_scope":"SINGLE_TARGET|MULTI_TARGET","capability":"find_files|read_file|write_file|append_to_file","operation_type":"read|write|search|list","reason":"...","params":{"...":"..."},"step_index":1}],"fallback_policy":"DEGRADE|FAIL"}},"tooling_notes":["..."]}"""
         )
         appendLine("Правила:")
         appendLine("1) Если action != DELEGATE, execution_plan.plan_steps должен быть [].")
@@ -28,6 +28,8 @@ internal object MultiAgentPromptFactory {
         appendLine("7) Если данных недостаточно, используй NEED_CLARIFICATION.")
         appendLine("8) Если задача невыполнима в рамках условий, используй IMPOSSIBLE.")
         appendLine("9) Указывай fallback_policy явно: DEGRADE или FAIL.")
+        appendLine("10) Если задача требует изменения артефакта (intent=MUTATION), execution_plan обязан включать MCP шаги с capability на запись (write/append).")
+        appendLine("11) Оркестратор не обязан знать точный toolName. Планируй capability/operation_type, подбор конкретного инструмента делает mcp_selector.")
         appendLine()
         appendLine("Папка проекта: $projectFolderPath")
         appendLine()
@@ -38,11 +40,8 @@ internal object MultiAgentPromptFactory {
         appendLine(conversationContext.ifBlank { "(история пустая)" })
         appendLine()
         appendLine("Enabled субагенты:")
-        if (subagents.isEmpty()) {
-            appendLine("- нет")
-        } else {
-            subagents.forEach { appendLine("- ${it.key}: ${it.description}") }
-        }
+        if (subagents.isEmpty()) appendLine("- нет")
+        else subagents.forEach { appendLine("- ${it.key}: ${it.description}") }
         appendLine()
         appendLine("Структурированный global_user_request:")
         appendLine(formatGlobalUserRequestJson(globalUserRequest, fallbackRequest = userRequest))
@@ -60,8 +59,8 @@ internal object MultiAgentPromptFactory {
     ): String = buildString {
         appendLine("Ты оркестратор мультиагентной системы.")
         appendLine("Нужен replanning: часть инструментов недоступна после preflight.")
-        appendLine("Верни JSON по тому же контракту, что и в planning (global_user_request + execution_plan + tooling_notes).")
-        appendLine("Сохраняй правила атомарности шагов и разворачивания single-target по целям.")
+        appendLine("Верни JSON по тому же контракту, что и в planning (intent + global_user_request + execution_plan + tooling_notes).")
+        appendLine("Для intent=MUTATION обязательно оставь capability на запись через MCP.")
         appendLine()
         appendLine("Исходный запрос пользователя:")
         appendLine(userRequest)
@@ -134,9 +133,8 @@ internal object MultiAgentPromptFactory {
         appendLine(userRequest)
         appendLine()
         appendLine("План:")
-        if (planSteps.isEmpty()) {
-            appendLine("- пустой")
-        } else {
+        if (planSteps.isEmpty()) appendLine("- пустой")
+        else {
             planSteps.forEach { step ->
                 appendLine("${step.index}. [${step.assigneeKey}] ${step.title}")
                 appendLine("task_input: ${step.taskInput}")
@@ -144,29 +142,24 @@ internal object MultiAgentPromptFactory {
         }
         appendLine()
         appendLine("Результаты шагов:")
-        if (stepOutputs.isEmpty()) {
-            appendLine("- пусто")
-        } else {
+        if (stepOutputs.isEmpty()) appendLine("- пусто")
+        else {
             stepOutputs.forEach { output ->
                 appendLine("STEP #${output.step.index} (${output.step.assigneeKey}) status=${output.status}")
-                val validToolRefs = output.toolCallRefs.filter { it > 0L }
-                if (validToolRefs.isNotEmpty()) appendLine("tool_call_refs=${validToolRefs.joinToString(",")}")
+                val refs = output.toolCallRefs.filter { it > 0L }
+                if (refs.isNotEmpty()) appendLine("tool_call_refs=${refs.joinToString(",")}")
                 appendLine(output.output)
                 appendLine()
             }
         }
         appendLine("Критические итоговые данные (используй как приоритетный источник для final_answer):")
-        if (stepOutputs.isEmpty()) {
-            appendLine("- нет итоговых данных")
-        } else {
+        if (stepOutputs.isEmpty()) appendLine("- нет итоговых данных")
+        else {
             stepOutputs.forEach { output ->
                 appendLine("STEP #${output.step.index} final_data:")
                 val highlights = extractCriticalStepHighlights(output.output)
-                if (highlights.isEmpty()) {
-                    appendLine("- (не выделено)")
-                } else {
-                    highlights.forEach { line -> appendLine("- $line") }
-                }
+                if (highlights.isEmpty()) appendLine("- (не выделено)")
+                else highlights.forEach { line -> appendLine("- $line") }
             }
         }
     }.trim()
@@ -190,17 +183,16 @@ internal object MultiAgentPromptFactory {
         appendLine("3) Если данных не хватает для обязательных аргументов, верни NEED_CLARIFICATION.")
         appendLine("4) Если ни один доступный tool не подходит, верни IMPOSSIBLE.")
         appendLine("5) Не придумывай инструменты, которых нет в каталоге.")
-        appendLine("6) Приоритет автономности: сначала попробуй best-effort через общие инструменты из каталога (например, explore_directory, git_list_files, project_read_file).")
-        appendLine("7) Если узкоспециализированного инструмента нет, выбери ближайший общий инструмент и сформируй MCP_CALL вместо NEED_CLARIFICATION.")
-        appendLine("8) NEED_CLARIFICATION используй только если даже общий best-effort невозможен из-за отсутствия обязательных входных данных.")
+        appendLine("6) Приоритет автономности: сначала попробуй best-effort через общие инструменты из каталога (explore_directory, git_list_files, project_read_file).")
+        appendLine("7) Если узкоспециализированного инструмента нет, выбери общий инструмент и верни MCP_CALL.")
+        appendLine("8) NEED_CLARIFICATION используй только когда даже best-effort невозможен.")
         appendLine()
         appendLine("Запрос пользователя:")
         appendLine(userRequest)
         appendLine()
         appendLine("Шаг оркестратора:")
-        if (step == null) {
-            appendLine("- step not provided")
-        } else {
+        if (step == null) appendLine("- step not provided")
+        else {
             appendLine("index=${step.index}")
             appendLine("title=${step.title}")
             appendLine("assignee_key=${step.assigneeKey}")
@@ -277,10 +269,7 @@ internal object MultiAgentPromptFactory {
     }
 
     private fun escapeJson(raw: String): String {
-        return raw
-            .replace("\\", "\\\\")
-            .replace("\"", "\\\"")
-            .replace("\n", "\\n")
+        return raw.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")
     }
 
     private fun extractCriticalStepHighlights(output: String): List<String> {
@@ -292,7 +281,6 @@ internal object MultiAgentPromptFactory {
             .filterNot { it.startsWith("diagnostics:", ignoreCase = true) }
             .filterNot { it.startsWith("tool_call_refs:", ignoreCase = true) }
             .filterNot { it.startsWith("- TOOL ", ignoreCase = true) }
-
         if (lines.isEmpty()) return emptyList()
         return lines.take(4)
     }

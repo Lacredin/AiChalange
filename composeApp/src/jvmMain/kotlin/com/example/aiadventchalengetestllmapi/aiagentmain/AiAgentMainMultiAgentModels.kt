@@ -62,9 +62,21 @@ internal enum class MultiAgentToolKind {
     MCP_CALL
 }
 
+internal enum class MultiAgentTaskIntent {
+    READ_ONLY,
+    MUTATION
+}
+
 internal enum class MultiAgentToolScope {
     SINGLE_TARGET,
     MULTI_TARGET
+}
+
+internal enum class MultiAgentToolOperationType {
+    read,
+    write,
+    search,
+    list
 }
 
 internal enum class MultiAgentToolFallbackPolicy {
@@ -77,6 +89,8 @@ internal data class MultiAgentToolPlanItem(
     val reason: String,
     val paramsJson: String,
     val toolScope: MultiAgentToolScope = MultiAgentToolScope.SINGLE_TARGET,
+    val capability: String? = null,
+    val operationType: MultiAgentToolOperationType? = null,
     val stepIndex: Int? = null
 )
 
@@ -111,7 +125,8 @@ internal data class MultiAgentPlanningDecision(
     val planSteps: List<MultiAgentPlanStep>,
     val toolPlan: MultiAgentToolPlan?,
     val extractedGlobalUserRequest: MultiAgentGlobalUserRequest? = null,
-    val toolingNotes: List<String> = emptyList()
+    val toolingNotes: List<String> = emptyList(),
+    val intent: MultiAgentTaskIntent = MultiAgentTaskIntent.READ_ONLY
 )
 
 internal enum class MultiAgentValidationOutcome {

@@ -50,7 +50,11 @@ internal object MultiAgentParser {
             extractedGlobalUserRequest = parseGlobalUserRequest(root["global_user_request"] as? JsonObject),
             toolingNotes = root.arrayOrEmpty("tooling_notes")
                 .mapNotNull { it.jsonPrimitive.contentOrNull?.trim()?.ifBlank { null } }
-                .distinct()
+                .distinct(),
+            intent = when (root["intent"]?.jsonPrimitive?.contentOrNull?.trim()?.uppercase()) {
+                "MUTATION" -> MultiAgentTaskIntent.MUTATION
+                else -> MultiAgentTaskIntent.READ_ONLY
+            }
         )
     }
 
@@ -121,6 +125,8 @@ internal object MultiAgentParser {
             val reason = toolObj["reason"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
             val params = toolObj.objectOrNull("params") ?: JsonObject(emptyMap())
             val scopeRaw = toolObj["tool_scope"]?.jsonPrimitive?.contentOrNull?.trim()?.uppercase()
+            val capability = toolObj["capability"]?.jsonPrimitive?.contentOrNull?.trim()?.ifBlank { null }
+            val operationRaw = toolObj["operation_type"]?.jsonPrimitive?.contentOrNull?.trim()?.lowercase()
             MultiAgentToolPlanItem(
                 toolKind = kind,
                 reason = reason,
@@ -128,6 +134,14 @@ internal object MultiAgentParser {
                 toolScope = when (scopeRaw) {
                     "MULTI_TARGET" -> MultiAgentToolScope.MULTI_TARGET
                     else -> MultiAgentToolScope.SINGLE_TARGET
+                },
+                capability = capability,
+                operationType = when (operationRaw) {
+                    "write" -> MultiAgentToolOperationType.write
+                    "search" -> MultiAgentToolOperationType.search
+                    "list" -> MultiAgentToolOperationType.list
+                    "read" -> MultiAgentToolOperationType.read
+                    else -> null
                 },
                 stepIndex = toolObj["step_index"]?.jsonPrimitive?.intOrNull
             )

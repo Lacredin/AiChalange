@@ -27,7 +27,7 @@ internal object MultiAgentTraceFormatter {
                 appendLine(
                     "${index + 1}. kind=${tool.toolKind.name} step=${tool.stepIndex ?: "-"} reason=${
                         safeText(tool.reason)
-                    }"
+                    } capability=${tool.capability ?: "-"} operation=${tool.operationType ?: "-"}"
                 )
             }
         }.trim()
@@ -37,6 +37,8 @@ internal object MultiAgentTraceFormatter {
         return buildString {
             appendLine("tool_kind: ${tool.toolKind.name}")
             appendLine("step_index: ${tool.stepIndex ?: "-"}")
+            appendLine("capability: ${tool.capability ?: "-"}")
+            appendLine("operation: ${tool.operationType ?: "-"}")
             appendLine("reason: ${safeText(tool.reason)}")
             appendLine("params:")
             append(safeText(tool.paramsJson))

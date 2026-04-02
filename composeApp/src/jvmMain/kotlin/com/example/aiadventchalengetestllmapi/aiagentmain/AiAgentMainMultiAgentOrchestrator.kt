@@ -288,6 +288,7 @@ internal class MultiAgentOrchestrator(
         val subagentsByKey = enabledSubagents.associateBy { it.key.lowercase() }
         val stepsState = mutableListOf<MultiAgentStepExecution>()
         val evidenceToolCallIds = mutableSetOf<Long>()
+        val evidenceWriteToolCallIds = mutableSetOf<Long>()
 
         onEvent(
             MultiAgentEvent(
@@ -375,6 +376,9 @@ internal class MultiAgentOrchestrator(
                 if (callId != null) {
                     stepToolCallRefs += callId
                     evidenceToolCallIds += callId
+                    if (isWriteOperation(tool)) {
+                        evidenceWriteToolCallIds += callId
+                    }
                 }
                 val line = buildString {
                     append("TOOL ${tool.toolKind}: ")
@@ -576,7 +580,9 @@ internal class MultiAgentOrchestrator(
             callModel = callModel,
             onEvent = onEvent,
             toolEvidenceRequired = toolEvidenceRequired,
-            knownToolCallIds = evidenceToolCallIds
+            knownToolCallIds = evidenceToolCallIds,
+            mutationWriteRequired = planningDecision.intent == MultiAgentTaskIntent.MUTATION,
+            knownWriteToolCallIds = evidenceWriteToolCallIds
         )
         if (firstValidation.outcome != MultiAgentValidationOutcome.REWORK) {
             return buildSummaryFromValidation(firstValidation, planningDecision, stepsState)
@@ -690,7 +696,9 @@ internal class MultiAgentOrchestrator(
                 callModel = callModel,
                 onEvent = onEvent,
                 toolEvidenceRequired = toolEvidenceRequired,
-                knownToolCallIds = evidenceToolCallIds
+                knownToolCallIds = evidenceToolCallIds,
+                mutationWriteRequired = planningDecision.intent == MultiAgentTaskIntent.MUTATION,
+                knownWriteToolCallIds = evidenceWriteToolCallIds
             )
             if (nextValidation.outcome != MultiAgentValidationOutcome.REWORK) {
                 return buildSummaryFromValidation(nextValidation, planningDecision, stepsState)
@@ -773,6 +781,7 @@ internal class MultiAgentOrchestrator(
                 objective = request.userRequest,
                 taskMessages = listOf(request.userRequest)
             )
+        val resolvedIntent = resolveTaskIntent(planningDecision, structuredRequest)
 
         if (planningDecision.action != MultiAgentDecisionType.DELEGATE) {
             val fallbackNotes = planningDecision.toolingNotes.ifEmpty {
@@ -785,32 +794,122 @@ internal class MultiAgentOrchestrator(
                     tools = emptyList()
                 ),
                 extractedGlobalUserRequest = structuredRequest,
-                toolingNotes = fallbackNotes
+                toolingNotes = fallbackNotes,
+                intent = resolvedIntent
             )
         }
 
-        val expandedByScope = expandSingleTargetSteps(
+        var expandedByScope = expandSingleTargetSteps(
             steps = planningDecision.planSteps,
             toolPlan = planningDecision.toolPlan
+        )
+        expandedByScope = ensureMutationMcpCoverage(
+            normalizeResult = expandedByScope,
+            intent = resolvedIntent,
+            enabledSubagents = enabledSubagents,
+            objective = structuredRequest.objective
         )
         val requiresFinalValidationStep = requiresCrossTargetValidation(expandedByScope)
         val withValidation = ensureFinalValidationStep(
             steps = expandedByScope.steps,
             enabledSubagents = enabledSubagents,
-            forceAppend = requiresFinalValidationStep
+            forceAppend = requiresFinalValidationStep || resolvedIntent == MultiAgentTaskIntent.MUTATION
         )
         val reindexed = reindexPlan(
             steps = withValidation,
             toolPlan = expandedByScope.toolPlan
         )
         val toolingNotes = planningDecision.toolingNotes.ifEmpty {
-            buildToolingNotes(reindexed.toolPlan)
+            buildToolingNotes(reindexed.toolPlan, resolvedIntent)
         }
         return planningDecision.copy(
             planSteps = reindexed.steps,
             toolPlan = reindexed.toolPlan,
             extractedGlobalUserRequest = structuredRequest,
-            toolingNotes = toolingNotes
+            toolingNotes = toolingNotes,
+            intent = resolvedIntent
+        )
+    }
+
+    private fun resolveTaskIntent(
+        planningDecision: MultiAgentPlanningDecision,
+        structuredRequest: MultiAgentGlobalUserRequest
+    ): MultiAgentTaskIntent {
+        if (planningDecision.intent == MultiAgentTaskIntent.MUTATION) return MultiAgentTaskIntent.MUTATION
+        val text = buildString {
+            appendLine(structuredRequest.objective)
+            structuredRequest.taskMessages.forEach { appendLine(it) }
+            structuredRequest.clarificationMessages.forEach { appendLine(it) }
+        }.lowercase()
+        val mutationHints = listOf(
+            "допиши", "запиши", "обнови", "измени", "исправ", "удали", "создай", "добавь в файл",
+            "rewrite", "update file", "write file", "append"
+        )
+        return if (mutationHints.any { text.contains(it) }) {
+            MultiAgentTaskIntent.MUTATION
+        } else {
+            MultiAgentTaskIntent.READ_ONLY
+        }
+    }
+
+    private fun ensureMutationMcpCoverage(
+        normalizeResult: PlanNormalizeResult,
+        intent: MultiAgentTaskIntent,
+        enabledSubagents: List<MultiAgentSubagentDefinition>,
+        objective: String
+    ): PlanNormalizeResult {
+        if (intent != MultiAgentTaskIntent.MUTATION) return normalizeResult
+        val currentToolPlan = normalizeResult.toolPlan ?: MultiAgentToolPlan(
+            requiresTools = true,
+            tools = emptyList(),
+            fallbackPolicy = MultiAgentToolFallbackPolicy.DEGRADE
+        )
+        val hasMcpCall = currentToolPlan.tools.any { it.toolKind == MultiAgentToolKind.MCP_CALL }
+        val hasWriteCapability = currentToolPlan.tools.any { isWriteOperation(it) }
+        if (hasMcpCall && hasWriteCapability) {
+            return normalizeResult.copy(toolPlan = currentToolPlan.copy(requiresTools = true))
+        }
+
+        val hasMcpExecutor = enabledSubagents.any { it.key.equals("mcp_executor", ignoreCase = true) }
+        val assignee = if (hasMcpExecutor) "mcp_executor" else normalizeResult.steps.lastOrNull()?.assigneeKey.orEmpty()
+        val nextIndex = (normalizeResult.steps.maxOfOrNull { it.index } ?: 0) + 1
+        val mcpStep = MultiAgentPlanStep(
+            index = nextIndex,
+            title = "Изменение артефакта через MCP",
+            assigneeKey = assignee.ifBlank { "mcp_executor" },
+            taskInput = "Найди целевой файл и внеси изменение по задаче: $objective"
+        )
+
+        val appendedTools = mutableListOf<MultiAgentToolPlanItem>()
+        if (!hasMcpCall) {
+            appendedTools += MultiAgentToolPlanItem(
+                toolKind = MultiAgentToolKind.MCP_CALL,
+                reason = "Определить файл для изменения",
+                paramsJson = """{"capability":"find_files","operation_type":"search","arguments":{"query":"документация экран"}}""",
+                toolScope = MultiAgentToolScope.SINGLE_TARGET,
+                capability = "find_files",
+                operationType = MultiAgentToolOperationType.search,
+                stepIndex = mcpStep.index
+            )
+        }
+        if (!hasWriteCapability) {
+            appendedTools += MultiAgentToolPlanItem(
+                toolKind = MultiAgentToolKind.MCP_CALL,
+                reason = "Записать изменение в файл",
+                paramsJson = """{"capability":"append_to_file","operation_type":"write","arguments":{"path":"TARGET_FROM_PREVIOUS_STEP","content":"Требуется доработать."}}""",
+                toolScope = MultiAgentToolScope.SINGLE_TARGET,
+                capability = "append_to_file",
+                operationType = MultiAgentToolOperationType.write,
+                stepIndex = mcpStep.index
+            )
+        }
+
+        return PlanNormalizeResult(
+            steps = normalizeResult.steps + mcpStep,
+            toolPlan = currentToolPlan.copy(
+                requiresTools = true,
+                tools = currentToolPlan.tools + appendedTools
+            )
         )
     }
 
@@ -922,7 +1021,10 @@ internal class MultiAgentOrchestrator(
         return PlanNormalizeResult(steps = reindexedSteps, toolPlan = reindexedToolPlan)
     }
 
-    private fun buildToolingNotes(toolPlan: MultiAgentToolPlan?): List<String> {
+    private fun buildToolingNotes(
+        toolPlan: MultiAgentToolPlan?,
+        intent: MultiAgentTaskIntent
+    ): List<String> {
         if (toolPlan == null || toolPlan.tools.isEmpty()) {
             return listOf("Инструменты не требуются для текущего execution_plan.")
         }
@@ -933,6 +1035,16 @@ internal class MultiAgentOrchestrator(
             }
             "Инструмент ${tool.toolKind} выбран для шага ${tool.stepIndex ?: "-"}: scope=$scope, reason=${tool.reason.ifBlank { "not specified" }}."
         }
+    }
+
+    private fun isWriteOperation(tool: MultiAgentToolPlanItem): Boolean {
+        if (tool.operationType == MultiAgentToolOperationType.write) return true
+        val cap = tool.capability?.lowercase().orEmpty()
+        if (cap.contains("write") || cap.contains("append")) return true
+        val raw = tool.paramsJson.lowercase()
+        if (raw.contains("\"operation_type\":\"write\"")) return true
+        if (raw.contains("\"capability\":\"write_file\"") || raw.contains("\"capability\":\"append_to_file\"")) return true
+        return false
     }
 
     private fun appendTargetHint(taskInput: String, target: String): String {
@@ -1173,6 +1285,12 @@ internal class MultiAgentOrchestrator(
                 .mapNotNull { key -> obj[key]?.jsonPrimitive?.contentOrNull?.trim()?.ifBlank { null } }
                 .firstOrNull()
         }
+        val capability = originalTool.capability?.trim()?.lowercase().orEmpty().ifBlank {
+            paramsObject?.get("capability")?.jsonPrimitive?.contentOrNull?.trim()?.lowercase().orEmpty()
+        }
+        val operationType = originalTool.operationType?.name?.lowercase().orEmpty().ifBlank {
+            paramsObject?.get("operation_type")?.jsonPrimitive?.contentOrNull?.trim()?.lowercase().orEmpty()
+        }
         if (!preferredToolName.isNullOrBlank() && availableTools.contains(preferredToolName)) {
             return AutonomousMcpFallback(
                 toolName = preferredToolName,
@@ -1184,6 +1302,26 @@ internal class MultiAgentOrchestrator(
             .joinToString("\n")
             .lowercase()
         val selectedTool = when {
+            operationType == "write" || capability.contains("write") || capability.contains("append") ->
+                when {
+                    availableTools.contains("project_write_file") -> "project_write_file"
+                    availableTools.contains("project_read_file") -> "project_read_file"
+                    else -> null
+                }
+
+            operationType == "read" || capability.contains("read") ->
+                when {
+                    availableTools.contains("project_read_file") -> "project_read_file"
+                    availableTools.contains("explore_directory") -> "explore_directory"
+                    else -> null
+                }
+
+            operationType == "list" || operationType == "search" || capability.contains("find") || capability.contains("search") ->
+                when {
+                    availableTools.contains("explore_directory") -> "explore_directory"
+                    availableTools.contains("git_list_files") -> "git_list_files"
+                    else -> null
+                }
             stepText.contains("найд") && stepText.contains("файл") && availableTools.contains("explore_directory") ->
                 "explore_directory"
 
@@ -1199,6 +1337,7 @@ internal class MultiAgentOrchestrator(
             availableTools.contains("git_list_files") -> "git_list_files"
             availableTools.contains("explore_directory") -> "explore_directory"
             availableTools.contains("project_read_file") -> "project_read_file"
+            availableTools.contains("project_write_file") -> "project_write_file"
             else -> null
         } ?: return null
 
@@ -1252,6 +1391,17 @@ internal class MultiAgentOrchestrator(
                     put("repoPath", projectFolderPath)
                     put("path", step?.taskInput?.substringAfter("TARGET:", "").orEmpty().trim().ifBlank { pathHint })
                     put("maxBytes", 200000)
+                }
+            }.toString()
+
+            "project_write_file" -> buildJsonObject {
+                put("toolName", toolName)
+                putJsonObject("arguments") {
+                    put("repoPath", projectFolderPath)
+                    put("path", step?.taskInput?.substringAfter("TARGET:", "").orEmpty().trim().ifBlank { pathHint })
+                    put("content", "Требуется доработать.")
+                    put("mode", "append")
+                    put("createDirectories", true)
                 }
             }.toString()
 
@@ -1408,7 +1558,9 @@ internal class MultiAgentOrchestrator(
         callModel: suspend (MultiAgentModelCall) -> String,
         onEvent: (MultiAgentEvent) -> Unit,
         toolEvidenceRequired: Boolean,
-        knownToolCallIds: Set<Long>
+        knownToolCallIds: Set<Long>,
+        mutationWriteRequired: Boolean,
+        knownWriteToolCallIds: Set<Long>
     ): MultiAgentValidationDecision {
         val prompt = MultiAgentPromptFactory.validationPrompt(
             userRequest = userRequest,
@@ -1451,6 +1603,16 @@ internal class MultiAgentOrchestrator(
                 return parsed.copy(
                     outcome = MultiAgentValidationOutcome.REWORK,
                     reworkInstruction = "Недостаточно доказательств. Добавь tool_call_ids и/или rag_evidence."
+                )
+            }
+        }
+        if (parsed.outcome == MultiAgentValidationOutcome.COMPLETE && mutationWriteRequired) {
+            val hasWriteEvidence = parsed.toolCallIds.any { knownWriteToolCallIds.contains(it) } ||
+                stepResults.any { step -> step.toolCallRefs.any { knownWriteToolCallIds.contains(it) } }
+            if (!hasWriteEvidence) {
+                return parsed.copy(
+                    outcome = MultiAgentValidationOutcome.REWORK,
+                    reworkInstruction = "Для mutation-задачи нет подтверждённой записи в артефакт. Выполни write/append шаг через MCP и повтори валидацию."
                 )
             }
         }
