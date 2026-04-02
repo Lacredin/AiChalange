@@ -142,4 +142,88 @@ class MultiAgentParserAndOrchestratorTest {
         assertTrue(events.any { it.channel == MultiAgentEventChannel.TRACE && it.actorType == "diagnostic" })
         assertTrue(events.none { it.channel == MultiAgentEventChannel.USER && it.actorType == "diagnostic" })
     }
+
+    @Test
+    fun implementer_receivesContextFromPreviousSteps() = runBlocking {
+        val orchestrator = MultiAgentOrchestrator()
+        var implementerPrompt = ""
+        var jsonCallCount = 0
+        var subagentCallCount = 0
+
+        val summary = orchestrator.execute(
+            request = MultiAgentRequest(
+                userRequest = "Подготовь решение",
+                projectFolderPath = "C:/tmp/project",
+                subagents = defaultMultiAgentSubagents().filter {
+                    it.key in setOf("researcher", "implementer", "validator", "diagnostic")
+                }
+            ),
+            callModel = { call ->
+                if (call.responseAsJson) {
+                    jsonCallCount++
+                    if (jsonCallCount == 1) {
+                        """
+                        {
+                          "action":"DELEGATE",
+                          "reason":"need two steps",
+                          "direct_answer":null,
+                          "clarification_question":null,
+                          "impossible_reason":null,
+                          "plan_steps":[
+                            {"index":1,"title":"Research","assignee_key":"researcher","task_input":"find facts"},
+                            {"index":2,"title":"Implement","assignee_key":"implementer","task_input":"build result"}
+                          ],
+                          "tool_plan":{
+                            "requires_tools":false,
+                            "tools":[],
+                            "fallback_policy":"DEGRADE"
+                          }
+                        }
+                        """.trimIndent()
+                    } else {
+                        """
+                        {
+                          "outcome":"COMPLETE",
+                          "final_answer":"готово",
+                          "rework_instruction":null,
+                          "clarification_question":null,
+                          "impossible_reason":null,
+                          "tool_call_ids":[],
+                          "rag_evidence":[]
+                        }
+                        """.trimIndent()
+                    }
+                } else {
+                    subagentCallCount++
+                    val system = call.messages.firstOrNull { it.role == "system" }?.content.orEmpty()
+                    val user = call.messages.firstOrNull { it.role == "user" }?.content.orEmpty()
+                    if (system.contains("Implementer")) {
+                        implementerPrompt = user
+                        "implementation ready"
+                    } else {
+                        "research findings KEY_FACT=42"
+                    }
+                }
+            },
+            executeTool = { toolRequest ->
+                ToolGatewayResult(
+                    success = true,
+                    toolKind = toolRequest.toolKind,
+                    rawOutput = "",
+                    normalizedOutput = "",
+                    errorCode = "",
+                    errorMessage = "",
+                    latencyMs = 1
+                )
+            },
+            onEvent = {},
+            onPlanningReady = {},
+            onStepReady = {}
+        )
+
+        assertEquals(MultiAgentRunStatus.DONE, summary.runStatus)
+        assertTrue(subagentCallCount >= 2)
+        assertTrue(implementerPrompt.contains("Контекст предыдущих шагов"))
+        assertTrue(implementerPrompt.contains("research findings KEY_FACT=42"))
+    }
 }

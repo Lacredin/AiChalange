@@ -84,7 +84,8 @@ internal object MultiAgentPromptFactory {
         userRequest: String,
         step: MultiAgentPlanStep,
         reworkInstruction: String?,
-        previousOutput: String?
+        previousOutput: String?,
+        sharedContext: String?
     ): String = buildString {
         appendLine("Задача от оркестратора.")
         appendLine("Глобальный запрос пользователя: $userRequest")
@@ -102,6 +103,11 @@ internal object MultiAgentPromptFactory {
             appendLine()
             appendLine("Предыдущий ответ этого шага:")
             appendLine(previousOutput)
+        }
+        if (!sharedContext.isNullOrBlank()) {
+            appendLine()
+            appendLine("Контекст предыдущих шагов:")
+            appendLine(sharedContext)
         }
         appendLine()
         append("Дай полный результат по шагу на русском языке.")

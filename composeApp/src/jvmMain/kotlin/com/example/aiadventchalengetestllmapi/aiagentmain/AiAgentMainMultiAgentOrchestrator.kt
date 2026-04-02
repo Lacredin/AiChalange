@@ -479,7 +479,12 @@ internal class MultiAgentOrchestrator(
                 userRequest = request.userRequest,
                 step = step,
                 reworkInstruction = null,
-                previousOutput = stepToolOutputs.joinToString("\n").ifBlank { null }
+                previousOutput = stepToolOutputs.joinToString("\n").ifBlank { null },
+                sharedContext = buildSharedContextForSubagent(
+                    subagent = subagent,
+                    currentStep = step,
+                    completedSteps = stepsState
+                )
             )
             emitSubagentTraceEvent(
                 onEvent = onEvent,
@@ -597,7 +602,12 @@ internal class MultiAgentOrchestrator(
                     userRequest = request.userRequest,
                     step = oldStep.step,
                     reworkInstruction = reworkInstruction,
-                    previousOutput = oldStep.output
+                    previousOutput = oldStep.output,
+                    sharedContext = buildSharedContextForSubagent(
+                        subagent = subagent,
+                        currentStep = oldStep.step,
+                        completedSteps = stepsState
+                    )
                 )
                 emitSubagentTraceEvent(
                     onEvent = onEvent,
@@ -1152,6 +1162,40 @@ internal class MultiAgentOrchestrator(
             )
         )
         return planningDecision.copy(toolPlan = toolPlan.copy(tools = filteredTools))
+    }
+
+    private fun buildSharedContextForSubagent(
+        subagent: MultiAgentSubagentDefinition,
+        currentStep: MultiAgentPlanStep,
+        completedSteps: List<MultiAgentStepExecution>
+    ): String? {
+        if (!subagent.key.equals("implementer", ignoreCase = true)) return null
+        val previous = completedSteps
+            .filter { it.step.index < currentStep.index }
+            .filter { it.status == MultiAgentStepStatus.done }
+            .takeLast(4)
+        if (previous.isEmpty()) return null
+
+        val context = buildString {
+            previous.forEach { step ->
+                appendLine("STEP #${step.step.index} [${step.step.assigneeKey}] ${step.step.title}")
+                val refs = step.toolCallRefs.filter { it > 0L }
+                if (refs.isNotEmpty()) appendLine("tool_call_refs=${refs.joinToString(",")}")
+                appendLine(compactForContext(step.output))
+                appendLine()
+            }
+        }.trim()
+        return context.ifBlank { null }
+    }
+
+    private fun compactForContext(text: String, maxChars: Int = 3500): String {
+        val normalized = text.lines()
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .take(80)
+            .joinToString("\n")
+        if (normalized.length <= maxChars) return normalized
+        return normalized.take(maxChars) + "\n...[truncated]"
     }
 
     private fun buildRagExecutorOutput(toolResults: List<Pair<MultiAgentToolPlanItem, ToolGatewayResult>>): String {
