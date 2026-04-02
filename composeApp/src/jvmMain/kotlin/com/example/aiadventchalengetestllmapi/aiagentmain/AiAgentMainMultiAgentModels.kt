@@ -59,8 +59,7 @@ internal data class MultiAgentStepExecution(
 
 internal enum class MultiAgentToolKind {
     RAG_QUERY,
-    MCP_CALL,
-    PROJECT_FS_SUMMARY
+    MCP_CALL
 }
 
 internal enum class MultiAgentToolFallbackPolicy {

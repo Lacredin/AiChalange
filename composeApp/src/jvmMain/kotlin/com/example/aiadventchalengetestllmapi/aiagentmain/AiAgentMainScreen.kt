@@ -1549,10 +1549,19 @@ private fun AiAgentMainChat(
                         )
                     )
                 }
-                val projectContextProvider = AgentProjectContextProvider()
                 val toolGateway = AiAgentMainToolGateway(
                     ragExecutor = { query ->
-                        buildRagPayloadForPrompt(query = query, forceEnabled = true)?.promptContext.orEmpty()
+                        val payload = buildRagPayloadForPrompt(query = query, forceEnabled = true)
+                        if (payload == null) {
+                            """{"status":"error","reason":"RAG_UNAVAILABLE","message":"RAG недоступен"}"""
+                        } else if (payload.selectedChunks.isEmpty()) {
+                            """{"status":"error","reason":"LOW_RELEVANCE","message":"RAG показал низкую релевантность","retrieval_info":"${escapeJsonValue(payload.retrievalInfo)}"}"""
+                        } else {
+                            val chunksJson = payload.selectedChunks.joinToString(",") { chunk ->
+                                """{"source":"${escapeJsonValue(chunk.source)}","title":"${escapeJsonValue(chunk.title)}","section":"${escapeJsonValue(chunk.section)}","chunk_id":${chunk.chunkId},"strategy":"${escapeJsonValue(chunk.strategy)}","score":${"%.4f".format(chunk.score)},"chunk":"${escapeJsonValue(chunk.chunkText)}"}"""
+                            }
+                            """{"status":"ok","retrieval_info":"${escapeJsonValue(payload.retrievalInfo)}","chunks":[$chunksJson]}"""
+                        }
                     },
                     mcpExecutor = { toolRequest ->
                         val callRefresh = multiAgentMcpCoordinator.ensureMcpCacheFresh()
@@ -1581,28 +1590,11 @@ private fun AiAgentMainChat(
                             arguments = toolRequest.arguments
                         )
                     },
-                    projectFsSummaryExecutor = { folder ->
-                        val ctx = projectContextProvider.load(folder)
-                        buildString {
-                            appendLine("root: ${ctx.rootPath}")
-                            appendLine("tree:")
-                            appendLine(ctx.treePreview)
-                            appendLine()
-                            appendLine("snippets:")
-                            append(ctx.snippetsPreview)
-                        }.trim()
-                    },
                     ragAvailability = {
                         multiAgentMcpCoordinator.buildRagAvailability()
                     },
                     mcpAvailability = { toolName ->
                         multiAgentMcpCoordinator.buildMcpAvailability(toolName)
-                    },
-                    isProjectFsAvailable = { folder ->
-                        runCatching {
-                            val dir = java.io.File(folder)
-                            dir.exists() && dir.isDirectory
-                        }.getOrDefault(false)
                     }
                 )
 

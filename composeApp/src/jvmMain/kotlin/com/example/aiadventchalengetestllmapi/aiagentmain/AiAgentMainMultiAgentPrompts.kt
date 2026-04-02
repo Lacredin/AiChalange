@@ -19,7 +19,7 @@ internal object MultiAgentPromptFactory {
         appendLine()
         appendLine("Верни только JSON без markdown по контракту:")
         appendLine(
-            """{"action":"DIRECT_ANSWER|DELEGATE|NEED_CLARIFICATION|IMPOSSIBLE","reason":"...","direct_answer":"...","clarification_question":"...","impossible_reason":"...","plan_steps":[{"title":"...","assignee_key":"...","task_input":"..."}],"tool_plan":{"requires_tools":true,"tools":[{"tool_kind":"RAG_QUERY|MCP_CALL|PROJECT_FS_SUMMARY","reason":"...","params":{"...":"..."},"step_index":1}],"fallback_policy":"DEGRADE|FAIL"}}"""
+            """{"action":"DIRECT_ANSWER|DELEGATE|NEED_CLARIFICATION|IMPOSSIBLE","reason":"...","direct_answer":"...","clarification_question":"...","impossible_reason":"...","plan_steps":[{"title":"...","assignee_key":"...","task_input":"..."}],"tool_plan":{"requires_tools":true,"tools":[{"tool_kind":"RAG_QUERY|MCP_CALL","reason":"...","params":{"...":"..."},"step_index":1}],"fallback_policy":"DEGRADE|FAIL"}}"""
         )
         appendLine("Правила:")
         appendLine("1) Если action != DELEGATE, plan_steps должен быть [].")
@@ -58,7 +58,7 @@ internal object MultiAgentPromptFactory {
         appendLine("Нужен replanning: часть инструментов недоступна после preflight.")
         appendLine("Верни только JSON без markdown по тому же контракту, что и в planning:")
         appendLine(
-            """{"action":"DIRECT_ANSWER|DELEGATE|NEED_CLARIFICATION|IMPOSSIBLE","reason":"...","direct_answer":"...","clarification_question":"...","impossible_reason":"...","plan_steps":[{"title":"...","assignee_key":"...","task_input":"..."}],"tool_plan":{"requires_tools":true,"tools":[{"tool_kind":"RAG_QUERY|MCP_CALL|PROJECT_FS_SUMMARY","reason":"...","params":{"...":"..."},"step_index":1}],"fallback_policy":"DEGRADE|FAIL"}}"""
+            """{"action":"DIRECT_ANSWER|DELEGATE|NEED_CLARIFICATION|IMPOSSIBLE","reason":"...","direct_answer":"...","clarification_question":"...","impossible_reason":"...","plan_steps":[{"title":"...","assignee_key":"...","task_input":"..."}],"tool_plan":{"requires_tools":true,"tools":[{"tool_kind":"RAG_QUERY|MCP_CALL","reason":"...","params":{"...":"..."},"step_index":1}],"fallback_policy":"DEGRADE|FAIL"}}"""
         )
         appendLine("Правила:")
         appendLine("1) Используй только доступные инструменты.")

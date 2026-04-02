@@ -24,6 +24,20 @@ internal fun defaultMultiAgentSubagents(): List<MultiAgentSubagentDefinition> = 
         isEnabled = true
     ),
     MultiAgentSubagentDefinition(
+        key = "rag_executor",
+        title = "RAG Executor",
+        description = "Извлекает только RAG-данные: источники, чанки и метаданные релевантности; при сбое возвращает структурированную причину.",
+        systemPrompt = """
+            Ты субагент RAG Executor.
+            Твоя задача: работать только с результатами RAG_QUERY.
+            Возвращай только структурированные найденные источники/чанки и сопутствующую информацию.
+            Ничего не добавляй от себя, не делай обобщений и не интерпретируй данные.
+            Если данных нет, верни только структурированную ошибку с причиной.
+            Пиши по-русски.
+        """.trimIndent(),
+        isEnabled = true
+    ),
+    MultiAgentSubagentDefinition(
         key = "mcp_selector",
         title = "MCP Selector",
         description = "Выбирает подходящий MCP инструмент и формирует валидные параметры вызова по input_schema.",

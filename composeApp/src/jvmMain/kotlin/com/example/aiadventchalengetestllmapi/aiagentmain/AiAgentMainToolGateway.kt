@@ -15,10 +15,8 @@ import kotlinx.serialization.json.contentOrNull
 internal class AiAgentMainToolGateway(
     private val ragExecutor: suspend (query: String) -> String,
     private val mcpExecutor: suspend (request: ToolGatewayMcpRequest) -> String,
-    private val projectFsSummaryExecutor: suspend (projectFolderPath: String) -> String,
     private val ragAvailability: suspend () -> ToolGatewayAvailability,
     private val mcpAvailability: suspend (toolName: String) -> ToolGatewayAvailability,
-    private val isProjectFsAvailable: suspend (projectFolderPath: String) -> Boolean,
     private val mcpTimeoutMs: Long = 25_000L,
     private val mcpRetryCount: Int = 1
 ) {
@@ -30,7 +28,6 @@ internal class AiAgentMainToolGateway(
             when (request.toolKind) {
                 MultiAgentToolKind.RAG_QUERY -> runRag(request, start)
                 MultiAgentToolKind.MCP_CALL -> runMcp(request, start)
-                MultiAgentToolKind.PROJECT_FS_SUMMARY -> runProjectFs(request, start)
             }
         }.getOrElse { error ->
             ToolGatewayResult(
@@ -166,45 +163,6 @@ internal class AiAgentMainToolGateway(
             errorMessage = lastError?.message ?: "unknown",
             latencyMs = System.currentTimeMillis() - start,
             metadataJson = """{"attempt":${mcpRetryCount + 1},"toolName":"$toolName"}"""
-        )
-    }
-
-    private suspend fun runProjectFs(request: ToolGatewayRequest, start: Long): ToolGatewayResult {
-        val params = parseParams(request.paramsJson)
-        val projectFolderPath = params["projectFolderPath"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
-        if (projectFolderPath.isBlank()) {
-            return ToolGatewayResult(
-                success = false,
-                toolKind = MultiAgentToolKind.PROJECT_FS_SUMMARY,
-                normalizedOutput = "",
-                rawOutput = "",
-                errorCode = "INVALID_ARGUMENT",
-                errorMessage = "projectFolderPath is blank",
-                latencyMs = System.currentTimeMillis() - start
-            )
-        }
-        if (request.preflight) {
-            val available = isProjectFsAvailable(projectFolderPath)
-            return ToolGatewayResult(
-                success = available,
-                toolKind = MultiAgentToolKind.PROJECT_FS_SUMMARY,
-                normalizedOutput = if (available) "PROJECT_FS available" else "",
-                rawOutput = "",
-                errorCode = if (available) "" else "PROJECT_FS_UNAVAILABLE",
-                errorMessage = if (available) "" else "Project folder unavailable",
-                latencyMs = System.currentTimeMillis() - start,
-                metadataJson = """{"preflight":true}"""
-            )
-        }
-        val raw = projectFsSummaryExecutor(projectFolderPath)
-        return ToolGatewayResult(
-            success = raw.isNotBlank(),
-            toolKind = MultiAgentToolKind.PROJECT_FS_SUMMARY,
-            normalizedOutput = raw,
-            rawOutput = raw,
-            errorCode = if (raw.isBlank()) "EMPTY_RESULT" else "",
-            errorMessage = if (raw.isBlank()) "Project FS summary is empty" else "",
-            latencyMs = System.currentTimeMillis() - start
         )
     }
 

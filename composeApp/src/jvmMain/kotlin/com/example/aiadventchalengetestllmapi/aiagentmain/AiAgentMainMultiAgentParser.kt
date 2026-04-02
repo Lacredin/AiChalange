@@ -107,7 +107,6 @@ internal object MultiAgentParser {
             val kind = when (toolObj["tool_kind"]?.jsonPrimitive?.contentOrNull?.trim()?.uppercase()) {
                 "RAG_QUERY" -> MultiAgentToolKind.RAG_QUERY
                 "MCP_CALL" -> MultiAgentToolKind.MCP_CALL
-                "PROJECT_FS_SUMMARY" -> MultiAgentToolKind.PROJECT_FS_SUMMARY
                 else -> return@mapNotNull null
             }
             val reason = toolObj["reason"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()

@@ -133,6 +133,8 @@ internal class MultiAgentOrchestrator(
             }
         }
 
+        planningDecision = applyRagToolRestriction(planningDecision, onEvent)
+
         var preflight = preflightToolPlan(
             toolPlan = planningDecision.toolPlan,
             executeTool = executeTool,
@@ -211,6 +213,8 @@ internal class MultiAgentOrchestrator(
                     )
                 }
             }
+
+            planningDecision = applyRagToolRestriction(planningDecision, onEvent)
 
             preflight = preflightToolPlan(
                 toolPlan = planningDecision.toolPlan,
@@ -309,7 +313,9 @@ internal class MultiAgentOrchestrator(
                 .filter { it.stepIndex == null || it.stepIndex == step.index }
             val stepToolCallRefs = mutableListOf<Long>()
             val stepToolOutputs = mutableListOf<String>()
+            val stepToolResults = mutableListOf<Pair<MultiAgentToolPlanItem, ToolGatewayResult>>()
             val isMcpExecutor = subagent.key.equals("mcp_executor", ignoreCase = true)
+            val isRagExecutor = subagent.key.equals("rag_executor", ignoreCase = true)
             emitSubagentTraceEvent(
                 onEvent = onEvent,
                 subagent = subagent,
@@ -321,6 +327,8 @@ internal class MultiAgentOrchestrator(
 
             stepTools.forEach { tool ->
                 if (isMcpExecutor && tool.toolKind != MultiAgentToolKind.MCP_CALL) return@forEach
+                if (isRagExecutor && tool.toolKind != MultiAgentToolKind.RAG_QUERY) return@forEach
+                if (!isRagExecutor && tool.toolKind == MultiAgentToolKind.RAG_QUERY) return@forEach
                 emitSubagentTraceEvent(
                     onEvent = onEvent,
                     subagent = subagent,
@@ -348,6 +356,7 @@ internal class MultiAgentOrchestrator(
                     if (toolResult.success) append(toolResult.normalizedOutput)
                     else append("error=${toolResult.errorCode}: ${toolResult.errorMessage}")
                 }
+                stepToolResults += tool to toolResult
                 stepToolOutputs += line
                 onEvent(
                     MultiAgentEvent(
@@ -376,6 +385,35 @@ internal class MultiAgentOrchestrator(
                         message = "tool_error: ${toolResult.errorCode.ifBlank { "UNKNOWN" }} ${toolResult.errorMessage}"
                     )
                 }
+            }
+
+            if (isRagExecutor) {
+                val ragOutput = buildRagExecutorOutput(stepToolResults)
+                val done = MultiAgentStepExecution(
+                    step = step,
+                    status = MultiAgentStepStatus.done,
+                    output = ragOutput,
+                    toolCallRefs = stepToolCallRefs.filter { it > 0L }
+                )
+                emitSubagentTraceEvent(
+                    onEvent = onEvent,
+                    subagent = subagent,
+                    step = step,
+                    traceGroupId = traceGroupId,
+                    phase = MultiAgentTracePhase.SUBAGENT_OUTPUT,
+                    message = MultiAgentTraceFormatter.formatSubagentOutput(ragOutput)
+                )
+                emitSubagentTraceEvent(
+                    onEvent = onEvent,
+                    subagent = subagent,
+                    step = step,
+                    traceGroupId = traceGroupId,
+                    phase = MultiAgentTracePhase.STEP_FINISH,
+                    message = "step_finish: status=done tool_call_refs=${stepToolCallRefs.filter { it > 0L }.joinToString(",")}"
+                )
+                stepsState += done
+                onStepReady(done)
+                return@forEachIndexed
             }
 
             if (isMcpExecutor) {
@@ -1018,6 +1056,57 @@ internal class MultiAgentOrchestrator(
                 planningDecision = planningDecision,
                 steps = steps
             )
+        }
+    }
+
+    private fun applyRagToolRestriction(
+        planningDecision: MultiAgentPlanningDecision,
+        onEvent: (MultiAgentEvent) -> Unit
+    ): MultiAgentPlanningDecision {
+        val toolPlan = planningDecision.toolPlan ?: return planningDecision
+        if (toolPlan.tools.none { it.toolKind == MultiAgentToolKind.RAG_QUERY }) return planningDecision
+
+        val stepsByIndex = planningDecision.planSteps.associateBy { it.index }
+        val filteredTools = toolPlan.tools.filter { tool ->
+            if (tool.toolKind != MultiAgentToolKind.RAG_QUERY) return@filter true
+            val assignee = tool.stepIndex?.let { idx -> stepsByIndex[idx]?.assigneeKey?.trim()?.lowercase() }
+            assignee == "rag_executor"
+        }
+        if (filteredTools.size == toolPlan.tools.size) return planningDecision
+
+        val removed = toolPlan.tools.size - filteredTools.size
+        onEvent(
+            MultiAgentEvent(
+                channel = MultiAgentEventChannel.TRACE,
+                actorType = "orchestrator",
+                actorKey = "rag_policy",
+                role = "assistant",
+                message = "RAG_POLICY: removed_non_rag_executor_tools=$removed"
+            )
+        )
+        return planningDecision.copy(toolPlan = toolPlan.copy(tools = filteredTools))
+    }
+
+    private fun buildRagExecutorOutput(toolResults: List<Pair<MultiAgentToolPlanItem, ToolGatewayResult>>): String {
+        val ragResults = toolResults
+            .filter { (tool, _) -> tool.toolKind == MultiAgentToolKind.RAG_QUERY }
+            .map { (_, result) -> result }
+
+        if (ragResults.isEmpty()) {
+            return """{"status":"error","reason":"RAG_UNAVAILABLE","message":"RAG недоступен"}"""
+        }
+
+        val firstSuccess = ragResults.firstOrNull { it.success }
+        if (firstSuccess != null) {
+            val payload = firstSuccess.normalizedOutput.trim().ifBlank { firstSuccess.rawOutput.trim() }
+            if (payload.isNotBlank()) return payload
+        }
+
+        val firstError = ragResults.first()
+        return if (firstError.errorCode.equals("RAG_UNAVAILABLE", ignoreCase = true)) {
+            """{"status":"error","reason":"RAG_UNAVAILABLE","message":"RAG недоступен"}"""
+        } else {
+            """{"status":"error","reason":"LOW_RELEVANCE","message":"RAG показал низкую релевантность"}"""
         }
     }
 
