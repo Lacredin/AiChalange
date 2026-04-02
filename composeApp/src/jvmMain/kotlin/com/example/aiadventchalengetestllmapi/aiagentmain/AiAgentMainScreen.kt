@@ -473,6 +473,21 @@ private fun AiAgentMainChat(
         }
     }
 
+    fun buildGlobalUserRequest(messages: List<AiAgentMessage>, fallbackObjective: String): MultiAgentGlobalUserRequest {
+        val multiAgentMessages = messages.filter { it.paramsInfo.startsWith("stage=multiagent") }
+        val source = if (multiAgentMessages.isNotEmpty()) multiAgentMessages else messages
+        val conversation = source.takeLast(60).map { message ->
+            MultiAgentConversationMessage(
+                role = if (message.isUser) MultiAgentConversationRole.USER else MultiAgentConversationRole.AGENT,
+                text = message.text
+            )
+        }
+        return MultiAgentUserRequestExtractor.extract(
+            conversation = conversation,
+            fallbackObjective = fallbackObjective
+        )
+    }
+
     fun escapeJsonValue(raw: String): String =
         raw.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")
 
@@ -1535,6 +1550,16 @@ private fun AiAgentMainChat(
                 } else {
                     buildRegularConversationContext(regularMessages.toList())
                 }
+                val fallbackObjective = if (isContinuationRun) {
+                    latestRun?.user_request?.trim().orEmpty().ifBlank { trimmed }
+                } else {
+                    trimmed
+                }
+                val globalUserRequest = buildGlobalUserRequest(
+                    messages = regularMessages.toList(),
+                    fallbackObjective = fallbackObjective
+                )
+                val normalizedUserRequest = globalUserRequest.objective.ifBlank { trimmed }
                 val preflightRefresh = multiAgentMcpCoordinator.ensureMcpCacheFresh()
                 preflightRefresh.lines.forEach { line ->
                     appendMultiAgentEvent(
@@ -1600,13 +1625,14 @@ private fun AiAgentMainChat(
 
                 val summary = multiAgentOrchestrator.execute(
                     request = MultiAgentRequest(
-                        userRequest = trimmed,
+                        userRequest = normalizedUserRequest,
                         projectFolderPath = projectFolderPath,
                         subagents = multiAgentSubagents.filter { it.isEnabled },
                         conversationContext = conversationContext,
                         pendingQuestion = pendingQuestion,
                         isContinuation = isContinuationRun,
-                        mcpToolsCatalog = multiAgentMcpCoordinator.buildMcpToolsCatalogForSelector()
+                        mcpToolsCatalog = multiAgentMcpCoordinator.buildMcpToolsCatalogForSelector(),
+                        globalUserRequest = globalUserRequest
                     ),
                     callModel = { call ->
                         callAiAgentMainApi(

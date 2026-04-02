@@ -3,6 +3,7 @@ package com.example.aiadventchalengetestllmapi.aiagentmain
 internal object MultiAgentPromptFactory {
     fun orchestratorPlanningPrompt(
         userRequest: String,
+        globalUserRequest: MultiAgentGlobalUserRequest?,
         projectFolderPath: String,
         subagents: List<MultiAgentSubagentDefinition>,
         conversationContext: String,
@@ -11,23 +12,22 @@ internal object MultiAgentPromptFactory {
     ): String = buildString {
         appendLine("Ты оркестратор мультиагентной системы.")
         appendLine("Режим: ${if (isContinuation) "продолжение текущего run" else "новый run"}")
-        appendLine("Проанализируй запрос и выбери одно действие:")
-        appendLine("- DIRECT_ANSWER")
-        appendLine("- DELEGATE")
-        appendLine("- NEED_CLARIFICATION")
-        appendLine("- IMPOSSIBLE")
+        appendLine("Проанализируй задачу и выбери одно действие: DIRECT_ANSWER | DELEGATE | NEED_CLARIFICATION | IMPOSSIBLE.")
         appendLine()
-        appendLine("Верни только JSON без markdown по контракту:")
+        appendLine("Верни только JSON по контракту (без markdown):")
         appendLine(
-            """{"action":"DIRECT_ANSWER|DELEGATE|NEED_CLARIFICATION|IMPOSSIBLE","reason":"...","direct_answer":"...","clarification_question":"...","impossible_reason":"...","plan_steps":[{"title":"...","assignee_key":"...","task_input":"..."}],"tool_plan":{"requires_tools":true,"tools":[{"tool_kind":"RAG_QUERY|MCP_CALL","reason":"...","params":{"...":"..."},"step_index":1}],"fallback_policy":"DEGRADE|FAIL"}}"""
+            """{"action":"DIRECT_ANSWER|DELEGATE|NEED_CLARIFICATION|IMPOSSIBLE","reason":"...","direct_answer":"...","clarification_question":"...","impossible_reason":"...","global_user_request":{"objective":"...","constraints":["..."],"clarifications":[{"question":"...","answer":"..."}],"assumptions":["..."],"task_messages":["..."],"clarification_messages":["..."],"agent_questions":["..."]},"execution_plan":{"plan_steps":[{"index":1,"title":"...","assignee_key":"...","task_input":"..."}],"tool_plan":{"requires_tools":true,"tools":[{"tool_kind":"RAG_QUERY|MCP_CALL","tool_scope":"SINGLE_TARGET|MULTI_TARGET","reason":"...","params":{"...":"..."},"step_index":1}],"fallback_policy":"DEGRADE|FAIL"}},"tooling_notes":["..."]}"""
         )
         appendLine("Правила:")
-        appendLine("1) Если action != DELEGATE, plan_steps должен быть [].")
-        appendLine("2) При DELEGATE составь пошаговый план и назначь assignee_key только из enabled субагентов.")
-        appendLine("3) Если данных не хватает, используй NEED_CLARIFICATION.")
-        appendLine("4) Если задача невыполнима в заданных рамках, используй IMPOSSIBLE.")
-        appendLine("5) Если нужны инструменты, сформируй tool_plan и привяжи tool к step_index.")
-        appendLine("6) Указывай tool_plan.fallback_policy явно: DEGRADE или FAIL. Если поле пропущено, будет применен FAIL.")
+        appendLine("1) Если action != DELEGATE, execution_plan.plan_steps должен быть [].")
+        appendLine("2) Для DELEGATE каждый шаг должен быть атомарным и исполнимым одним вызовом инструмента.")
+        appendLine("3) Для tool_scope=SINGLE_TARGET нельзя объединять несколько целей в один шаг. Разворачивай шаги по одной цели.")
+        appendLine("4) Для tool_scope=MULTI_TARGET допустим один агрегированный шаг.")
+        appendLine("5) Добавь финальный шаг валидации результата по всем целям.")
+        appendLine("6) Явно указывай tool_scope для каждого инструмента в tool_plan.tools.")
+        appendLine("7) Если данных недостаточно, используй NEED_CLARIFICATION.")
+        appendLine("8) Если задача невыполнима в рамках условий, используй IMPOSSIBLE.")
+        appendLine("9) Указывай fallback_policy явно: DEGRADE или FAIL.")
         appendLine()
         appendLine("Папка проекта: $projectFolderPath")
         appendLine()
@@ -44,31 +44,30 @@ internal object MultiAgentPromptFactory {
             subagents.forEach { appendLine("- ${it.key}: ${it.description}") }
         }
         appendLine()
-        appendLine("Запрос пользователя:")
+        appendLine("Структурированный global_user_request:")
+        appendLine(formatGlobalUserRequestJson(globalUserRequest, fallbackRequest = userRequest))
+        appendLine()
+        appendLine("Сырой последний пользовательский ввод:")
         append(userRequest)
     }.trim()
 
     fun orchestratorReplanPrompt(
         userRequest: String,
+        globalUserRequest: MultiAgentGlobalUserRequest?,
         currentPlan: MultiAgentPlanningDecision,
         availableTools: List<String>,
         unavailableTools: List<String>
     ): String = buildString {
         appendLine("Ты оркестратор мультиагентной системы.")
         appendLine("Нужен replanning: часть инструментов недоступна после preflight.")
-        appendLine("Верни только JSON без markdown по тому же контракту, что и в planning:")
-        appendLine(
-            """{"action":"DIRECT_ANSWER|DELEGATE|NEED_CLARIFICATION|IMPOSSIBLE","reason":"...","direct_answer":"...","clarification_question":"...","impossible_reason":"...","plan_steps":[{"title":"...","assignee_key":"...","task_input":"..."}],"tool_plan":{"requires_tools":true,"tools":[{"tool_kind":"RAG_QUERY|MCP_CALL","reason":"...","params":{"...":"..."},"step_index":1}],"fallback_policy":"DEGRADE|FAIL"}}"""
-        )
-        appendLine("Правила:")
-        appendLine("1) Используй только доступные инструменты.")
-        appendLine("2) Если можно продолжить без недоступных инструментов, верни новый рабочий plan_steps и tool_plan.")
-        appendLine("3) Если требуются входные данные от пользователя, выбери NEED_CLARIFICATION.")
-        appendLine("4) Если задача невыполнима, выбери IMPOSSIBLE.")
-        appendLine("5) Указывай tool_plan.fallback_policy явно: DEGRADE или FAIL.")
+        appendLine("Верни JSON по тому же контракту, что и в planning (global_user_request + execution_plan + tooling_notes).")
+        appendLine("Сохраняй правила атомарности шагов и разворачивания single-target по целям.")
         appendLine()
         appendLine("Исходный запрос пользователя:")
         appendLine(userRequest)
+        appendLine()
+        appendLine("Структурированный global_user_request:")
+        appendLine(formatGlobalUserRequestJson(globalUserRequest, fallbackRequest = userRequest))
         appendLine()
         appendLine("Текущий план (до replanning):")
         appendLine(currentPlan.toString())
@@ -156,7 +155,7 @@ internal object MultiAgentPromptFactory {
                 appendLine()
             }
         }
-        appendLine("Критические итоговые данные (используй этот блок как приоритетный источник для final_answer):")
+        appendLine("Критические итоговые данные (используй как приоритетный источник для final_answer):")
         if (stepOutputs.isEmpty()) {
             appendLine("- нет итоговых данных")
         } else {
@@ -191,6 +190,9 @@ internal object MultiAgentPromptFactory {
         appendLine("3) Если данных не хватает для обязательных аргументов, верни NEED_CLARIFICATION.")
         appendLine("4) Если ни один доступный tool не подходит, верни IMPOSSIBLE.")
         appendLine("5) Не придумывай инструменты, которых нет в каталоге.")
+        appendLine("6) Приоритет автономности: сначала попробуй best-effort через общие инструменты из каталога (например, explore_directory, git_list_files, project_read_file).")
+        appendLine("7) Если узкоспециализированного инструмента нет, выбери ближайший общий инструмент и сформируй MCP_CALL вместо NEED_CLARIFICATION.")
+        appendLine("8) NEED_CLARIFICATION используй только если даже общий best-effort невозможен из-за отсутствия обязательных входных данных.")
         appendLine()
         appendLine("Запрос пользователя:")
         appendLine(userRequest)
@@ -257,6 +259,29 @@ internal object MultiAgentPromptFactory {
             appendLine(text)
         }
     }.trim()
+
+    private fun formatGlobalUserRequestJson(
+        globalUserRequest: MultiAgentGlobalUserRequest?,
+        fallbackRequest: String
+    ): String {
+        val request = globalUserRequest ?: MultiAgentGlobalUserRequest(objective = fallbackRequest)
+        val clarifications = request.clarifications.joinToString(",") { pair ->
+            """{"question":"${escapeJson(pair.question)}","answer":"${escapeJson(pair.answer)}"}"""
+        }
+        val constraints = request.constraints.joinToString(",") { "\"${escapeJson(it)}\"" }
+        val assumptions = request.assumptions.joinToString(",") { "\"${escapeJson(it)}\"" }
+        val taskMessages = request.taskMessages.joinToString(",") { "\"${escapeJson(it)}\"" }
+        val clarificationMessages = request.clarificationMessages.joinToString(",") { "\"${escapeJson(it)}\"" }
+        val agentQuestions = request.agentQuestions.joinToString(",") { "\"${escapeJson(it)}\"" }
+        return """{"objective":"${escapeJson(request.objective)}","constraints":[$constraints],"clarifications":[$clarifications],"assumptions":[$assumptions],"task_messages":[$taskMessages],"clarification_messages":[$clarificationMessages],"agent_questions":[$agentQuestions]}"""
+    }
+
+    private fun escapeJson(raw: String): String {
+        return raw
+            .replace("\\", "\\\\")
+            .replace("\"", "\\\"")
+            .replace("\n", "\\n")
+    }
 
     private fun extractCriticalStepHighlights(output: String): List<String> {
         val lines = output.lines()

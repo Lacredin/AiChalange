@@ -23,7 +23,10 @@ internal object MultiAgentParser {
             "IMPOSSIBLE" -> MultiAgentDecisionType.IMPOSSIBLE
             else -> return null
         }
-        val steps = root.arrayOrEmpty("plan_steps").mapIndexedNotNull { index, item ->
+        val executionPlan = root.objectOrNull("execution_plan")
+        val stepSource = executionPlan ?: root
+        val toolPlanSource = executionPlan?.objectOrNull("tool_plan") ?: (root["tool_plan"] as? JsonObject)
+        val steps = stepSource.arrayOrEmpty("plan_steps").mapIndexedNotNull { index, item ->
             val obj = item as? JsonObject ?: return@mapIndexedNotNull null
             val title = obj["title"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
             val assignee = obj["assignee_key"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
@@ -43,7 +46,11 @@ internal object MultiAgentParser {
             clarificationQuestion = root["clarification_question"]?.jsonPrimitive?.contentOrNull?.trim()?.ifBlank { null },
             impossibleReason = root["impossible_reason"]?.jsonPrimitive?.contentOrNull?.trim()?.ifBlank { null },
             planSteps = steps,
-            toolPlan = parseToolPlan(root["tool_plan"] as? JsonObject)
+            toolPlan = parseToolPlan(toolPlanSource),
+            extractedGlobalUserRequest = parseGlobalUserRequest(root["global_user_request"] as? JsonObject),
+            toolingNotes = root.arrayOrEmpty("tooling_notes")
+                .mapNotNull { it.jsonPrimitive.contentOrNull?.trim()?.ifBlank { null } }
+                .distinct()
         )
     }
 
@@ -113,10 +120,15 @@ internal object MultiAgentParser {
             }
             val reason = toolObj["reason"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
             val params = toolObj.objectOrNull("params") ?: JsonObject(emptyMap())
+            val scopeRaw = toolObj["tool_scope"]?.jsonPrimitive?.contentOrNull?.trim()?.uppercase()
             MultiAgentToolPlanItem(
                 toolKind = kind,
                 reason = reason,
                 paramsJson = params.toString(),
+                toolScope = when (scopeRaw) {
+                    "MULTI_TARGET" -> MultiAgentToolScope.MULTI_TARGET
+                    else -> MultiAgentToolScope.SINGLE_TARGET
+                },
                 stepIndex = toolObj["step_index"]?.jsonPrimitive?.intOrNull
             )
         }
@@ -125,6 +137,51 @@ internal object MultiAgentParser {
             tools = tools,
             fallbackPolicy = fallbackPolicy,
             fallbackPolicyDefaulted = fallbackPolicyRaw == null
+        )
+    }
+
+    private fun parseGlobalUserRequest(obj: JsonObject?): MultiAgentGlobalUserRequest? {
+        if (obj == null) return null
+        val objective = obj["objective"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+        val constraints = obj.arrayOrEmpty("constraints")
+            .mapNotNull { it.jsonPrimitive.contentOrNull?.trim()?.ifBlank { null } }
+            .distinct()
+        val clarifications = obj.arrayOrEmpty("clarifications")
+            .mapNotNull { item ->
+                val pairObj = item as? JsonObject ?: return@mapNotNull null
+                val question = pairObj["question"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+                val answer = pairObj["answer"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+                if (question.isBlank() || answer.isBlank()) return@mapNotNull null
+                MultiAgentClarificationPair(question = question, answer = answer)
+            }
+        val assumptions = obj.arrayOrEmpty("assumptions")
+            .mapNotNull { it.jsonPrimitive.contentOrNull?.trim()?.ifBlank { null } }
+            .distinct()
+        val taskMessages = obj.arrayOrEmpty("task_messages")
+            .mapNotNull { it.jsonPrimitive.contentOrNull?.trim()?.ifBlank { null } }
+        val clarificationMessages = obj.arrayOrEmpty("clarification_messages")
+            .mapNotNull { it.jsonPrimitive.contentOrNull?.trim()?.ifBlank { null } }
+        val agentQuestions = obj.arrayOrEmpty("agent_questions")
+            .mapNotNull { it.jsonPrimitive.contentOrNull?.trim()?.ifBlank { null } }
+        if (
+            objective.isBlank() &&
+            constraints.isEmpty() &&
+            clarifications.isEmpty() &&
+            assumptions.isEmpty() &&
+            taskMessages.isEmpty() &&
+            clarificationMessages.isEmpty() &&
+            agentQuestions.isEmpty()
+        ) {
+            return null
+        }
+        return MultiAgentGlobalUserRequest(
+            objective = objective,
+            constraints = constraints,
+            clarifications = clarifications,
+            assumptions = assumptions,
+            taskMessages = taskMessages,
+            clarificationMessages = clarificationMessages,
+            agentQuestions = agentQuestions
         )
     }
 

@@ -2,6 +2,10 @@ package com.example.aiadventchalengetestllmapi.aiagentmain
 
 import com.example.aiadventchalengetestllmapi.network.DeepSeekMessage
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
@@ -52,6 +56,7 @@ internal class MultiAgentOrchestrator(
 
         val planningPrompt = MultiAgentPromptFactory.orchestratorPlanningPrompt(
             userRequest = request.userRequest,
+            globalUserRequest = request.globalUserRequest,
             projectFolderPath = request.projectFolderPath,
             subagents = enabledSubagents,
             conversationContext = request.conversationContext,
@@ -85,6 +90,11 @@ internal class MultiAgentOrchestrator(
                 planningDecision = null,
                 steps = emptyList()
             )
+        planningDecision = normalizePlanningDecision(
+            planningDecision = planningDecision,
+            request = request,
+            enabledSubagents = enabledSubagents
+        )
         latestPlanningDecision = planningDecision
         onPlanningReady(planningDecision)
         emitFallbackPolicyTrace(planningDecision.toolPlan, onEvent, "initial")
@@ -169,7 +179,11 @@ internal class MultiAgentOrchestrator(
                 onEvent = onEvent
             ) ?: break
 
-            planningDecision = replanDecision
+            planningDecision = normalizePlanningDecision(
+                planningDecision = replanDecision,
+                request = request,
+                enabledSubagents = enabledSubagents
+            )
             latestPlanningDecision = planningDecision
             onPlanningReady(planningDecision)
             emitFallbackPolicyTrace(planningDecision.toolPlan, onEvent, "replan#$replanAttempt")
@@ -722,6 +736,7 @@ internal class MultiAgentOrchestrator(
         val unavailable = preflight.unavailable.map { it.describe(includeError = true) }
         val prompt = MultiAgentPromptFactory.orchestratorReplanPrompt(
             userRequest = request.userRequest,
+            globalUserRequest = request.globalUserRequest,
             currentPlan = currentPlan,
             availableTools = available,
             unavailableTools = unavailable
@@ -745,6 +760,224 @@ internal class MultiAgentOrchestrator(
             )
         )
         return parser.parsePlanning(raw)
+    }
+
+    private fun normalizePlanningDecision(
+        planningDecision: MultiAgentPlanningDecision,
+        request: MultiAgentRequest,
+        enabledSubagents: List<MultiAgentSubagentDefinition>
+    ): MultiAgentPlanningDecision {
+        val structuredRequest = planningDecision.extractedGlobalUserRequest
+            ?: request.globalUserRequest
+            ?: MultiAgentGlobalUserRequest(
+                objective = request.userRequest,
+                taskMessages = listOf(request.userRequest)
+            )
+
+        if (planningDecision.action != MultiAgentDecisionType.DELEGATE) {
+            val fallbackNotes = planningDecision.toolingNotes.ifEmpty {
+                listOf("План без делегирования: execution_plan и инструменты не используются.")
+            }
+            return planningDecision.copy(
+                planSteps = emptyList(),
+                toolPlan = planningDecision.toolPlan?.copy(
+                    requiresTools = false,
+                    tools = emptyList()
+                ),
+                extractedGlobalUserRequest = structuredRequest,
+                toolingNotes = fallbackNotes
+            )
+        }
+
+        val expandedByScope = expandSingleTargetSteps(
+            steps = planningDecision.planSteps,
+            toolPlan = planningDecision.toolPlan
+        )
+        val requiresFinalValidationStep = requiresCrossTargetValidation(expandedByScope)
+        val withValidation = ensureFinalValidationStep(
+            steps = expandedByScope.steps,
+            enabledSubagents = enabledSubagents,
+            forceAppend = requiresFinalValidationStep
+        )
+        val reindexed = reindexPlan(
+            steps = withValidation,
+            toolPlan = expandedByScope.toolPlan
+        )
+        val toolingNotes = planningDecision.toolingNotes.ifEmpty {
+            buildToolingNotes(reindexed.toolPlan)
+        }
+        return planningDecision.copy(
+            planSteps = reindexed.steps,
+            toolPlan = reindexed.toolPlan,
+            extractedGlobalUserRequest = structuredRequest,
+            toolingNotes = toolingNotes
+        )
+    }
+
+    private fun expandSingleTargetSteps(
+        steps: List<MultiAgentPlanStep>,
+        toolPlan: MultiAgentToolPlan?
+    ): PlanNormalizeResult {
+        if (steps.isEmpty() || toolPlan == null || toolPlan.tools.isEmpty()) {
+            return PlanNormalizeResult(steps = steps, toolPlan = toolPlan)
+        }
+
+        val toolsByStepIndex = toolPlan.tools.filter { it.stepIndex != null }.groupBy { it.stepIndex!! }
+        val freeTools = toolPlan.tools.filter { it.stepIndex == null }
+        val newSteps = mutableListOf<MultiAgentPlanStep>()
+        val newTools = mutableListOf<MultiAgentToolPlanItem>()
+
+        steps.sortedBy { it.index }.forEach { step ->
+            val stepTools = toolsByStepIndex[step.index].orEmpty()
+            val expansionTargets = stepTools
+                .filter { it.toolScope == MultiAgentToolScope.SINGLE_TARGET }
+                .firstNotNullOfOrNull { extractTargets(it.paramsJson).takeIf { targets -> targets.size > 1 } }
+
+            if (expansionTargets.isNullOrEmpty()) {
+                newSteps += step
+                newTools += stepTools
+                return@forEach
+            }
+
+            val generatedSteps = expansionTargets.map { target ->
+                step.copy(
+                    index = nextPlanIndex(newSteps),
+                    title = "${step.title} [$target]",
+                    taskInput = appendTargetHint(step.taskInput, target)
+                )
+            }
+            newSteps += generatedSteps
+
+            stepTools.forEach { tool ->
+                when {
+                    tool.toolScope == MultiAgentToolScope.SINGLE_TARGET -> {
+                        generatedSteps.forEachIndexed { targetIndex, generatedStep ->
+                            val target = expansionTargets[targetIndex]
+                            newTools += tool.copy(
+                                paramsJson = rewriteSingleTargetParams(tool.paramsJson, target),
+                                stepIndex = generatedStep.index
+                            )
+                        }
+                    }
+
+                    else -> {
+                        newTools += tool.copy(stepIndex = generatedSteps.first().index)
+                    }
+                }
+            }
+        }
+
+        newTools += freeTools
+        return PlanNormalizeResult(
+            steps = newSteps,
+            toolPlan = toolPlan.copy(tools = newTools)
+        )
+    }
+
+    private fun ensureFinalValidationStep(
+        steps: List<MultiAgentPlanStep>,
+        enabledSubagents: List<MultiAgentSubagentDefinition>,
+        forceAppend: Boolean
+    ): List<MultiAgentPlanStep> {
+        if (!forceAppend) return steps
+        if (steps.isEmpty()) return steps
+        val hasFinalValidationStep = steps.lastOrNull()?.title
+            ?.contains("валидац", ignoreCase = true) == true
+        if (hasFinalValidationStep) return steps
+
+        val hasValidator = enabledSubagents.any { it.key.equals("validator", ignoreCase = true) }
+        val assignee = if (hasValidator) "validator" else steps.last().assigneeKey
+        val validationStep = MultiAgentPlanStep(
+            index = (steps.maxOfOrNull { it.index } ?: 0) + 1,
+            title = "Финальная валидация всех целей",
+            assigneeKey = assignee,
+            taskInput = "Проверь, что результаты покрывают все цели, и зафиксируй найденные несоответствия."
+        )
+        return steps + validationStep
+    }
+
+    private fun requiresCrossTargetValidation(result: PlanNormalizeResult): Boolean {
+        if (result.steps.size > 1) return true
+        val toolPlan = result.toolPlan ?: return false
+        return toolPlan.tools.any { tool ->
+            extractTargets(tool.paramsJson).size > 1
+        }
+    }
+
+    private fun reindexPlan(
+        steps: List<MultiAgentPlanStep>,
+        toolPlan: MultiAgentToolPlan?
+    ): PlanNormalizeResult {
+        if (steps.isEmpty()) return PlanNormalizeResult(steps = steps, toolPlan = toolPlan)
+        val sorted = steps.sortedBy { it.index }
+        val indexMap = sorted.mapIndexed { index, step -> step.index to (index + 1) }.toMap()
+        val reindexedSteps = sorted.mapIndexed { index, step ->
+            step.copy(index = index + 1)
+        }
+        val reindexedToolPlan = toolPlan?.copy(
+            tools = toolPlan.tools.map { tool ->
+                tool.copy(stepIndex = tool.stepIndex?.let { indexMap[it] ?: it })
+            }
+        )
+        return PlanNormalizeResult(steps = reindexedSteps, toolPlan = reindexedToolPlan)
+    }
+
+    private fun buildToolingNotes(toolPlan: MultiAgentToolPlan?): List<String> {
+        if (toolPlan == null || toolPlan.tools.isEmpty()) {
+            return listOf("Инструменты не требуются для текущего execution_plan.")
+        }
+        return toolPlan.tools.map { tool ->
+            val scope = when (tool.toolScope) {
+                MultiAgentToolScope.SINGLE_TARGET -> "single-target"
+                MultiAgentToolScope.MULTI_TARGET -> "multi-target"
+            }
+            "Инструмент ${tool.toolKind} выбран для шага ${tool.stepIndex ?: "-"}: scope=$scope, reason=${tool.reason.ifBlank { "not specified" }}."
+        }
+    }
+
+    private fun appendTargetHint(taskInput: String, target: String): String {
+        if (taskInput.contains("TARGET:", ignoreCase = true)) return taskInput
+        return "$taskInput\nTARGET: $target"
+    }
+
+    private fun extractTargets(paramsJson: String): List<String> {
+        val raw = paramsJson.trim()
+        if (raw.isBlank()) return emptyList()
+        val obj = runCatching { json.parseToJsonElement(raw).jsonObject }.getOrNull() ?: return emptyList()
+        val candidateKeys = listOf("targets", "files", "paths", "items")
+        val list = candidateKeys.firstNotNullOfOrNull { key ->
+            val value = obj[key] as? JsonArray ?: return@firstNotNullOfOrNull null
+            value.mapNotNull { (it as? JsonPrimitive)?.contentOrNull?.trim()?.ifBlank { null } }
+        }
+        return list?.distinct().orEmpty()
+    }
+
+    private fun rewriteSingleTargetParams(paramsJson: String, target: String): String {
+        val raw = paramsJson.trim()
+        if (raw.isBlank()) return """{"target":"${escapeJson(target)}"}"""
+        val obj = runCatching { json.parseToJsonElement(raw).jsonObject }.getOrNull() ?: return raw
+        val keysToReplace = listOf("targets", "files", "paths", "items")
+        val rewritten = buildJsonObject {
+            obj.forEach { (key, value) ->
+                if (keysToReplace.contains(key) && value is JsonArray) {
+                    put(key, JsonArray(listOf(JsonPrimitive(target))))
+                } else {
+                    put(key, value)
+                }
+            }
+            if (keysToReplace.none { obj.containsKey(it) }) {
+                put("target", JsonPrimitive(target))
+            }
+        }
+        return rewritten.toString()
+    }
+
+    private fun nextPlanIndex(existing: List<MultiAgentPlanStep>): Int {
+        return (existing.maxOfOrNull { it.index } ?: 0) + 1
+    }
+
+    private fun escapeJson(raw: String): String {
+        return raw.replace("\\", "\\\\").replace("\"", "\\\"")
     }
 
     private suspend fun resolveMcpCallsBySelector(
@@ -840,8 +1073,46 @@ internal class MultiAgentOrchestrator(
                 null
             }
             if (selection == null) {
-                rewrittenTools += tool
+                val fallbackCall = buildAutonomousMcpFallback(
+                    request = request,
+                    step = step,
+                    originalTool = tool
+                )
+                if (fallbackCall != null) {
+                    onEvent(
+                        MultiAgentEvent(
+                            channel = MultiAgentEventChannel.TRACE,
+                            actorType = "orchestrator",
+                            actorKey = "mcp_selector_autonomy",
+                            role = "assistant",
+                            message = "MCP selector parse failed; applied autonomous fallback tool='${fallbackCall.toolName}'."
+                        )
+                    )
+                    rewrittenTools += tool.copy(paramsJson = fallbackCall.paramsJson)
+                } else {
+                    rewrittenTools += tool
+                }
                 continue
+            }
+            if (selection.action != MultiAgentMcpSelectionAction.MCP_CALL) {
+                val fallbackCall = buildAutonomousMcpFallback(
+                    request = request,
+                    step = step,
+                    originalTool = tool
+                )
+                if (fallbackCall != null) {
+                    onEvent(
+                        MultiAgentEvent(
+                            channel = MultiAgentEventChannel.TRACE,
+                            actorType = "orchestrator",
+                            actorKey = "mcp_selector_autonomy",
+                            role = "assistant",
+                            message = "Selector action=${selection.action}; applied autonomous fallback tool='${fallbackCall.toolName}'."
+                        )
+                    )
+                    rewrittenTools += tool.copy(paramsJson = fallbackCall.paramsJson)
+                    continue
+                }
             }
             when (selection.action) {
                 MultiAgentMcpSelectionAction.NEED_CLARIFICATION -> {
@@ -886,6 +1157,125 @@ internal class MultiAgentOrchestrator(
             kind = McpSelectionKind.CONTINUE,
             toolPlan = toolPlan.copy(tools = rewrittenTools)
         )
+    }
+
+    private fun buildAutonomousMcpFallback(
+        request: MultiAgentRequest,
+        step: MultiAgentPlanStep?,
+        originalTool: MultiAgentToolPlanItem
+    ): AutonomousMcpFallback? {
+        val availableTools = parseMcpCatalogToolNames(request.mcpToolsCatalog)
+        if (availableTools.isEmpty()) return null
+
+        val paramsObject = runCatching { json.parseToJsonElement(originalTool.paramsJson).jsonObject }.getOrNull()
+        val preferredToolName = paramsObject?.let { obj ->
+            sequenceOf("toolName", "tool_name")
+                .mapNotNull { key -> obj[key]?.jsonPrimitive?.contentOrNull?.trim()?.ifBlank { null } }
+                .firstOrNull()
+        }
+        if (!preferredToolName.isNullOrBlank() && availableTools.contains(preferredToolName)) {
+            return AutonomousMcpFallback(
+                toolName = preferredToolName,
+                paramsJson = normalizeMcpParamsForTool(preferredToolName, paramsObject, request.projectFolderPath, step)
+            )
+        }
+
+        val stepText = listOfNotNull(step?.title, step?.taskInput, originalTool.reason)
+            .joinToString("\n")
+            .lowercase()
+        val selectedTool = when {
+            stepText.contains("найд") && stepText.contains("файл") && availableTools.contains("explore_directory") ->
+                "explore_directory"
+
+            stepText.contains("структур") && availableTools.contains("explore_directory") ->
+                "explore_directory"
+
+            stepText.contains("прочита") && availableTools.contains("project_read_file") ->
+                "project_read_file"
+
+            stepText.contains("поиск") && stepText.contains("файл") && availableTools.contains("git_list_files") ->
+                "git_list_files"
+
+            availableTools.contains("git_list_files") -> "git_list_files"
+            availableTools.contains("explore_directory") -> "explore_directory"
+            availableTools.contains("project_read_file") -> "project_read_file"
+            else -> null
+        } ?: return null
+
+        return AutonomousMcpFallback(
+            toolName = selectedTool,
+            paramsJson = normalizeMcpParamsForTool(selectedTool, paramsObject, request.projectFolderPath, step)
+        )
+    }
+
+    private fun parseMcpCatalogToolNames(catalog: String): Set<String> {
+        return catalog.lineSequence()
+            .map { it.trim() }
+            .filter { it.startsWith("- tool:") }
+            .map { it.removePrefix("- tool:").trim() }
+            .filter { it.isNotBlank() }
+            .toSet()
+    }
+
+    private fun normalizeMcpParamsForTool(
+        toolName: String,
+        sourceParams: JsonObject?,
+        projectFolderPath: String,
+        step: MultiAgentPlanStep?
+    ): String {
+        val pathHint = extractPathHint(sourceParams, projectFolderPath)
+        return when (toolName) {
+            "explore_directory" -> buildJsonObject {
+                put("toolName", toolName)
+                putJsonObject("arguments") {
+                    put("repoPath", projectFolderPath)
+                    put("path", pathHint)
+                    put("includeFiles", true)
+                    put("includeDirectories", true)
+                    put("maxDepth", 20)
+                    put("maxEntries", 5000)
+                }
+            }.toString()
+
+            "git_list_files" -> buildJsonObject {
+                put("toolName", toolName)
+                putJsonObject("arguments") {
+                    put("repoPath", projectFolderPath)
+                    put("changedOnly", false)
+                    put("includeUntracked", true)
+                }
+            }.toString()
+
+            "project_read_file" -> buildJsonObject {
+                put("toolName", toolName)
+                putJsonObject("arguments") {
+                    put("repoPath", projectFolderPath)
+                    put("path", step?.taskInput?.substringAfter("TARGET:", "").orEmpty().trim().ifBlank { pathHint })
+                    put("maxBytes", 200000)
+                }
+            }.toString()
+
+            else -> {
+                val args = sourceParams?.get("arguments")
+                buildJsonObject {
+                    put("toolName", toolName)
+                    if (args != null) {
+                        put("arguments", args)
+                    } else {
+                        putJsonObject("arguments") {}
+                    }
+                }.toString()
+            }
+        }
+    }
+
+    private fun extractPathHint(sourceParams: JsonObject?, projectFolderPath: String): String {
+        if (sourceParams == null) return "."
+        val path = sequenceOf("directory_path", "directoryPath", "path")
+            .mapNotNull { key -> sourceParams[key]?.jsonPrimitive?.contentOrNull?.trim()?.ifBlank { null } }
+            .firstOrNull()
+            ?: return "."
+        return if (path.startsWith(projectFolderPath)) "." else path
     }
 
     private fun emitFallbackPolicyTrace(
@@ -1599,6 +1989,16 @@ internal class MultiAgentOrchestrator(
     private data class FilteredMcpPayload(
         val data: String,
         val diagnostic: String
+    )
+
+    private data class AutonomousMcpFallback(
+        val toolName: String,
+        val paramsJson: String
+    )
+
+    private data class PlanNormalizeResult(
+        val steps: List<MultiAgentPlanStep>,
+        val toolPlan: MultiAgentToolPlan?
     )
 
     private data class PreflightResult(

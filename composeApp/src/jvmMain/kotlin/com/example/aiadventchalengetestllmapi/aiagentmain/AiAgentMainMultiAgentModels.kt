@@ -62,6 +62,11 @@ internal enum class MultiAgentToolKind {
     MCP_CALL
 }
 
+internal enum class MultiAgentToolScope {
+    SINGLE_TARGET,
+    MULTI_TARGET
+}
+
 internal enum class MultiAgentToolFallbackPolicy {
     DEGRADE,
     FAIL
@@ -71,6 +76,7 @@ internal data class MultiAgentToolPlanItem(
     val toolKind: MultiAgentToolKind,
     val reason: String,
     val paramsJson: String,
+    val toolScope: MultiAgentToolScope = MultiAgentToolScope.SINGLE_TARGET,
     val stepIndex: Int? = null
 )
 
@@ -81,6 +87,21 @@ internal data class MultiAgentToolPlan(
     val fallbackPolicyDefaulted: Boolean = false
 )
 
+internal data class MultiAgentClarificationPair(
+    val question: String,
+    val answer: String
+)
+
+internal data class MultiAgentGlobalUserRequest(
+    val objective: String,
+    val constraints: List<String> = emptyList(),
+    val clarifications: List<MultiAgentClarificationPair> = emptyList(),
+    val assumptions: List<String> = emptyList(),
+    val taskMessages: List<String> = emptyList(),
+    val clarificationMessages: List<String> = emptyList(),
+    val agentQuestions: List<String> = emptyList()
+)
+
 internal data class MultiAgentPlanningDecision(
     val action: MultiAgentDecisionType,
     val reason: String,
@@ -88,7 +109,9 @@ internal data class MultiAgentPlanningDecision(
     val clarificationQuestion: String?,
     val impossibleReason: String?,
     val planSteps: List<MultiAgentPlanStep>,
-    val toolPlan: MultiAgentToolPlan?
+    val toolPlan: MultiAgentToolPlan?,
+    val extractedGlobalUserRequest: MultiAgentGlobalUserRequest? = null,
+    val toolingNotes: List<String> = emptyList()
 )
 
 internal enum class MultiAgentValidationOutcome {
@@ -124,7 +147,8 @@ internal data class MultiAgentRequest(
     val conversationContext: String = "",
     val pendingQuestion: String? = null,
     val isContinuation: Boolean = false,
-    val mcpToolsCatalog: String = ""
+    val mcpToolsCatalog: String = "",
+    val globalUserRequest: MultiAgentGlobalUserRequest? = null
 )
 
 internal enum class MultiAgentMcpSelectionAction {
