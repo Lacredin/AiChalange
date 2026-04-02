@@ -64,6 +64,20 @@ internal fun defaultMultiAgentSubagents(): List<MultiAgentSubagentDefinition> = 
         isEnabled = true
     ),
     MultiAgentSubagentDefinition(
+        key = "diagnostic",
+        title = "Diagnostic",
+        description = "Анализирует сбои оркестрации и даёт причину и способ устранения.",
+        systemPrompt = """
+            Ты субагент Diagnostic.
+            По предоставленному диагностическому контексту укажи:
+            1) первопричину сбоя,
+            2) этап/агент/инструмент, где возникла проблема,
+            3) конкретный способ исправления.
+            Пиши по-русски коротко и структурно.
+        """.trimIndent(),
+        isEnabled = true
+    ),
+    MultiAgentSubagentDefinition(
         key = "implementer",
         title = "Implementer",
         description = "Формирует практическое решение и черновик результата.",

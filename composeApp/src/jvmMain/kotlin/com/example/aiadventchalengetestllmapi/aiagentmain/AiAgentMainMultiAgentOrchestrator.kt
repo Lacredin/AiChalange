@@ -25,6 +25,9 @@ internal class MultiAgentOrchestrator(
         onStepReady: (MultiAgentStepExecution) -> Unit
     ): MultiAgentRunSummary {
         val enabledSubagents = request.subagents.filter { it.isEnabled }
+        val diagnosticSubagent = enabledSubagents.firstOrNull { it.key.equals("diagnostic", ignoreCase = true) }
+        var latestPlanningDecision: MultiAgentPlanningDecision? = null
+        val executedStepsSnapshot = mutableListOf<MultiAgentStepExecution>()
         if (enabledSubagents.isEmpty()) {
             return MultiAgentRunSummary(
                 runStatus = MultiAgentRunStatus.FAILED,
@@ -35,6 +38,7 @@ internal class MultiAgentOrchestrator(
             )
         }
 
+        try {
         onEvent(
             MultiAgentEvent(
                 channel = MultiAgentEventChannel.USER,
@@ -80,6 +84,7 @@ internal class MultiAgentOrchestrator(
                 planningDecision = null,
                 steps = emptyList()
             )
+        latestPlanningDecision = planningDecision
         onPlanningReady(planningDecision)
         emitFallbackPolicyTrace(planningDecision.toolPlan, onEvent, "initial")
         val mcpSelector = enabledSubagents.firstOrNull { it.key.equals("mcp_selector", ignoreCase = true) }
@@ -103,6 +108,7 @@ internal class MultiAgentOrchestrator(
             request = request,
             planningDecision = planningDecision,
             mcpSelector = mcpSelector,
+            diagnosticSubagent = diagnosticSubagent,
             callModel = callModel,
             onEvent = onEvent
         )
@@ -110,6 +116,7 @@ internal class MultiAgentOrchestrator(
             McpSelectionKind.CONTINUE -> {
                 if (initialSelection.toolPlan != planningDecision.toolPlan) {
                     planningDecision = planningDecision.copy(toolPlan = initialSelection.toolPlan)
+                    latestPlanningDecision = planningDecision
                     onPlanningReady(planningDecision)
                 }
             }
@@ -162,6 +169,7 @@ internal class MultiAgentOrchestrator(
             ) ?: break
 
             planningDecision = replanDecision
+            latestPlanningDecision = planningDecision
             onPlanningReady(planningDecision)
             emitFallbackPolicyTrace(planningDecision.toolPlan, onEvent, "replan#$replanAttempt")
 
@@ -184,6 +192,7 @@ internal class MultiAgentOrchestrator(
                 request = request,
                 planningDecision = planningDecision,
                 mcpSelector = mcpSelector,
+                diagnosticSubagent = diagnosticSubagent,
                 callModel = callModel,
                 onEvent = onEvent
             )
@@ -191,6 +200,7 @@ internal class MultiAgentOrchestrator(
                 McpSelectionKind.CONTINUE -> {
                     if (replanSelection.toolPlan != planningDecision.toolPlan) {
                         planningDecision = planningDecision.copy(toolPlan = replanSelection.toolPlan)
+                        latestPlanningDecision = planningDecision
                         onPlanningReady(planningDecision)
                     }
                 }
@@ -412,6 +422,8 @@ internal class MultiAgentOrchestrator(
                     message = "step_finish: status=done tool_call_refs=${stepToolCallRefs.filter { it > 0L }.joinToString(",")}"
                 )
                 stepsState += done
+                executedStepsSnapshot.clear()
+                executedStepsSnapshot += stepsState
                 onStepReady(done)
                 return@forEachIndexed
             }
@@ -460,6 +472,8 @@ internal class MultiAgentOrchestrator(
                     message = "step_finish: status=done tool_call_refs=${stepToolCallRefs.filter { it > 0L }.joinToString(",")}"
                 )
                 stepsState += done
+                executedStepsSnapshot.clear()
+                executedStepsSnapshot += stepsState
                 onStepReady(done)
                 return@forEachIndexed
             }
@@ -533,6 +547,8 @@ internal class MultiAgentOrchestrator(
                 message = "step_finish: status=done tool_call_refs=${stepToolCallRefs.filter { it > 0L }.joinToString(",")}"
             )
             stepsState += done
+            executedStepsSnapshot.clear()
+            executedStepsSnapshot += stepsState
             onStepReady(done)
         }
 
@@ -644,6 +660,8 @@ internal class MultiAgentOrchestrator(
             }
             stepsState.clear()
             stepsState += updatedSteps
+            executedStepsSnapshot.clear()
+            executedStepsSnapshot += stepsState
             val nextValidation = validate(
                 userRequest = request.userRequest,
                 planSteps = planningDecision.planSteps,
@@ -665,6 +683,25 @@ internal class MultiAgentOrchestrator(
             planningDecision = planningDecision,
             steps = stepsState
         )
+        } catch (error: Throwable) {
+            val readableReason = "Оркестратор прервал выполнение из-за внутренней ошибки. Проверьте trace-лог с диагностикой."
+            runDiagnosticSubagent(
+                request = request,
+                planningDecision = latestPlanningDecision,
+                steps = executedStepsSnapshot,
+                error = error,
+                diagnosticSubagent = diagnosticSubagent,
+                callModel = callModel,
+                onEvent = onEvent
+            )
+            return MultiAgentRunSummary(
+                runStatus = MultiAgentRunStatus.FAILED,
+                resolutionType = MultiAgentResolutionType.FAILED,
+                finalUserMessage = readableReason,
+                planningDecision = latestPlanningDecision,
+                steps = executedStepsSnapshot.toList()
+            )
+        }
     }
 
     private suspend fun replanForAvailableTools(
@@ -707,6 +744,7 @@ internal class MultiAgentOrchestrator(
         request: MultiAgentRequest,
         planningDecision: MultiAgentPlanningDecision,
         mcpSelector: MultiAgentSubagentDefinition?,
+        diagnosticSubagent: MultiAgentSubagentDefinition?,
         callModel: suspend (MultiAgentModelCall) -> String,
         onEvent: (MultiAgentEvent) -> Unit
     ): McpSelectionResult {
@@ -743,28 +781,57 @@ internal class MultiAgentOrchestrator(
                 mcpToolsCatalog = request.mcpToolsCatalog,
                 conversationContext = request.conversationContext
             )
-            val selectorRaw = callModel(
-                MultiAgentModelCall(
-                    messages = listOf(
-                        DeepSeekMessage(role = "system", content = mcpSelector.systemPrompt),
-                        DeepSeekMessage(role = "user", content = selectorPrompt)
-                    ),
-                    responseAsJson = true,
-                    temperature = 0.1,
-                    topP = 0.2,
-                    maxTokens = 1800
+            val selection = try {
+                val selectorRaw = callModel(
+                    MultiAgentModelCall(
+                        messages = listOf(
+                            DeepSeekMessage(role = "system", content = mcpSelector.systemPrompt),
+                            DeepSeekMessage(role = "user", content = selectorPrompt)
+                        ),
+                        responseAsJson = true,
+                        temperature = 0.1,
+                        topP = 0.2,
+                        maxTokens = 1800
+                    )
                 )
-            )
-            onEvent(
-                MultiAgentEvent(
-                    channel = MultiAgentEventChannel.TRACE,
-                    actorType = "subagent",
-                    actorKey = mcpSelector.key,
-                    role = "assistant",
-                    message = "MCP_SELECTOR_PROMPT:\n$selectorPrompt\n\nMCP_SELECTOR_RAW:\n$selectorRaw"
+                onEvent(
+                    MultiAgentEvent(
+                        channel = MultiAgentEventChannel.TRACE,
+                        actorType = "subagent",
+                        actorKey = mcpSelector.key,
+                        role = "assistant",
+                        message = "MCP_SELECTOR_PROMPT:\n$selectorPrompt\n\nMCP_SELECTOR_RAW:\n$selectorRaw"
+                    )
                 )
-            )
-            val selection = parser.parseMcpSelection(selectorRaw)
+                parser.parseMcpSelection(selectorRaw)
+            } catch (error: Throwable) {
+                onEvent(
+                    MultiAgentEvent(
+                        channel = MultiAgentEventChannel.TRACE,
+                        actorType = "orchestrator",
+                        actorKey = "mcp_selector_error",
+                        role = "assistant",
+                        message = "MCP selector failed: ${error::class.simpleName}: ${error.message.orEmpty()}"
+                    )
+                )
+                runDiagnosticSubagent(
+                    request = request,
+                    planningDecision = planningDecision,
+                    steps = emptyList(),
+                    error = error,
+                    diagnosticSubagent = diagnosticSubagent,
+                    callModel = callModel,
+                    onEvent = onEvent,
+                    extraContext = buildString {
+                        appendLine("phase=mcp_selector")
+                        appendLine("tool_reason=${tool.reason}")
+                        appendLine("tool_params=${tool.paramsJson}")
+                        appendLine("selector_prompt=")
+                        appendLine(selectorPrompt)
+                    }
+                )
+                null
+            }
             if (selection == null) {
                 rewrittenTools += tool
                 continue
@@ -1108,6 +1175,94 @@ internal class MultiAgentOrchestrator(
         } else {
             """{"status":"error","reason":"LOW_RELEVANCE","message":"RAG показал низкую релевантность"}"""
         }
+    }
+
+    private suspend fun runDiagnosticSubagent(
+        request: MultiAgentRequest,
+        planningDecision: MultiAgentPlanningDecision?,
+        steps: List<MultiAgentStepExecution>,
+        error: Throwable,
+        diagnosticSubagent: MultiAgentSubagentDefinition?,
+        callModel: suspend (MultiAgentModelCall) -> String,
+        onEvent: (MultiAgentEvent) -> Unit,
+        extraContext: String = ""
+    ) {
+        val stack = error.stackTraceToString().trim().take(12000)
+        val context = buildString {
+            appendLine("DIAGNOSTIC_CONTEXT")
+            appendLine("user_request=${request.userRequest}")
+            appendLine("project_path=${request.projectFolderPath}")
+            appendLine("conversation_context=")
+            appendLine(request.conversationContext.ifBlank { "(empty)" })
+            appendLine()
+            appendLine("planning_decision=")
+            appendLine(planningDecision?.toString() ?: "null")
+            appendLine()
+            appendLine("executed_steps=")
+            if (steps.isEmpty()) {
+                appendLine("- none")
+            } else {
+                steps.forEach { step ->
+                    appendLine("- #${step.step.index} ${step.step.assigneeKey} status=${step.status}")
+                    appendLine("  title=${step.step.title}")
+                    appendLine("  output=${step.output.take(1200)}")
+                    appendLine("  tool_call_refs=${step.toolCallRefs.joinToString(",")}")
+                }
+            }
+            appendLine()
+            if (extraContext.isNotBlank()) {
+                appendLine("extra_context=")
+                appendLine(extraContext)
+                appendLine()
+            }
+            appendLine("exception=${error::class.qualifiedName}: ${error.message.orEmpty()}")
+            appendLine("stacktrace=")
+            appendLine(stack)
+        }.trim()
+        onEvent(
+            MultiAgentEvent(
+                channel = MultiAgentEventChannel.TRACE,
+                actorType = "diagnostic",
+                actorKey = "diagnostic",
+                role = "assistant",
+                message = "DIAGNOSTIC_INPUT:\n$context"
+            )
+        )
+        if (diagnosticSubagent == null) return
+        val prompt = """
+            Проанализируй контекст сбоя и выдай:
+            1) первопричину,
+            2) точку отказа (этап/агент/инструмент),
+            3) конкретные шаги исправления.
+            Отвечай по-русски, кратко и структурно.
+            
+            $context
+        """.trimIndent()
+        val raw = runCatching {
+            callModel(
+                MultiAgentModelCall(
+                    messages = listOf(
+                        DeepSeekMessage(role = "system", content = diagnosticSubagent.systemPrompt),
+                        DeepSeekMessage(role = "user", content = prompt)
+                    ),
+                    responseAsJson = false,
+                    temperature = 0.1,
+                    topP = 0.3,
+                    maxTokens = 1800
+                )
+            )
+        }.getOrElse { diagnosticError ->
+            "Diagnostic subagent failed: ${diagnosticError::class.simpleName}: ${diagnosticError.message.orEmpty()}"
+        }
+        onEvent(
+            MultiAgentEvent(
+                channel = MultiAgentEventChannel.TRACE,
+                actorType = "diagnostic",
+                actorKey = diagnosticSubagent.key,
+                role = "assistant",
+                message = "DIAGNOSTIC_PROMPT:\n$prompt\n\nDIAGNOSTIC_RAW:\n$raw"
+            )
+        )
     }
 
     private fun emitSubagentTraceEvent(

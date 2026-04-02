@@ -1,12 +1,13 @@
 package com.example.aiadventchalengetestllmapi.aiagentmain
 
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.longOrNull
-import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
@@ -22,7 +23,7 @@ internal object MultiAgentParser {
             "IMPOSSIBLE" -> MultiAgentDecisionType.IMPOSSIBLE
             else -> return null
         }
-        val steps = root["plan_steps"]?.jsonArray.orEmpty().mapIndexedNotNull { index, item ->
+        val steps = root.arrayOrEmpty("plan_steps").mapIndexedNotNull { index, item ->
             val obj = item as? JsonObject ?: return@mapIndexedNotNull null
             val title = obj["title"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
             val assignee = obj["assignee_key"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
@@ -61,11 +62,11 @@ internal object MultiAgentParser {
             reworkInstruction = root["rework_instruction"]?.jsonPrimitive?.contentOrNull?.trim()?.ifBlank { null },
             clarificationQuestion = root["clarification_question"]?.jsonPrimitive?.contentOrNull?.trim()?.ifBlank { null },
             impossibleReason = root["impossible_reason"]?.jsonPrimitive?.contentOrNull?.trim()?.ifBlank { null },
-            toolCallIds = root["tool_call_ids"]?.jsonArray.orEmpty()
+            toolCallIds = root.arrayOrEmpty("tool_call_ids")
                 .mapNotNull { it.jsonPrimitive.longOrNull }
                 .filter { it > 0L }
                 .distinct(),
-            ragEvidence = root["rag_evidence"]?.jsonArray.orEmpty()
+            ragEvidence = root.arrayOrEmpty("rag_evidence")
                 .mapNotNull { it.jsonPrimitive.contentOrNull?.trim()?.ifBlank { null } }
                 .distinct()
         )
@@ -85,8 +86,8 @@ internal object MultiAgentParser {
             reason = root["reason"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty(),
             toolName = mcpCall?.get("toolName")?.jsonPrimitive?.contentOrNull?.trim()?.ifBlank { null },
             endpoint = mcpCall?.get("endpoint")?.jsonPrimitive?.contentOrNull?.trim()?.ifBlank { null },
-            arguments = mcpCall?.get("arguments")?.jsonObject,
-            clarificationQuestions = root["clarification_questions"]?.jsonArray.orEmpty()
+            arguments = mcpCall?.objectOrNull("arguments"),
+            clarificationQuestions = root.arrayOrEmpty("clarification_questions")
                 .mapNotNull { it.jsonPrimitive.contentOrNull?.trim()?.ifBlank { null } }
                 .distinct(),
             impossibleReason = root["impossible_reason"]?.jsonPrimitive?.contentOrNull?.trim()?.ifBlank { null }
@@ -102,7 +103,7 @@ internal object MultiAgentParser {
             "FAIL" -> MultiAgentToolFallbackPolicy.FAIL
             else -> MultiAgentToolFallbackPolicy.FAIL
         }
-        val tools = obj["tools"]?.jsonArray.orEmpty().mapNotNull { item ->
+        val tools = obj.arrayOrEmpty("tools").mapNotNull { item ->
             val toolObj = item as? JsonObject ?: return@mapNotNull null
             val kind = when (toolObj["tool_kind"]?.jsonPrimitive?.contentOrNull?.trim()?.uppercase()) {
                 "RAG_QUERY" -> MultiAgentToolKind.RAG_QUERY
@@ -110,7 +111,7 @@ internal object MultiAgentParser {
                 else -> return@mapNotNull null
             }
             val reason = toolObj["reason"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
-            val params = toolObj["params"]?.jsonObject ?: JsonObject(emptyMap())
+            val params = toolObj.objectOrNull("params") ?: JsonObject(emptyMap())
             MultiAgentToolPlanItem(
                 toolKind = kind,
                 reason = reason,
@@ -130,5 +131,14 @@ internal object MultiAgentParser {
         val trimmed = raw.trim()
         if (trimmed.isBlank()) return null
         return runCatching { multiAgentJson.parseToJsonElement(trimmed).jsonObject }.getOrNull()
+    }
+
+    private fun JsonObject.arrayOrEmpty(key: String): List<JsonElement> {
+        val value = this[key] ?: return emptyList()
+        return (value as? JsonArray).orEmpty()
+    }
+
+    private fun JsonObject.objectOrNull(key: String): JsonObject? {
+        return this[key] as? JsonObject
     }
 }
