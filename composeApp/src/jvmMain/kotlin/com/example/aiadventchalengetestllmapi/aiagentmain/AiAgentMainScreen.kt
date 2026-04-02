@@ -70,6 +70,8 @@ import com.example.aiadventchalengetestllmapi.BuildSecrets
 import com.example.aiadventchalengetestllmapi.RootScreen
 import com.example.aiadventchalengetestllmapi.aiagentmaindb.AiAgentMainDatabaseDriverFactory
 import com.example.aiadventchalengetestllmapi.aiagentmaindb.createAiAgentMainDatabase
+import com.example.aiadventchalengetestllmapi.embedinggenerationdb.EmbedingGenerationDatabaseDriverFactory
+import com.example.aiadventchalengetestllmapi.embedinggenerationdb.createEmbedingGenerationDatabase
 import com.example.aiadventchalengetestllmapi.mcp.McpToolInfo
 import com.example.aiadventchalengetestllmapi.mcp.RemoteMcpService
 import com.example.aiadventchalengetestllmapi.network.DeepSeekApi
@@ -100,332 +102,6 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
 import kotlinx.serialization.json.longOrNull
-
-private val streamStripRegex = Regex("""\s*\|\s*stream=(real|raw)""")
-private val epochStripRegex = Regex("""\s*\|\s*epoch=\d+""")
-private val lenientJson = Json { ignoreUnknownKeys = true }
-
-private fun tryParseJson(text: String): JsonElement? {
-    val trimmed = text.trim()
-    if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return null
-    return try {
-        lenientJson.parseToJsonElement(trimmed)
-    } catch (_: Exception) {
-        null
-    }
-}
-
-private fun tryParseJsonExecution(text: String): JsonElement? {
-    tryParseJson(text)?.let { return it }
-
-    val codeBlock = Regex("```(?:json)?\\s*([\\s\\S]*?)\\s*```", RegexOption.IGNORE_CASE)
-        .find(text)
-        ?.groupValues
-        ?.getOrNull(1)
-        ?.trim()
-    if (!codeBlock.isNullOrBlank()) {
-        tryParseJson(codeBlock)?.let { return it }
-    }
-
-    val start = text.indexOf('{').takeIf { it >= 0 } ?: return null
-    val end = text.lastIndexOf('}').takeIf { it > start } ?: return null
-    return tryParseJson(text.substring(start, end + 1))
-}
-
-private fun jsonElementToAny(value: JsonElement): Any? = when (value) {
-    JsonNull -> null
-    is JsonPrimitive -> when {
-        value.booleanOrNull != null -> value.boolean
-        value.intOrNull != null -> value.int
-        value.longOrNull != null -> value.long
-        value.doubleOrNull != null -> value.double
-        else -> value.contentOrNull
-    }
-    is JsonObject -> value.mapValues { (_, v) -> jsonElementToAny(v) }
-    is JsonArray -> value.map { jsonElementToAny(it) }
-}
-
-@Composable
-private fun JsonTreeView(element: JsonElement, indent: Int = 0) {
-    val pad = (indent * 16).dp
-    when (element) {
-        is JsonObject -> {
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                element.entries.forEach { (key, value) ->
-                    when (value) {
-                        is JsonObject, is JsonArray -> {
-                            Column(
-                                modifier = Modifier.padding(start = pad),
-                                verticalArrangement = Arrangement.spacedBy(2.dp)
-                            ) {
-                                Text(
-                                    text = "$key:",
-                                    fontWeight = FontWeight.Bold,
-                                    style = MaterialTheme.typography.bodySmall
-                                )
-                                JsonTreeView(value, indent + 1)
-                            }
-                        }
-                        else -> {
-                            Row(
-                                modifier = Modifier.padding(start = pad),
-                                horizontalArrangement = Arrangement.spacedBy(4.dp)
-                            ) {
-                                Text(
-                                    text = "$key:",
-                                    fontWeight = FontWeight.Bold,
-                                    style = MaterialTheme.typography.bodySmall
-                                )
-                                JsonPrimitiveText(value)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        is JsonArray -> {
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                element.forEachIndexed { index, value ->
-                    when (value) {
-                        is JsonObject, is JsonArray -> {
-                            Column(
-                                modifier = Modifier.padding(start = pad),
-                                verticalArrangement = Arrangement.spacedBy(2.dp)
-                            ) {
-                                Text(
-                                    text = "[$index]",
-                                    fontWeight = FontWeight.Bold,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
-                                )
-                                JsonTreeView(value, indent + 1)
-                            }
-                        }
-                        else -> {
-                            Row(
-                                modifier = Modifier.padding(start = pad),
-                                horizontalArrangement = Arrangement.spacedBy(4.dp)
-                            ) {
-                                Text(
-                                    text = "•",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
-                                )
-                                JsonPrimitiveText(value)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        is JsonPrimitive -> JsonPrimitiveText(element)
-        is JsonNull -> Text(
-            text = "—",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
-        )
-    }
-}
-
-@Composable
-private fun JsonPrimitiveText(element: JsonElement) {
-    val primitive = element as? JsonPrimitive ?: return
-    val boolVal = primitive.booleanOrNull
-    val text: String
-    val color: Color
-    when {
-        primitive is JsonNull -> {
-            text = "—"
-            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
-        }
-        boolVal != null -> {
-            text = if (boolVal) "✓" else "✗"
-            color = if (boolVal) Color(0xFF2E7D32) else Color(0xFFC62828)
-        }
-        else -> {
-            text = primitive.contentOrNull ?: "null"
-            color = MaterialTheme.colorScheme.onSurface
-        }
-    }
-    Text(
-        text = text,
-        style = MaterialTheme.typography.bodySmall,
-        color = color
-    )
-}
-
-private enum class AiAgentApi(
-    val label: String,
-    val envVar: String,
-    val defaultModel: String,
-    val supportedModels: List<String>
-) {
-    DeepSeek(
-        label = "DeepSeek",
-        envVar = "DEEPSEEK_API_KEY",
-        defaultModel = "deepseek-chat",
-        supportedModels = listOf("deepseek-chat", "deepseek-reasoner")
-    ),
-    OpenAI(
-        label = "OpenAI",
-        envVar = "OPENAI_API_KEY",
-        defaultModel = "gpt-4o-mini",
-        supportedModels = listOf("gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1", "o3-mini")
-    ),
-    GigaChat(
-        label = "GigaChat",
-        envVar = "GIGACHAT_ACCESS_TOKEN",
-        defaultModel = "GigaChat-2",
-        supportedModels = listOf("GigaChat-2", "GigaChat-2-Pro", "GigaChat-2-Max")
-    ),
-    ProxyOpenAI(
-        label = "ProxyAPI (OpenAI)",
-        envVar = "PROXYAPI_API_KEY",
-        defaultModel = "openai/gpt-4o-mini",
-        supportedModels = listOf(
-            "openai/gpt-5.2",
-            "openai/gpt-4o-mini",
-            "openai/gpt-4o",
-            "openai/gpt-4.1-mini",
-            "openai/gpt-4.1",
-            "openai/o3-mini",
-            "anthropic/claude-sonnet-4-6",
-            "anthropic/claude-sonnet-4-5",
-            "anthropic/claude-opus-4-6",
-            "anthropic/claude-3-7-sonnet-20250219"
-        )
-    ),
-    LocalLlm(
-        label = "Локальная LLM",
-        envVar = "LOCAL_LLM_API_KEY",
-        defaultModel = "llama3.1:8b",
-        supportedModels = listOf("llama3.1:8b", "gemma2:2b", "qwen2.5:7b")
-    )
-}
-
-private enum class AgentState { Idle, Planning, Execution, Checking, Done }
-
-private data class ValidationFailureInfo(
-    val problem: String,
-    val failedStepId: Int,
-    val retryFromStepId: Int,
-    val proposedSolution: String,
-    val stepDetectionSource: String
-)
-
-private data class ExecutionToolRequest(
-    val toolName: String,
-    val endpoint: String?,
-    val reason: String,
-    val arguments: Map<String, Any?>
-)
-
-private data class AiAgentMessage(
-    val text: String,
-    val isUser: Boolean,
-    val paramsInfo: String,
-    val stream: AiAgentStream,
-    val epoch: Int,
-    val createdAt: Long
-)
-
-private data class LongTermMemoryEntry(
-    val id: Long,
-    val key: String,
-    val value: String,
-    val createdAt: Long,
-    val updatedAt: Long
-)
-
-private data class InvariantEntry(
-    val id: Long,
-    val key: String,
-    val value: String,
-    val createdAt: Long,
-    val updatedAt: Long
-)
-
-private enum class AiAgentStream { Real, Raw }
-
-private data class AiAgentChatItem(val id: Long, val title: String)
-
-private data class AiAgentBranchItem(
-    val number: Int,
-    val messages: SnapshotStateList<AiAgentMessage>
-)
-
-private data class McpServerOption(
-    val title: String,
-    val url: String
-)
-
-private val mcpServerOptions = listOf(
-    McpServerOption(
-        title = "Exa MCP",
-        url = "https://mcp.exa.ai/mcp"
-    ),
-    McpServerOption(
-        title = "Local MCP (127.0.0.1)",
-        url = "http://127.0.0.1:8080/mcp"
-    )
-)
-
-private fun AiAgentMessage.displayParamsInfo(): String =
-    paramsInfo
-        .replace(streamStripRegex, "")
-        .replace(epochStripRegex, "")
-
-private fun aiAgentReadApiKey(envVar: String): String {
-    if (envVar == "LOCAL_LLM_API_KEY") return "local-llm"
-    val fromBuildSecrets = BuildSecrets.apiKeyFor(envVar).trim()
-    if (fromBuildSecrets.isNotEmpty()) return fromBuildSecrets
-    return System.getenv(envVar)?.trim().orEmpty()
-}
-
-internal object AiAgentMainScreenTheme {
-    val primary = Color(0xFFE65100)
-    val onPrimary = Color(0xFFFFFFFF)
-    val primaryContainer = Color(0xFFFFE0B2)
-    val onPrimaryContainer = Color(0xFF4A1800)
-    val secondary = Color(0xFFBF360C)
-    val onSecondary = Color(0xFFFFFFFF)
-    val secondaryContainer = Color(0xFFFFF3E0)
-    val onSecondaryContainer = Color(0xFF3E1000)
-    val background = Color(0xFFFFFBF5)
-    val onBackground = Color(0xFF1A0800)
-    val surface = Color(0xFFFFFFFF)
-    val onSurface = Color(0xFF1A0800)
-    val surfaceVariant = Color(0xFFFFF3E0)
-    val onSurfaceVariant = Color(0xFF4A1800)
-    val outline = Color(0xFFFFCC80)
-    val userBubble = Color(0xFFC47A52)
-    val onUserBubble = Color(0xFFFFFFFF)
-    val assistantBubble = Color(0xFFE2C9A8)
-    val onAssistantBubble = Color(0xFF2D0F00)
-    val divider = Color(0xFFFFE0B2)
-    val topBarContainer = Color(0xFFFFF3E0)
-    val topBarContent = Color(0xFF6D2B00)
-
-    fun colorScheme() = lightColorScheme(
-        primary = primary,
-        onPrimary = onPrimary,
-        primaryContainer = primaryContainer,
-        onPrimaryContainer = onPrimaryContainer,
-        secondary = secondary,
-        onSecondary = onSecondary,
-        secondaryContainer = secondaryContainer,
-        onSecondaryContainer = onSecondaryContainer,
-        background = background,
-        onBackground = onBackground,
-        surface = surface,
-        onSurface = onSurface,
-        surfaceVariant = surfaceVariant,
-        onSurfaceVariant = onSurfaceVariant,
-        outline = outline,
-        error = Color(0xFFBA1A1A),
-        onError = Color(0xFFFFFFFF)
-    )
-}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -458,11 +134,14 @@ private fun AiAgentMainChat(
     val remoteMcpService = remember { RemoteMcpService() }
     val database = remember { createAiAgentMainDatabase(AiAgentMainDatabaseDriverFactory()) }
     val queries = remember(database) { database.chatHistoryQueries }
+    val embDb = remember { createEmbedingGenerationDatabase(EmbedingGenerationDatabaseDriverFactory()) }
+    val embQueries = remember(embDb) { embDb.embeddingChunksQueries }
 
     val chats = remember { mutableStateListOf<AiAgentChatItem>() }
     val listState = rememberLazyListState()
     val inputFocusRequester = remember { FocusRequester() }
     var inputText by remember { mutableStateOf(TextFieldValue("")) }
+    var isAgentCommandMenuExpanded by remember { mutableStateOf(false) }
     var screensMenuExpanded by remember { mutableStateOf(false) }
     var selectedApi by remember { mutableStateOf(AiAgentApi.DeepSeek) }
     var apiSelectorExpanded by remember { mutableStateOf(false) }
@@ -474,6 +153,7 @@ private fun AiAgentMainChat(
     var isMemoryPanelVisible by remember { mutableStateOf(false) }
     var isMcpPanelVisible by remember { mutableStateOf(false) }
     var isMcpEnabled by remember { mutableStateOf(false) }
+    var isRagEnabled by remember { mutableStateOf(true) }
     val mcpServerEnabled = remember {
         mutableStateMapOf<String, Boolean>().apply {
             mcpServerOptions.forEach { put(it.url, false) }
@@ -504,11 +184,13 @@ private fun AiAgentMainChat(
 
     // Branching
     val branchesByChat = remember { mutableStateMapOf<Long, SnapshotStateList<AiAgentBranchItem>>() }
+    val regularMessagesByChat = remember { mutableStateMapOf<Long, SnapshotStateList<AiAgentMessage>>() }
     val branchCounterByChat = remember { mutableStateMapOf<Long, Int>() }
     val branchVisibilityByChat = remember { mutableStateMapOf<Long, Boolean>() }
     var selectedBranchNumber by remember { mutableStateOf<Int?>(null) }
     var isBranchingEnabled by remember { mutableStateOf(false) }
     val branchNames = remember { mutableStateMapOf<Int, String>() }
+    val multiAgentTraceEventsByChat = remember { mutableStateMapOf<Long, SnapshotStateList<MultiAgentTraceEventRecord>>() }
 
     // Long-term memory
     var selectedProfileId by remember { mutableStateOf<Long?>(null) }
@@ -528,10 +210,21 @@ private fun AiAgentMainChat(
     var invariantValueInput by remember { mutableStateOf("") }
     var isInvariantFormVisible by remember { mutableStateOf(false) }
     var isInvariantsEnabled by remember { mutableStateOf(true) }
+    var isStateMachineEnabled by remember { mutableStateOf(true) }
     var invariantViolations by remember { mutableStateOf<List<String>>(emptyList()) }
     var invariantViolationPreviousState by remember { mutableStateOf(AgentState.Idle) }
     var planInvariantCheckFailed by remember { mutableStateOf(false) }
     var planInvariantViolationByAi by remember { mutableStateOf(false) }
+    var agentModeState by remember { mutableStateOf(AgentModeState()) }
+    var isMultiAgentEnabled by remember { mutableStateOf(false) }
+    var isMultiAgentTraceMode by remember { mutableStateOf(false) }
+    var isMultiAgentSettingsVisible by remember { mutableStateOf(false) }
+    var hasMultiAgentMcpRefreshedThisSession by remember { mutableStateOf(false) }
+    val multiAgentSubagents = remember { mutableStateListOf<MultiAgentSubagentDefinition>() }
+    val agentHelpCommandUseCase = remember { AgentHelpCommandUseCase() }
+    val agentPrReviewUseCase = remember { AgentPrReviewUseCase() }
+    val agentAuthTokenUseCase = remember { AgentAuthTokenUseCase(remoteMcpService) }
+    val multiAgentOrchestrator = remember { MultiAgentOrchestrator() }
 
     // State machine
     var agentState by remember { mutableStateOf(AgentState.Idle) }
@@ -551,6 +244,7 @@ private fun AiAgentMainChat(
     var validationRecoveryAttempt by remember { mutableStateOf(0) }
     var isPaused by remember { mutableStateOf(false) }
     var planClarificationNeeded by remember { mutableStateOf<String?>(null) }
+    var startPlanningPhaseHandler: (() -> Unit)? = null
 
     // ─── DB helpers ────────────────────────────────────────────────────────────
 
@@ -570,6 +264,16 @@ private fun AiAgentMainChat(
         queries.upsertAppSetting(
             setting_key = key,
             setting_value = if (value) "1" else "0"
+        )
+    }
+
+    fun appSettingString(key: String, default: String = ""): String =
+        queries.selectAppSettingByKey(setting_key = key).executeAsOneOrNull()?.setting_value ?: default
+
+    fun saveAppSettingString(key: String, value: String) {
+        queries.upsertAppSetting(
+            setting_key = key,
+            setting_value = value
         )
     }
 
@@ -609,11 +313,239 @@ private fun AiAgentMainChat(
         )
     }
 
+    fun loadRegularMessagesForChat(chatId: Long): SnapshotStateList<AiAgentMessage> {
+        val messages = queries.selectMessagesByChat(chatId).executeAsList().map { row ->
+            AiAgentMessage(
+                text = row.message,
+                isUser = row.role == "user",
+                paramsInfo = row.params_info,
+                stream = AiAgentStream.Raw,
+                epoch = 0,
+                createdAt = row.created_at
+            )
+        }
+        return mutableStateListOf<AiAgentMessage>().also { it += messages }
+    }
+
+    fun appendMessageToRegularChat(chatId: Long, message: AiAgentMessage) {
+        queries.insertMessage(
+            chat_id = chatId,
+            api = selectedApi.label,
+            model = modelInput.trim().ifEmpty { selectedApi.defaultModel },
+            role = if (message.isUser) "user" else "assistant",
+            message = message.text,
+            params_info = message.paramsInfo,
+            created_at = message.createdAt
+        )
+    }
+
+    fun loadMultiAgentTraceEventsForChat(chatId: Long): SnapshotStateList<MultiAgentTraceEventRecord> {
+        val rows = queries.selectMultiAgentEventsByChat(chat_id = chatId).executeAsList()
+        val records = rows.map { row ->
+            MultiAgentTraceEventRecord(
+                id = row.id,
+                runId = row.run_id,
+                chatId = row.chat_id,
+                channel = if (row.channel.equals("user", ignoreCase = true)) {
+                    MultiAgentEventChannel.USER
+                } else {
+                    MultiAgentEventChannel.TRACE
+                },
+                actorType = row.actor_type,
+                actorKey = row.actor_key,
+                role = row.role,
+                message = row.message,
+                metadataJson = row.metadata_json,
+                createdAt = row.created_at
+            )
+        }
+        return mutableStateListOf<MultiAgentTraceEventRecord>().also { it += records }
+    }
+
+    fun refreshMultiAgentSubagents() {
+        val fromDb = queries.selectAllMultiAgentSubagents().executeAsList().map { row ->
+            MultiAgentSubagentDefinition(
+                key = row.agent_key,
+                title = row.title,
+                description = row.description,
+                systemPrompt = row.system_prompt,
+                isEnabled = row.is_enabled == 1L
+            )
+        }
+        multiAgentSubagents.clear()
+        multiAgentSubagents += fromDb
+    }
+
+    fun ensureDefaultMultiAgentSubagents() {
+        val existing = queries.selectAllMultiAgentSubagents().executeAsList()
+        val existingKeys = existing.map { it.agent_key.lowercase() }.toSet()
+        val now = System.currentTimeMillis()
+        defaultMultiAgentSubagents().forEach { subagent ->
+            if (existingKeys.contains(subagent.key.lowercase())) return@forEach
+            queries.insertMultiAgentSubagent(
+                agent_key = subagent.key,
+                title = subagent.title,
+                description = subagent.description,
+                is_enabled = if (subagent.isEnabled) 1 else 0,
+                system_prompt = subagent.systemPrompt,
+                created_at = now,
+                updated_at = now
+            )
+        }
+    }
+
+    fun updateMultiAgentSubagentEnabled(agentKey: String, enabled: Boolean) {
+        queries.updateMultiAgentSubagentEnabledByKey(
+            is_enabled = if (enabled) 1 else 0,
+            updated_at = System.currentTimeMillis(),
+            agent_key = agentKey
+        )
+        refreshMultiAgentSubagents()
+    }
+
+    fun appendMultiAgentEvent(
+        chatId: Long,
+        runId: Long?,
+        event: MultiAgentEvent
+    ) {
+        val now = System.currentTimeMillis()
+        queries.insertMultiAgentEvent(
+            run_id = runId,
+            chat_id = chatId,
+            channel = event.channel.name.lowercase(),
+            actor_type = event.actorType,
+            actor_key = event.actorKey,
+            role = event.role,
+            message = event.message,
+            metadata_json = event.metadataJson,
+            created_at = now
+        )
+        val traceEvents = multiAgentTraceEventsByChat.getOrPut(chatId) { mutableStateListOf() }
+        val traceEvent = MultiAgentTraceEventRecord(
+            id = null,
+            runId = runId,
+            chatId = chatId,
+            channel = event.channel,
+            actorType = event.actorType,
+            actorKey = event.actorKey,
+            role = event.role,
+            message = event.message,
+            metadataJson = event.metadataJson,
+            createdAt = now
+        )
+        traceEvents += traceEvent
+    }
+
+    fun buildMultiAgentRunConversationContext(runId: Long): String {
+        val events = queries.selectMultiAgentEventsByRun(run_id = runId).executeAsList()
+        val steps = queries.selectMultiAgentStepsByRun(run_id = runId).executeAsList()
+        return buildString {
+            appendLine("Run #$runId")
+            appendLine("Events:")
+            if (events.isEmpty()) {
+                appendLine("- нет событий")
+            } else {
+                events.takeLast(120).forEach { event ->
+                    appendLine("[${event.channel}] ${event.actor_type}:${event.actor_key} (${event.role})")
+                    appendLine(event.message)
+                    appendLine()
+                }
+            }
+            appendLine("Steps:")
+            if (steps.isEmpty()) {
+                appendLine("- нет шагов")
+            } else {
+                steps.forEach { step ->
+                    appendLine("#${step.step_index} [${step.status}] ${step.assignee_agent_key}: ${step.title}")
+                    if (step.input_payload.isNotBlank()) appendLine("input: ${step.input_payload}")
+                    if (step.output_payload.isNotBlank()) appendLine("output: ${step.output_payload}")
+                    if (step.validation_note.isNotBlank()) appendLine("note: ${step.validation_note}")
+                    appendLine()
+                }
+            }
+        }.trim()
+    }
+
+    fun buildRegularConversationContext(messages: List<AiAgentMessage>): String {
+        return messages.takeLast(20).joinToString("\n") { msg ->
+            val role = if (msg.isUser) "user" else "assistant"
+            "$role: ${msg.text}"
+        }
+    }
+
+    fun buildGlobalUserRequest(messages: List<AiAgentMessage>, fallbackObjective: String): MultiAgentGlobalUserRequest {
+        val multiAgentMessages = messages.filter { it.paramsInfo.startsWith("stage=multiagent") }
+        val source = if (multiAgentMessages.isNotEmpty()) multiAgentMessages else messages
+        val conversation = source.takeLast(60).map { message ->
+            MultiAgentConversationMessage(
+                role = if (message.isUser) MultiAgentConversationRole.USER else MultiAgentConversationRole.AGENT,
+                text = message.text
+            )
+        }
+        return MultiAgentUserRequestExtractor.extract(
+            conversation = conversation,
+            fallbackObjective = fallbackObjective
+        )
+    }
+
+    fun escapeJsonValue(raw: String): String =
+        raw.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")
+
+    fun insertMultiAgentToolCall(log: MultiAgentToolCallLog): Long {
+        queries.insertMultiAgentToolCall(
+            run_id = log.runId,
+            step_id = log.stepId,
+            tool_kind = log.toolKind.name,
+            request_payload = log.requestPayload,
+            response_payload = log.responsePayload,
+            status = log.status,
+            error_code = log.errorCode,
+            error_message = log.errorMessage,
+            latency_ms = log.latencyMs,
+            created_at = System.currentTimeMillis()
+        )
+        val insertedId = queries.selectLastInsertedMultiAgentToolCallId().executeAsOne()
+        if (insertedId > 0L) return insertedId
+        return queries.selectMultiAgentToolCallsByRun(run_id = log.runId)
+            .executeAsList()
+            .lastOrNull()
+            ?.id
+            ?.takeIf { it > 0L }
+            ?: 0L
+    }
+
     fun websocketChatKey(serverUrl: String, toolName: String): String =
         "${serverUrl.trim().lowercase()}::${toolName.trim().lowercase()}"
 
     fun websocketChatTitle(serverTitle: String, toolName: String): String =
         "WebSocket • $serverTitle • $toolName"
+
+    suspend fun buildRagPayloadForPrompt(query: String, forceEnabled: Boolean = false): AiAgentMainRagPayload? {
+        if ((!isRagEnabled && !forceEnabled) || query.isBlank()) return null
+        val rows = embQueries.selectAll().executeAsList().map { row ->
+            AiAgentMainEmbeddingChunkRecord(
+                source = row.source,
+                title = row.title,
+                section = row.section,
+                chunkId = row.chunk_id,
+                strategy = row.strategy,
+                chunkText = row.chunk_text,
+                embeddingJson = row.embedding_json
+            )
+        }
+        return buildAiAgentMainRagPayload(query = query, chunks = rows)
+    }
+
+    fun loadAgentRagCatalog(): AgentRagCatalog {
+        val sources = embQueries.selectAll().executeAsList().map { row ->
+            AgentRagSourceMeta(
+                title = row.title,
+                section = row.section,
+                source = row.source
+            )
+        }.distinctBy { "${it.title}|${it.section}|${it.source}" }
+        return AgentRagCatalog(sources = sources)
+    }
 
     fun ensureWebSocketLogChatId(server: McpServerOption, toolName: String): Long {
         val key = websocketChatKey(server.url, toolName)
@@ -1255,10 +1187,13 @@ private fun AiAgentMainChat(
         val model = modelInput.trim().ifEmpty { requestApi.defaultModel }
         val apiKey = aiAgentReadApiKey(requestApi.envVar)
         if (apiKey.isBlank()) error("Нет API ключа. Проверьте ${requestApi.envVar}")
-        val promptText = PLANNING_PROMPT_TEMPLATE.replace("{user_query}", userQuery)
+        val ragPayload = buildRagPayloadForPrompt(userQuery)
+        val basePrompt = PLANNING_PROMPT_TEMPLATE.replace("{user_query}", userQuery)
+        val promptText = if (ragPayload == null) basePrompt else "$basePrompt\n\n${ragPayload.promptContext}"
         val messages = buildList {
             buildLtmSystemMessage()?.let { add(it) }
             buildMcpSystemMessageCached()?.let { add(it) }
+            ragPayload?.let { add(DeepSeekMessage(role = "system", content = it.promptContext)) }
             add(DeepSeekMessage(role = "user", content = promptText))
         }
         val request = DeepSeekChatRequest(
@@ -1291,14 +1226,21 @@ private fun AiAgentMainChat(
         val model = modelInput.trim().ifEmpty { requestApi.defaultModel }
         val apiKey = aiAgentReadApiKey(requestApi.envVar)
         if (apiKey.isBlank()) error("Нет API ключа. Проверьте ${requestApi.envVar}")
-        val promptText = CLARIFICATION_FOLLOW_UP_PROMPT_TEMPLATE
+        val ragPayload = buildRagPayloadForPrompt(
+            listOf(originalUserQuery, clarificationQuestion, userClarificationResponse)
+                .filter { it.isNotBlank() }
+                .joinToString("\n")
+        )
+        val basePrompt = CLARIFICATION_FOLLOW_UP_PROMPT_TEMPLATE
             .replace("{original_user_query}", originalUserQuery)
             .replace("{clarification_question}", clarificationQuestion)
             .replace("{user_clarification_response}", userClarificationResponse)
             .replace("{available_tools_formatted}", buildMcpToolsContextCached())
+        val promptText = if (ragPayload == null) basePrompt else "$basePrompt\n\n${ragPayload.promptContext}"
         val messages = buildList {
             buildLtmSystemMessage()?.let { add(it) }
             buildMcpSystemMessageCached()?.let { add(it) }
+            ragPayload?.let { add(DeepSeekMessage(role = "system", content = it.promptContext)) }
             add(DeepSeekMessage(role = "user", content = promptText))
         }
         val request = DeepSeekChatRequest(
@@ -1349,9 +1291,11 @@ private fun AiAgentMainChat(
         val promptText = PLAN_EDIT_PROMPT_TEMPLATE
             .replace("{original_plan_json}", originalPlanJson)
             .replace("{user_edit_text}", userEditText)
+        val ragPayload = buildRagPayloadForPrompt(promptText)
         val messages = buildList {
             buildLtmSystemMessage()?.let { add(it) }
             buildMcpSystemMessageCached()?.let { add(it) }
+            ragPayload?.let { add(DeepSeekMessage(role = "system", content = it.promptContext)) }
             add(DeepSeekMessage(role = "user", content = promptText))
         }
         val request = DeepSeekChatRequest(
@@ -1380,9 +1324,11 @@ private fun AiAgentMainChat(
         val model = modelInput.trim().ifEmpty { requestApi.defaultModel }
         val apiKey = aiAgentReadApiKey(requestApi.envVar)
         if (apiKey.isBlank()) error("Нет API ключа. Проверьте ${requestApi.envVar}")
+        val ragPayload = buildRagPayloadForPrompt(userMessageText)
         val messages = buildList {
             buildLtmSystemMessage()?.let { add(it) }
             buildMcpSystemMessageCached()?.let { add(it) }
+            ragPayload?.let { add(DeepSeekMessage(role = "system", content = it.promptContext)) }
             add(DeepSeekMessage(role = "user", content = userMessageText))
         }
         val request = DeepSeekChatRequest(model = model, messages = messages)
@@ -1397,6 +1343,870 @@ private fun AiAgentMainChat(
             .ifEmpty { "Пустой ответ от ${requestApi.label}." }
     }
 
+    suspend fun callApiWithHistory(history: List<AiAgentMessage>): String {
+        val requestApi = selectedApi
+        val model = modelInput.trim().ifEmpty { requestApi.defaultModel }
+        val apiKey = aiAgentReadApiKey(requestApi.envVar)
+        if (apiKey.isBlank()) error("Нет API ключа. Проверьте ${requestApi.envVar}")
+        val latestUserQuery = history.lastOrNull { it.isUser }?.text.orEmpty()
+        val ragPayload = buildRagPayloadForPrompt(latestUserQuery)
+        val messages = buildList {
+            buildLtmSystemMessage()?.let { add(it) }
+            buildMcpSystemMessageCached()?.let { add(it) }
+            ragPayload?.let { add(DeepSeekMessage(role = "system", content = it.promptContext)) }
+            history.forEach { message ->
+                add(
+                    DeepSeekMessage(
+                        role = if (message.isUser) "user" else "assistant",
+                        content = message.text
+                    )
+                )
+            }
+        }
+        val request = DeepSeekChatRequest(model = model, messages = messages)
+        val response = when (requestApi) {
+            AiAgentApi.DeepSeek -> deepSeekApi.createChatCompletionStreaming(apiKey = apiKey, request = request, onChunk = {})
+            AiAgentApi.OpenAI -> openAiApi.createChatCompletionStreaming(apiKey = apiKey, request = request, onChunk = {})
+            AiAgentApi.GigaChat -> gigaChatApi.createChatCompletionStreaming(accessToken = apiKey, request = request, onChunk = {})
+            AiAgentApi.ProxyOpenAI -> proxyOpenAiApi.createChatCompletionStreaming(apiKey = apiKey, request = request, onChunk = {})
+            AiAgentApi.LocalLlm -> localLlmApi.createChatCompletionStreaming(request = request, onChunk = {})
+        }
+        return response.choices.firstOrNull()?.message?.content?.trim().orEmpty()
+            .ifEmpty { "Пустой ответ от ${requestApi.label}." }
+    }
+
+    fun updateInputText(next: TextFieldValue) {
+        inputText = next
+        isAgentCommandMenuExpanded = shouldShowAgentCommandMenu(
+            text = next.text,
+            isAgentModeEnabled = agentModeState.isEnabled
+        )
+    }
+
+    fun appendRegularMessage(chatId: Long, message: AiAgentMessage) {
+        val regularMessages = regularMessagesByChat.getOrPut(chatId) { loadRegularMessagesForChat(chatId) }
+        regularMessages += message
+        appendMessageToRegularChat(chatId, message)
+    }
+
+    fun sendRegularChatMessage(messageText: String = inputText.text.trim()) {
+        val chatId = activeChatId ?: return
+        val trimmed = messageText.trim()
+        if (trimmed.isEmpty() || isLoading) return
+
+        val regularMessages = regularMessagesByChat.getOrPut(chatId) { loadRegularMessagesForChat(chatId) }
+        isBranchingEnabled = false
+        selectedBranchNumber = null
+        agentState = AgentState.Idle
+        planClarificationNeeded = null
+
+        val userMsg = AiAgentMessage(
+            text = trimmed,
+            isUser = true,
+            paramsInfo = "stage=chat",
+            stream = AiAgentStream.Raw,
+            epoch = 0,
+            createdAt = System.currentTimeMillis()
+        )
+        regularMessages += userMsg
+        appendMessageToRegularChat(chatId, userMsg)
+        updateInputText(TextFieldValue(""))
+
+        scope.launch {
+            val sessionId = chatSessionId
+            isLoading = true
+            val result = try {
+                isErrorState = false
+                callApiWithHistory(regularMessages.toList())
+            } catch (e: Exception) {
+                isErrorState = true
+                "Request failed: ${e.message ?: "unknown error"}"
+            }
+            if (sessionId != chatSessionId) { isLoading = false; return@launch }
+
+            val respMsg = AiAgentMessage(
+                text = result,
+                isUser = false,
+                paramsInfo = "stage=chat",
+                stream = AiAgentStream.Raw,
+                epoch = 0,
+                createdAt = System.currentTimeMillis()
+            )
+            regularMessages += respMsg
+            appendMessageToRegularChat(chatId, respMsg)
+            isLoading = false
+        }
+    }
+
+    val multiAgentMcpCoordinator = remember {
+        AiAgentMainMultiAgentMcpCoordinator(
+            allServersProvider = { mcpServerOptions },
+            toolsProvider = { serverUrl -> mcpServerTools[serverUrl].orEmpty() },
+            toolInfosProvider = { serverUrl -> mcpServerToolInfos[serverUrl].orEmpty() },
+            errorProvider = { serverUrl -> mcpServerErrors[serverUrl] },
+            refreshServerTools = { serverUrl -> refreshMcpServerTools(serverUrl) },
+            endpointMatcher = { endpoint, serverUrl -> endpointMatchesServer(endpoint, serverUrl) },
+            ragChunkCountProvider = { embQueries.selectAll().executeAsList().size },
+            isSessionRefreshed = { hasMultiAgentMcpRefreshedThisSession },
+            markSessionRefreshed = { refreshed -> hasMultiAgentMcpRefreshedThisSession = refreshed }
+        )
+    }
+
+    fun sendMultiAgentMessage(messageText: String = inputText.text.trim()) {
+        val chatId = activeChatId ?: return
+        val trimmed = messageText.trim()
+        if (trimmed.isEmpty() || isLoading) return
+
+        val regularMessages = regularMessagesByChat.getOrPut(chatId) { loadRegularMessagesForChat(chatId) }
+        isBranchingEnabled = false
+        selectedBranchNumber = null
+        agentState = AgentState.Idle
+        planClarificationNeeded = null
+
+        val userMsg = AiAgentMessage(
+            text = trimmed,
+            isUser = true,
+            paramsInfo = "stage=multiagent|user",
+            stream = AiAgentStream.Raw,
+            epoch = 0,
+            createdAt = System.currentTimeMillis()
+        )
+        regularMessages += userMsg
+        appendMessageToRegularChat(chatId, userMsg)
+        updateInputText(TextFieldValue(""))
+
+        scope.launch {
+            val sessionId = chatSessionId
+            isLoading = true
+            var runId: Long? = null
+            var isContinuationRun = false
+            var pendingQuestion: String? = null
+            val stepRowIdByIndex = mutableMapOf<Int, Long>()
+            val result = try {
+                isErrorState = false
+                val now = System.currentTimeMillis()
+                val latestRun = queries.selectLatestMultiAgentRunByChat(chat_id = chatId).executeAsOneOrNull()
+                val canResume = latestRun != null &&
+                    latestRun.status.equals(MultiAgentRunStatus.WAITING_USER.name.lowercase(), ignoreCase = true) &&
+                    latestRun.pending_question.isNotBlank()
+
+                if (canResume) {
+                    runId = latestRun!!.id
+                    isContinuationRun = true
+                    pendingQuestion = latestRun.pending_question
+                    queries.updateMultiAgentRunStatus(
+                        status = MultiAgentRunStatus.RUNNING.name.lowercase(),
+                        resolution_type = "continuation",
+                        pending_question = "",
+                        state_json = """{"phase":"resume_started"}""",
+                        updated_at = now,
+                        id = runId!!
+                    )
+                    appendMultiAgentEvent(
+                        chatId = chatId,
+                        runId = runId,
+                        event = MultiAgentEvent(
+                            channel = MultiAgentEventChannel.USER,
+                            actorType = "orchestrator",
+                            actorKey = "orchestrator",
+                            role = "assistant",
+                            message = "Продолжаю текущий run #$runId по вашему уточнению."
+                        )
+                    )
+                } else {
+                    queries.insertMultiAgentRun(
+                        chat_id = chatId,
+                        parent_run_id = latestRun?.id,
+                        user_request = trimmed,
+                        status = MultiAgentRunStatus.RUNNING.name.lowercase(),
+                        resolution_type = "pending",
+                        pending_question = "",
+                        state_json = """{"phase":"new"}""",
+                        created_at = now,
+                        updated_at = now
+                    )
+                    runId = queries.selectLastInsertedMultiAgentRunId().executeAsOne()
+                }
+
+                appendMultiAgentEvent(
+                    chatId = chatId,
+                    runId = runId,
+                    event = MultiAgentEvent(
+                        channel = MultiAgentEventChannel.TRACE,
+                        actorType = "user",
+                        actorKey = "user",
+                        role = "user",
+                        message = trimmed
+                    )
+                )
+
+                val requestApi = selectedApi
+                val model = modelInput.trim().ifEmpty { requestApi.defaultModel }
+                val apiKey = aiAgentReadApiKey(requestApi.envVar)
+                if (apiKey.isBlank()) error("Нет API ключа. Проверьте ${requestApi.envVar}")
+                val projectFolderPath = agentModeState.projectFolderPath.trim()
+                val conversationContext = if (isContinuationRun && runId != null) {
+                    buildMultiAgentRunConversationContext(runId!!)
+                } else {
+                    buildRegularConversationContext(regularMessages.toList())
+                }
+                val fallbackObjective = if (isContinuationRun) {
+                    latestRun?.user_request?.trim().orEmpty().ifBlank { trimmed }
+                } else {
+                    trimmed
+                }
+                val globalUserRequest = buildGlobalUserRequest(
+                    messages = regularMessages.toList(),
+                    fallbackObjective = fallbackObjective
+                )
+                val normalizedUserRequest = globalUserRequest.objective.ifBlank { trimmed }
+                val preflightRefresh = multiAgentMcpCoordinator.ensureMcpCacheFresh()
+                preflightRefresh.lines.forEach { line ->
+                    appendMultiAgentEvent(
+                        chatId = chatId,
+                        runId = runId,
+                        event = MultiAgentEvent(
+                            channel = MultiAgentEventChannel.TRACE,
+                            actorType = "mcp",
+                            actorKey = "refresh",
+                            role = "assistant",
+                            message = "MCP refresh before preflight: $line"
+                        )
+                    )
+                }
+                val toolGateway = AiAgentMainToolGateway(
+                    ragExecutor = { query ->
+                        val payload = buildRagPayloadForPrompt(query = query, forceEnabled = true)
+                        if (payload == null) {
+                            """{"status":"error","reason":"RAG_UNAVAILABLE","message":"RAG недоступен"}"""
+                        } else if (payload.selectedChunks.isEmpty()) {
+                            """{"status":"error","reason":"LOW_RELEVANCE","message":"RAG показал низкую релевантность","retrieval_info":"${escapeJsonValue(payload.retrievalInfo)}"}"""
+                        } else {
+                            val chunksJson = payload.selectedChunks.joinToString(",") { chunk ->
+                                """{"source":"${escapeJsonValue(chunk.source)}","title":"${escapeJsonValue(chunk.title)}","section":"${escapeJsonValue(chunk.section)}","chunk_id":${chunk.chunkId},"strategy":"${escapeJsonValue(chunk.strategy)}","score":${"%.4f".format(chunk.score)},"chunk":"${escapeJsonValue(chunk.chunkText)}"}"""
+                            }
+                            """{"status":"ok","retrieval_info":"${escapeJsonValue(payload.retrievalInfo)}","chunks":[$chunksJson]}"""
+                        }
+                    },
+                    mcpExecutor = { toolRequest ->
+                        val callRefresh = multiAgentMcpCoordinator.ensureMcpCacheFresh()
+                        callRefresh.lines.forEach { line ->
+                            appendMultiAgentEvent(
+                                chatId = chatId,
+                                runId = runId,
+                                event = MultiAgentEvent(
+                                    channel = MultiAgentEventChannel.TRACE,
+                                    actorType = "mcp",
+                                    actorKey = "refresh",
+                                    role = "assistant",
+                                    message = "MCP refresh before call: $line"
+                                )
+                            )
+                        }
+                        val toolName = toolRequest.toolName.trim()
+                        val endpoint = toolRequest.endpoint?.trim()
+                        val targetServer = multiAgentMcpCoordinator.findServerForTool(toolName = toolName, endpoint = endpoint)
+                        if (targetServer == null) {
+                            error("MCP tool '$toolName' недоступен на активных серверах.")
+                        }
+                        remoteMcpService.callTool(
+                            serverUrl = targetServer.url,
+                            toolName = toolName,
+                            arguments = toolRequest.arguments
+                        )
+                    },
+                    ragAvailability = {
+                        multiAgentMcpCoordinator.buildRagAvailability()
+                    },
+                    mcpAvailability = { toolName ->
+                        multiAgentMcpCoordinator.buildMcpAvailability(toolName)
+                    }
+                )
+
+                val summary = multiAgentOrchestrator.execute(
+                    request = MultiAgentRequest(
+                        userRequest = normalizedUserRequest,
+                        projectFolderPath = projectFolderPath,
+                        subagents = multiAgentSubagents.filter { it.isEnabled },
+                        conversationContext = conversationContext,
+                        pendingQuestion = pendingQuestion,
+                        isContinuation = isContinuationRun,
+                        mcpToolsCatalog = multiAgentMcpCoordinator.buildMcpToolsCatalogForSelector(),
+                        globalUserRequest = globalUserRequest
+                    ),
+                    callModel = { call ->
+                        callAiAgentMainApi(
+                            requestApi = requestApi,
+                            model = model,
+                            apiKey = apiKey,
+                            requestMessages = call.messages,
+                            deepSeekApi = deepSeekApi,
+                            openAiApi = openAiApi,
+                            gigaChatApi = gigaChatApi,
+                            proxyOpenAiApi = proxyOpenAiApi,
+                            localLlmApi = localLlmApi,
+                            options = AgentModelRequestOptions(
+                                temperature = call.temperature,
+                                topP = call.topP,
+                                maxTokens = call.maxTokens,
+                                responseFormat = if (call.responseAsJson) {
+                                    DeepSeekResponseFormat(type = "json_object")
+                                } else {
+                                    null
+                                }
+                            )
+                        )
+                    },
+                    executeTool = { toolRequest ->
+                        if (toolRequest.toolKind == MultiAgentToolKind.MCP_CALL) {
+                            val refreshReport = multiAgentMcpCoordinator.ensureMcpCacheFresh()
+                            refreshReport.lines.forEach { line ->
+                                appendMultiAgentEvent(
+                                    chatId = chatId,
+                                    runId = runId,
+                                    event = MultiAgentEvent(
+                                        channel = MultiAgentEventChannel.TRACE,
+                                        actorType = "mcp",
+                                        actorKey = if (toolRequest.preflight) "preflight_refresh" else "call_refresh",
+                                        role = "assistant",
+                                        message = "MCP refresh around tool call: $line"
+                                    )
+                                )
+                            }
+                        }
+                        val gatewayResult = toolGateway.execute(toolRequest)
+                        val stepId = toolRequest.stepIndex?.let { stepRowIdByIndex[it] }
+                        val requestPayload = buildString {
+                            val safeReason = toolRequest.reason.replace("\"", "\\\"")
+                            append("{")
+                            append("\"preflight\":${toolRequest.preflight},")
+                            append("\"reason\":\"$safeReason\",")
+                            append("\"params\":${toolRequest.paramsJson}")
+                            append("}")
+                        }
+                        val toolCallId = insertMultiAgentToolCall(
+                            MultiAgentToolCallLog(
+                                runId = runId ?: error("runId is null while logging tool call"),
+                                stepId = stepId,
+                                toolKind = toolRequest.toolKind,
+                                requestPayload = requestPayload,
+                                responsePayload = gatewayResult.rawOutput.ifBlank { gatewayResult.normalizedOutput },
+                                status = if (gatewayResult.success) "success" else "error",
+                                errorCode = gatewayResult.errorCode,
+                                errorMessage = gatewayResult.errorMessage,
+                                latencyMs = gatewayResult.latencyMs
+                            )
+                        )
+                        val mergedMetadata = run {
+                            val base = gatewayResult.metadataJson.trim()
+                            val toolCallIdField = if (toolCallId > 0L) {
+                                "\"toolCallId\":$toolCallId,"
+                            } else {
+                                ""
+                            }
+                            if (base.startsWith("{") && base.endsWith("}")) {
+                                val withoutTail = base.removeSuffix("}")
+                                val separator = if (withoutTail.length <= 1) "" else ","
+                                "$withoutTail${separator}${toolCallIdField}\"preflight\":${toolRequest.preflight}}"
+                            } else {
+                                """{${toolCallIdField}"preflight":${toolRequest.preflight}}"""
+                            }
+                        }
+                        gatewayResult.copy(
+                            metadataJson = mergedMetadata
+                        )
+                    },
+                    onEvent = { event ->
+                        appendMultiAgentEvent(chatId = chatId, runId = runId, event = event)
+                        if (event.channel == MultiAgentEventChannel.USER) {
+                            val msg = AiAgentMessage(
+                                text = event.message,
+                                isUser = false,
+                                paramsInfo = "stage=multiagent|status",
+                                stream = AiAgentStream.Raw,
+                                epoch = 0,
+                                createdAt = System.currentTimeMillis()
+                            )
+                            regularMessages += msg
+                            appendMessageToRegularChat(chatId, msg)
+                        }
+                    },
+                    onPlanningReady = { planning ->
+                        if (runId == null) return@execute
+                        val nowPlan = System.currentTimeMillis()
+                        val existingRows = queries.selectMultiAgentStepsByRun(run_id = runId!!).executeAsList()
+                        val existingByStepIndex = existingRows.associateBy { it.step_index.toInt() }
+                        planning.planSteps.forEach { step ->
+                            val existing = existingByStepIndex[step.index]
+                            if (existing == null) {
+                                queries.insertMultiAgentStep(
+                                    run_id = runId!!,
+                                    step_index = step.index.toLong(),
+                                    title = step.title,
+                                    assignee_agent_key = step.assigneeKey,
+                                    status = MultiAgentStepStatus.planned.name,
+                                    input_payload = step.taskInput,
+                                    output_payload = "",
+                                    validation_note = "",
+                                    created_at = nowPlan,
+                                    updated_at = nowPlan
+                                )
+                            } else {
+                                queries.updateMultiAgentStepById(
+                                    status = MultiAgentStepStatus.planned.name,
+                                    output_payload = "",
+                                    validation_note = "replanned",
+                                    updated_at = nowPlan,
+                                    id = existing.id
+                                )
+                            }
+                        }
+                        val rows = queries.selectMultiAgentStepsByRun(run_id = runId!!).executeAsList()
+                        stepRowIdByIndex.clear()
+                        rows.forEach { row -> stepRowIdByIndex[row.step_index.toInt()] = row.id }
+                    },
+                    onStepReady = { step ->
+                        val rowId = stepRowIdByIndex[step.step.index] ?: return@execute
+                        queries.updateMultiAgentStepById(
+                            status = step.status.name,
+                            output_payload = step.output,
+                            validation_note = step.validationNote,
+                            updated_at = System.currentTimeMillis(),
+                            id = rowId
+                        )
+                    }
+                )
+
+                if (runId != null) {
+                    val pendingQ = if (summary.runStatus == MultiAgentRunStatus.WAITING_USER) {
+                        summary.finalUserMessage
+                    } else {
+                        ""
+                    }
+                    val stateJson = buildString {
+                        append("{")
+                        append("\"isContinuation\":$isContinuationRun,")
+                        append("\"runStatus\":\"${summary.runStatus.name.lowercase()}\",")
+                        append("\"resolution\":\"${summary.resolutionType.name.lowercase()}\",")
+                        append("\"steps\":${summary.steps.size},")
+                        append("\"lastMessage\":\"${escapeJsonValue(summary.finalUserMessage)}\"")
+                        append("}")
+                    }
+                    queries.updateMultiAgentRunStatus(
+                        status = summary.runStatus.name.lowercase(),
+                        resolution_type = summary.resolutionType.name.lowercase(),
+                        pending_question = pendingQ,
+                        state_json = stateJson,
+                        updated_at = System.currentTimeMillis(),
+                        id = runId!!
+                    )
+                }
+                summary.finalUserMessage
+            } catch (e: Exception) {
+                isErrorState = true
+                if (runId != null) {
+                    queries.updateMultiAgentRunStatus(
+                        status = MultiAgentRunStatus.FAILED.name.lowercase(),
+                        resolution_type = MultiAgentResolutionType.FAILED.name.lowercase(),
+                        pending_question = "",
+                        state_json = """{"error":"${escapeJsonValue(e.message ?: "unknown error")}"}""",
+                        updated_at = System.currentTimeMillis(),
+                        id = runId!!
+                    )
+                }
+                "Request failed: ${e.message ?: "unknown error"}"
+            }
+
+            if (sessionId != chatSessionId) { isLoading = false; return@launch }
+            val finalMsg = AiAgentMessage(
+                text = result,
+                isUser = false,
+                paramsInfo = "stage=multiagent|final",
+                stream = AiAgentStream.Raw,
+                epoch = 0,
+                createdAt = System.currentTimeMillis()
+            )
+            regularMessages += finalMsg
+            appendMessageToRegularChat(chatId, finalMsg)
+            isLoading = false
+        }
+    }
+
+    fun sendPrimaryInput() {
+        val chatId = activeChatId ?: return
+        val rawInput = inputText.text
+        val trimmed = rawInput.trim()
+        if (trimmed.isEmpty() || isLoading) return
+
+        if (!agentModeState.isEnabled) {
+            if (isStateMachineEnabled) {
+                startPlanningPhaseHandler?.invoke() ?: sendRegularChatMessage(trimmed)
+            } else {
+                sendRegularChatMessage(trimmed)
+            }
+            return
+        }
+
+        val parseResult = AgentSlashCommandParser.parse(rawInput)
+        when (parseResult) {
+            AgentSlashParseResult.NotSlash -> {
+                if (isMultiAgentEnabled) sendMultiAgentMessage(trimmed)
+                else sendRegularChatMessage(trimmed)
+            }
+
+            is AgentSlashParseResult.Error -> {
+                isBranchingEnabled = false
+                selectedBranchNumber = null
+                agentState = AgentState.Idle
+                planClarificationNeeded = null
+                val now = System.currentTimeMillis()
+                appendRegularMessage(
+                    chatId = chatId,
+                    message = AiAgentMessage(
+                        text = trimmed,
+                        isUser = true,
+                        paramsInfo = "stage=agent|command",
+                        stream = AiAgentStream.Raw,
+                        epoch = 0,
+                        createdAt = now
+                    )
+                )
+                appendRegularMessage(
+                    chatId = chatId,
+                    message = AiAgentMessage(
+                        text = parseResult.message,
+                        isUser = false,
+                        paramsInfo = "stage=agent|error",
+                        stream = AiAgentStream.Raw,
+                        epoch = 0,
+                        createdAt = now + 1
+                    )
+                )
+                updateInputText(TextFieldValue(""))
+            }
+
+            is AgentSlashParseResult.Parsed -> {
+                when (val command = parseResult.command) {
+                    is AgentSlashCommand.Help -> {
+                        isBranchingEnabled = false
+                        selectedBranchNumber = null
+                        agentState = AgentState.Idle
+                        planClarificationNeeded = null
+                        val userMessage = AiAgentMessage(
+                            text = trimmed,
+                            isUser = true,
+                            paramsInfo = "stage=agent|help",
+                            stream = AiAgentStream.Raw,
+                            epoch = 0,
+                            createdAt = System.currentTimeMillis()
+                        )
+                        appendRegularMessage(chatId, userMessage)
+                        updateInputText(TextFieldValue(""))
+
+                        scope.launch {
+                            val sessionId = chatSessionId
+                            isLoading = true
+                            val result = try {
+                                val projectFolderPath = agentModeState.projectFolderPath.trim()
+                                if (projectFolderPath.isEmpty()) {
+                                    error("Для команды /help нужно выбрать папку проекта в режиме Агент.")
+                                }
+                                val ragQuery = listOfNotNull(
+                                    command.question,
+                                    "Контекст проекта: $projectFolderPath"
+                                ).joinToString("\n")
+                                val ragPayload = buildRagPayloadForPrompt(
+                                    query = ragQuery,
+                                    forceEnabled = true
+                                )
+                                val mcpContext = collectAgentMcpContext(
+                                    remoteMcpService = remoteMcpService,
+                                    servers = mcpServerOptions
+                                )
+                                val ragCatalog = loadAgentRagCatalog()
+                                val requestApi = selectedApi
+                                val model = modelInput.trim().ifEmpty { requestApi.defaultModel }
+                                val apiKey = aiAgentReadApiKey(requestApi.envVar)
+                                if (apiKey.isBlank()) error("Нет API ключа. Проверьте ${requestApi.envVar}")
+                                isErrorState = false
+                                agentHelpCommandUseCase.execute(
+                                    request = AgentHelpRequest(
+                                        projectFolderPath = projectFolderPath,
+                                        userQuestion = command.question?.trim().orEmpty().ifBlank {
+                                            "Дай общий обзор проекта: назначение, основные модули и точки входа."
+                                        }
+                                    ),
+                                    mcpContext = mcpContext,
+                                    ragCatalog = ragCatalog,
+                                    runMcpTool = { plan ->
+                                        val target = mcpContext.snapshots
+                                            .asSequence()
+                                            .filter { it.error == null }
+                                            .filter { snapshot ->
+                                                snapshot.tools.any { it.name.equals(plan.toolName, ignoreCase = true) }
+                                            }
+                                            .firstOrNull { snapshot ->
+                                                val endpoint = plan.endpoint?.trim()
+                                                endpoint.isNullOrBlank() || endpointMatchesServer(endpoint, snapshot.url)
+                                            }
+                                        if (target == null) {
+                                            AgentMcpExecutionResult(
+                                                request = plan,
+                                                output = null,
+                                                error = "Инструмент недоступен в MCP контексте"
+                                            )
+                                        } else {
+                                            runCatching {
+                                                remoteMcpService.callTool(
+                                                    serverUrl = target.url,
+                                                    toolName = plan.toolName,
+                                                    arguments = plan.arguments
+                                                )
+                                            }.fold(
+                                                onSuccess = { output ->
+                                                    AgentMcpExecutionResult(
+                                                        request = plan,
+                                                        output = output
+                                                    )
+                                                },
+                                                onFailure = { error ->
+                                                    AgentMcpExecutionResult(
+                                                        request = plan,
+                                                        output = null,
+                                                        error = error.message ?: error::class.simpleName ?: "unknown"
+                                                    )
+                                                }
+                                            )
+                                        }
+                                    },
+                                    runRagQuery = { query ->
+                                        AgentRagExecutionResult(
+                                            query = query,
+                                            payload = buildRagPayloadForPrompt(query = query, forceEnabled = true)
+                                        )
+                                    },
+                                    callPlanningModel = { requestMessages ->
+                                        callAiAgentMainApi(
+                                            requestApi = requestApi,
+                                            model = model,
+                                            apiKey = apiKey,
+                                            requestMessages = requestMessages,
+                                            deepSeekApi = deepSeekApi,
+                                            openAiApi = openAiApi,
+                                            gigaChatApi = gigaChatApi,
+                                            proxyOpenAiApi = proxyOpenAiApi,
+                                            localLlmApi = localLlmApi,
+                                            options = AgentModelRequestOptions(
+                                                temperature = 0.05,
+                                                topP = 0.1,
+                                                maxTokens = 1200,
+                                                responseFormat = DeepSeekResponseFormat(type = "json_object")
+                                            )
+                                        )
+                                    },
+                                    callAnsweringModel = { requestMessages ->
+                                        callAiAgentMainApi(
+                                            requestApi = requestApi,
+                                            model = model,
+                                            apiKey = apiKey,
+                                            requestMessages = requestMessages,
+                                            deepSeekApi = deepSeekApi,
+                                            openAiApi = openAiApi,
+                                            gigaChatApi = gigaChatApi,
+                                            proxyOpenAiApi = proxyOpenAiApi,
+                                            localLlmApi = localLlmApi,
+                                            options = AgentModelRequestOptions(
+                                                temperature = 0.2,
+                                                topP = 0.8,
+                                                maxTokens = 4000
+                                            )
+                                        )
+                                    }
+                                )
+                            } catch (e: Exception) {
+                                isErrorState = true
+                                "Request failed: ${e.message ?: "unknown error"}"
+                            }
+                            if (sessionId != chatSessionId) { isLoading = false; return@launch }
+
+                            appendRegularMessage(
+                                chatId = chatId,
+                                message = AiAgentMessage(
+                                    text = result,
+                                    isUser = false,
+                                    paramsInfo = "stage=agent|help",
+                                    stream = AiAgentStream.Raw,
+                                    epoch = 0,
+                                    createdAt = System.currentTimeMillis()
+                                )
+                            )
+                            isLoading = false
+                        }
+                    }
+
+                    is AgentSlashCommand.ReviewPr -> {
+                        isBranchingEnabled = false
+                        selectedBranchNumber = null
+                        agentState = AgentState.Idle
+                        planClarificationNeeded = null
+                        val userMessage = AiAgentMessage(
+                            text = trimmed,
+                            isUser = true,
+                            paramsInfo = "stage=agent|review-pr",
+                            stream = AiAgentStream.Raw,
+                            epoch = 0,
+                            createdAt = System.currentTimeMillis()
+                        )
+                        appendRegularMessage(chatId, userMessage)
+                        updateInputText(TextFieldValue(""))
+
+                        scope.launch {
+                            val sessionId = chatSessionId
+                            isLoading = true
+                            val result = try {
+                                val projectFolderPath = agentModeState.projectFolderPath.trim()
+                                if (projectFolderPath.isEmpty()) {
+                                    error("Для команды /review-pr нужно выбрать папку проекта в режиме Агент.")
+                                }
+
+                                val requestApi = selectedApi
+                                val model = modelInput.trim().ifEmpty { requestApi.defaultModel }
+                                val apiKey = aiAgentReadApiKey(requestApi.envVar)
+                                if (apiKey.isBlank()) error("Нет API ключа. Проверьте ${requestApi.envVar}")
+                                isErrorState = false
+
+                                val reviewMcpServers = mcpServerOptions.filter { server ->
+                                    mcpServerEnabled[server.url] == true
+                                }.ifEmpty { mcpServerOptions }
+                                val reviewMcpContext = collectAgentMcpContext(
+                                    remoteMcpService = remoteMcpService,
+                                    servers = reviewMcpServers
+                                )
+                                val githubTokenProvider = {
+                                    BuildSecrets.apiKeyFor("GITHUB_PERSONAL_ACCESS_TOKEN").trim()
+                                        .ifBlank {
+                                            System.getenv("GITHUB_PERSONAL_ACCESS_TOKEN")?.trim().orEmpty()
+                                        }
+                                        .ifBlank {
+                                            System.getenv("GITHUB_TOKEN")?.trim().orEmpty()
+                                        }
+                                        .ifBlank {
+                                            System.getenv("GH_TOKEN")?.trim().orEmpty()
+                                        }
+                                }
+
+                                agentPrReviewUseCase.execute(
+                                    request = AgentPrReviewRequest(
+                                        projectFolderPath = projectFolderPath,
+                                        commandArguments = command.arguments.orEmpty()
+                                    ),
+                                    gitGateway = AgentMcpPrReviewGitGateway(
+                                        remoteMcpService = remoteMcpService,
+                                        servers = reviewMcpContext.snapshots,
+                                        githubTokenProvider = githubTokenProvider
+                                    ),
+                                    runRagQuery = { query ->
+                                        AgentRagExecutionResult(
+                                            query = query,
+                                            payload = buildRagPayloadForPrompt(query = query, forceEnabled = true)
+                                        )
+                                    },
+                                    callReviewModel = { requestMessages ->
+                                        callAiAgentMainApi(
+                                            requestApi = requestApi,
+                                            model = model,
+                                            apiKey = apiKey,
+                                            requestMessages = requestMessages,
+                                            deepSeekApi = deepSeekApi,
+                                            openAiApi = openAiApi,
+                                            gigaChatApi = gigaChatApi,
+                                            proxyOpenAiApi = proxyOpenAiApi,
+                                            localLlmApi = localLlmApi,
+                                            options = AgentModelRequestOptions(
+                                                temperature = 0.2,
+                                                topP = 0.8,
+                                                maxTokens = 4000
+                                            )
+                                        )
+                                    }
+                                )
+                            } catch (e: Exception) {
+                                isErrorState = true
+                                "Request failed: ${e.message ?: "unknown error"}"
+                            }
+                            if (sessionId != chatSessionId) { isLoading = false; return@launch }
+
+                            appendRegularMessage(
+                                chatId = chatId,
+                                message = AiAgentMessage(
+                                    text = result,
+                                    isUser = false,
+                                    paramsInfo = "stage=agent|review-pr",
+                                    stream = AiAgentStream.Raw,
+                                    epoch = 0,
+                                    createdAt = System.currentTimeMillis()
+                                )
+                            )
+                            isLoading = false
+                        }
+                    }
+
+                    is AgentSlashCommand.AuthToken -> {
+                        isBranchingEnabled = false
+                        selectedBranchNumber = null
+                        agentState = AgentState.Idle
+                        planClarificationNeeded = null
+                        val userMessage = AiAgentMessage(
+                            text = trimmed,
+                            isUser = true,
+                            paramsInfo = "stage=agent|auth-token",
+                            stream = AiAgentStream.Raw,
+                            epoch = 0,
+                            createdAt = System.currentTimeMillis()
+                        )
+                        appendRegularMessage(chatId, userMessage)
+                        updateInputText(TextFieldValue(""))
+
+                        scope.launch {
+                            val sessionId = chatSessionId
+                            isLoading = true
+                            val result = try {
+                                val authServers = mcpServerOptions.filter { server ->
+                                    mcpServerEnabled[server.url] == true
+                                }.ifEmpty { mcpServerOptions }
+                                val authMcpContext = collectAgentMcpContext(
+                                    remoteMcpService = remoteMcpService,
+                                    servers = authServers
+                                )
+                                agentAuthTokenUseCase.execute(
+                                    arguments = command.arguments.orEmpty(),
+                                    servers = authMcpContext.snapshots
+                                )
+                            } catch (e: Exception) {
+                                isErrorState = true
+                                "Request failed: ${e.message ?: "unknown error"}"
+                            }
+                            if (sessionId != chatSessionId) { isLoading = false; return@launch }
+
+                            appendRegularMessage(
+                                chatId = chatId,
+                                message = AiAgentMessage(
+                                    text = result,
+                                    isUser = false,
+                                    paramsInfo = "stage=agent|auth-token",
+                                    stream = AiAgentStream.Raw,
+                                    epoch = 0,
+                                    createdAt = System.currentTimeMillis()
+                                )
+                            )
+                            isLoading = false
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     suspend fun callExecutionStepApi(
         taskContext: String,
         stepId: Int,
@@ -1409,6 +2219,11 @@ private fun AiAgentMainChat(
         val model = modelInput.trim().ifEmpty { requestApi.defaultModel }
         val apiKey = aiAgentReadApiKey(requestApi.envVar)
         if (apiKey.isBlank()) error("Нет API ключа. Проверьте ${requestApi.envVar}")
+        val ragPayload = buildRagPayloadForPrompt(
+            listOf(taskContext, stepDescription, previousResultsFormatted)
+                .filter { it.isNotBlank() }
+                .joinToString("\n")
+        )
         val promptText = EXECUTION_STEP_PROMPT_TEMPLATE
             .replace("{task_context}", taskContext)
             .replace("{recovery_context}", recoveryContext?.ifBlank { "нет" } ?: "нет")
@@ -1421,6 +2236,7 @@ private fun AiAgentMainChat(
             buildLtmSystemMessage()?.let { add(it) }
             buildMcpSystemMessageCached()?.let { add(it) }
             buildInvariantsSystemMessage()?.let { add(it) }
+            ragPayload?.let { add(DeepSeekMessage(role = "system", content = it.promptContext)) }
             add(DeepSeekMessage(role = "user", content = promptText))
         }
         val request = DeepSeekChatRequest(
@@ -2039,7 +2855,7 @@ private fun AiAgentMainChat(
         if (trimmed.isEmpty() || isLoading) return
 
         userRequestText = trimmed
-        inputText = TextFieldValue("")
+        updateInputText(TextFieldValue(""))
         isBranchingEnabled = true
 
         val now = System.currentTimeMillis()
@@ -2100,6 +2916,8 @@ private fun AiAgentMainChat(
             isLoading = false
         }
     }
+
+    startPlanningPhaseHandler = ::startPlanningPhase
 
     fun onPlanApproved() {
         val chatId = activeChatId ?: return
@@ -2285,7 +3103,7 @@ private fun AiAgentMainChat(
         val currentClarification = planClarificationNeeded ?: return
         val planningMessages = branchesByChat[chatId]?.firstOrNull { it.number == 2 }?.messages ?: return
 
-        inputText = TextFieldValue("")
+        updateInputText(TextFieldValue(""))
 
         scope.launch {
             val sessionId = chatSessionId
@@ -2542,6 +3360,8 @@ private fun AiAgentMainChat(
         isLoading = false
         isErrorState = false
         activeChatId = null
+        regularMessagesByChat.clear()
+        multiAgentTraceEventsByChat.clear()
         isBranchingEnabled = false
         selectedBranchNumber = null
         agentState = AgentState.Idle
@@ -2549,7 +3369,7 @@ private fun AiAgentMainChat(
         planText = ""
         executionText = ""
         branchNames.clear()
-        inputText = TextFieldValue("")
+        updateInputText(TextFieldValue(""))
         planEditInput = TextFieldValue("")
         lastPlanEditText = ""
         executionSteps.clear()
@@ -2574,6 +3394,8 @@ private fun AiAgentMainChat(
         isLoading = false
         activeChatId = chatId
         branchesByChat.remove(chatId)
+        regularMessagesByChat[chatId] = loadRegularMessagesForChat(chatId)
+        multiAgentTraceEventsByChat[chatId] = loadMultiAgentTraceEventsForChat(chatId)
         branchNames.clear()
 
         val branches = loadBranchesForChat(chatId)
@@ -2633,11 +3455,51 @@ private fun AiAgentMainChat(
             executionText = ""
         }
 
-        inputText = TextFieldValue("")
+        updateInputText(TextFieldValue(""))
         invariantViolations = emptyList()
         apiSelectorExpanded = false
         modelSelectorExpanded = false
+        if (!isStateMachineEnabled) {
+            agentState = AgentState.Idle
+            isErrorState = false
+            isPaused = false
+            planClarificationNeeded = null
+            validationFailure = null
+            validationRecoveryBranchNumber = null
+            validationRecoveryAttempt = 0
+            planInvariantCheckFailed = false
+            planInvariantViolationByAi = false
+            selectedBranchNumber = null
+            isBranchingEnabled = false
+        }
         selectedProfileId?.let { loadLongTermMemoryForProfile(it) }
+    }
+
+    fun setStateMachineEnabled(enabled: Boolean) {
+        if (isStateMachineEnabled == enabled || isLoading) return
+        isStateMachineEnabled = enabled
+        saveAppSettingBool("state_machine_enabled", enabled)
+
+        if (!enabled) {
+            chatSessionId++
+            agentState = AgentState.Idle
+            isErrorState = false
+            isPaused = false
+            planClarificationNeeded = null
+            validationFailure = null
+            validationRecoveryBranchNumber = null
+            validationRecoveryAttempt = 0
+            invariantViolations = emptyList()
+            planInvariantCheckFailed = false
+            planInvariantViolationByAi = false
+            activeChatId?.let { chatId ->
+                regularMessagesByChat[chatId] = loadRegularMessagesForChat(chatId)
+                isBranchingEnabled = false
+                selectedBranchNumber = null
+            }
+        } else {
+            activeChatId?.let(::openChat)
+        }
     }
 
     fun createNewChatAndOpen() {
@@ -2657,10 +3519,15 @@ private fun AiAgentMainChat(
     fun deleteChat(chatId: Long) {
         if (isLoading) return
         val wasActive = activeChatId == chatId
+        queries.deleteMultiAgentToolCallsByChat(chat_id = chatId)
+        queries.deleteMultiAgentEventsByChat(chat_id = chatId)
+        queries.deleteMultiAgentRunsByChat(chat_id = chatId)
         queries.deleteBranchMessagesByChat(chat_id = chatId)
         queries.deleteMessagesByChat(chatId)
         queries.deleteChatById(chatId)
         branchesByChat.remove(chatId)
+        regularMessagesByChat.remove(chatId)
+        multiAgentTraceEventsByChat.remove(chatId)
         branchVisibilityByChat.remove(chatId)
         branchCounterByChat.remove(chatId)
         websocketChatIdsByKey.entries.removeAll { it.value == chatId }
@@ -2677,8 +3544,14 @@ private fun AiAgentMainChat(
         if (isLoading) return
         queries.deleteAllMessages()
         queries.deleteAllBranchMessages()
+        queries.deleteAllMultiAgentToolCalls()
+        queries.deleteAllMultiAgentEvents()
+        queries.deleteAllMultiAgentSteps()
+        queries.deleteAllMultiAgentRuns()
         queries.deleteAllChats()
         branchesByChat.clear()
+        regularMessagesByChat.clear()
+        multiAgentTraceEventsByChat.clear()
         branchVisibilityByChat.clear()
         branchCounterByChat.clear()
         websocketChatIdsByKey.clear()
@@ -2690,8 +3563,21 @@ private fun AiAgentMainChat(
 
     LaunchedEffect(Unit) {
         ensureProfileAndLtm()
+        isStateMachineEnabled = appSettingBool("state_machine_enabled", default = true)
         isMcpEnabled = appSettingBool("mcp_enabled", default = false)
         isInvariantsEnabled = appSettingBool("invariants_enabled", default = true)
+        isRagEnabled = loadAiAgentMainRagEnabled()
+        agentModeState = AgentModeState(
+            isEnabled = appSettingBool("agent_mode_enabled", default = false),
+            projectFolderPath = appSettingString("agent_project_folder", default = "")
+        )
+        isMultiAgentEnabled = appSettingBool("multi_agent_enabled", default = false)
+        isMultiAgentTraceMode = appSettingBool("multi_agent_trace_mode", default = false)
+        if (agentModeState.isEnabled && isStateMachineEnabled) {
+            setStateMachineEnabled(false)
+        }
+        ensureDefaultMultiAgentSubagents()
+        refreshMultiAgentSubagents()
         mcpServerOptions.forEach { server ->
             mcpServerEnabled[server.url] = appSettingBool(
                 key = mcpServerSettingKey(server.url),
@@ -2709,11 +3595,27 @@ private fun AiAgentMainChat(
         if (!isLoading) inputFocusRequester.requestFocus()
     }
 
+    val displayBranchNumber = selectedBranchNumber
+    val isTraceChatMode = agentModeState.isEnabled && isMultiAgentEnabled && isMultiAgentTraceMode
+    val displayTraceEvents: List<MultiAgentTraceEventRecord> =
+        if (isTraceChatMode) {
+            multiAgentTraceEventsByChat[activeChatId] ?: emptyList()
+        } else {
+            emptyList()
+        }
+    val traceTimeline = remember(displayTraceEvents.size, displayTraceEvents.lastOrNull()?.createdAt) {
+        buildMultiAgentTraceTimeline(displayTraceEvents)
+    }
+    val traceGroupExpandedById = remember(activeChatId) { mutableStateMapOf<String, Boolean>() }
+
     val displayMessages: List<AiAgentMessage> =
-        if (isBranchingEnabled && selectedBranchNumber != null)
-            branchesByChat[activeChatId]?.firstOrNull { it.number == selectedBranchNumber }?.messages
-                ?: emptyList()
-        else emptyList()
+        if (!isStateMachineEnabled) {
+            regularMessagesByChat[activeChatId] ?: emptyList()
+        } else if (isBranchingEnabled && displayBranchNumber != null) {
+            branchesByChat[activeChatId]?.firstOrNull { it.number == displayBranchNumber }?.messages ?: emptyList()
+        } else {
+            emptyList()
+        }
 
     val latestExecutionAssistantMessage = displayMessages.lastOrNull { message ->
         !message.isUser && message.paramsInfo.startsWith("stage=execution|step=")
@@ -2722,12 +3624,17 @@ private fun AiAgentMainChat(
         latestExecutionAssistantMessage?.text?.let(::tryParseJsonExecution)
     }
 
-    LaunchedEffect(displayMessages.size, isLoading) {
-        if (displayMessages.isNotEmpty()) listState.animateScrollToItem(displayMessages.lastIndex)
+    LaunchedEffect(displayMessages.size, traceTimeline.size, isLoading) {
+        val lastIndex = when {
+            isTraceChatMode && traceTimeline.isNotEmpty() -> traceTimeline.lastIndex + 1
+            displayMessages.isNotEmpty() -> displayMessages.lastIndex + 1
+            else -> null
+        }
+        if (lastIndex != null) listState.animateScrollToItem(lastIndex)
     }
 
     val activeChatTitle = chats.firstOrNull { it.id == activeChatId }?.title.orEmpty()
-    val activeBranchName = selectedBranchNumber?.let { branchNames[it] }.orEmpty()
+    val activeBranchName = if (isStateMachineEnabled) selectedBranchNumber?.let { branchNames[it] }.orEmpty() else ""
     val titleSuffix = buildString {
         if (activeChatTitle.isNotBlank()) append(" | $activeChatTitle")
         if (activeBranchName.isNotBlank()) append(" | $activeBranchName")
@@ -2784,20 +3691,11 @@ private fun AiAgentMainChat(
                 },
                 actions = {
                     Text(
-                        text = agentState.name,
+                        text = if (isStateMachineEnabled) agentState.name else "CHAT",
                         style = MaterialTheme.typography.labelSmall,
                         color = AiAgentMainScreenTheme.topBarContent,
                         modifier = Modifier.padding(horizontal = 8.dp)
                     )
-                    TextButton(onClick = { isInvariantPanelVisible = !isInvariantPanelVisible }) {
-                        Text(if (isInvariantPanelVisible) "Инварианты ▾" else "Инварианты ▸")
-                    }
-                    TextButton(onClick = { isMemoryPanelVisible = !isMemoryPanelVisible }) {
-                        Text(if (isMemoryPanelVisible) "Память ▾" else "Память ▸")
-                    }
-                    TextButton(onClick = { isMcpPanelVisible = !isMcpPanelVisible }) {
-                        Text(if (isMcpPanelVisible) "MCP on" else "MCP off")
-                    }
                     TextButton(onClick = ::createNewChatAndOpen, enabled = !isLoading) {
                         Text("Новый чат")
                     }
@@ -2830,6 +3728,151 @@ private fun AiAgentMainChat(
                         Text("Удалить всё")
                     }
                 }
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(8.dp))
+                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                ) {
+                    Text("Screen Features", style = MaterialTheme.typography.labelSmall)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Checkbox(
+                            checked = agentModeState.isEnabled,
+                            onCheckedChange = { checked ->
+                                agentModeState = agentModeState.copy(isEnabled = checked)
+                                saveAppSettingBool("agent_mode_enabled", checked)
+                                if (!checked && isMultiAgentEnabled) {
+                                    isMultiAgentEnabled = false
+                                    saveAppSettingBool("multi_agent_enabled", false)
+                                }
+                                if (checked && isStateMachineEnabled) {
+                                    setStateMachineEnabled(false)
+                                }
+                                isAgentCommandMenuExpanded = shouldShowAgentCommandMenu(
+                                    text = inputText.text,
+                                    isAgentModeEnabled = checked
+                                )
+                            },
+                            enabled = !isLoading
+                        )
+                        Text("Агент", style = MaterialTheme.typography.labelSmall)
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Checkbox(
+                            checked = isMultiAgentEnabled,
+                            onCheckedChange = { checked ->
+                                isMultiAgentEnabled = checked
+                                saveAppSettingBool("multi_agent_enabled", checked)
+                                if (checked && isStateMachineEnabled) {
+                                    setStateMachineEnabled(false)
+                                }
+                            },
+                            enabled = !isLoading && agentModeState.isEnabled
+                        )
+                        Text("Мультиагентность", style = MaterialTheme.typography.labelSmall)
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Checkbox(
+                            checked = isMultiAgentTraceMode,
+                            onCheckedChange = { checked ->
+                                isMultiAgentTraceMode = checked
+                                saveAppSettingBool("multi_agent_trace_mode", checked)
+                            },
+                            enabled = !isLoading && agentModeState.isEnabled && isMultiAgentEnabled
+                        )
+                        Text("Trace чат", style = MaterialTheme.typography.labelSmall)
+                    }
+                    if (agentModeState.isEnabled) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Checkbox(
+                                checked = isMultiAgentSettingsVisible,
+                                onCheckedChange = { isMultiAgentSettingsVisible = it },
+                                enabled = !isLoading
+                            )
+                            Text("Панель мультиагентов", style = MaterialTheme.typography.labelSmall)
+                        }
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Checkbox(
+                            checked = isRagEnabled,
+                            onCheckedChange = {
+                                isRagEnabled = it
+                                saveAiAgentMainRagEnabled(it)
+                            },
+                            enabled = !isLoading && !agentModeState.isEnabled
+                        )
+                        Text("RAG", style = MaterialTheme.typography.labelSmall)
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Checkbox(
+                            checked = isStateMachineEnabled,
+                            onCheckedChange = { setStateMachineEnabled(it) },
+                            enabled = !isLoading && !agentModeState.isEnabled
+                        )
+                        Text("State machine", style = MaterialTheme.typography.labelSmall)
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Checkbox(
+                            checked = isInvariantPanelVisible,
+                            onCheckedChange = { isInvariantPanelVisible = it },
+                            enabled = !isLoading && !agentModeState.isEnabled
+                        )
+                        Text("Invariants panel", style = MaterialTheme.typography.labelSmall)
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Checkbox(
+                            checked = isMemoryPanelVisible,
+                            onCheckedChange = { isMemoryPanelVisible = it },
+                            enabled = !isLoading && !agentModeState.isEnabled
+                        )
+                        Text("Memory panel", style = MaterialTheme.typography.labelSmall)
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Checkbox(
+                            checked = isMcpPanelVisible,
+                            onCheckedChange = { isMcpPanelVisible = it },
+                            enabled = !isLoading && !agentModeState.isEnabled
+                        )
+                        Text("MCP panel", style = MaterialTheme.typography.labelSmall)
+                    }
+                }
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
                     verticalArrangement = Arrangement.spacedBy(6.dp)
@@ -2837,7 +3880,7 @@ private fun AiAgentMainChat(
                     items(chats, key = { it.id }) { chat ->
                         val isSelected = chat.id == activeChatId
                         val chatBranches = branchesByChat[chat.id]
-                        val hasBranches = !chatBranches.isNullOrEmpty()
+                        val hasBranches = isStateMachineEnabled && !chatBranches.isNullOrEmpty()
                         val areBranchesVisible = branchVisibilityByChat[chat.id] ?: true
 
                         Column(
@@ -2950,6 +3993,7 @@ private fun AiAgentMainChat(
                                                         if (activeChatId != chat.id) openChat(chat.id)
                                                         restartBranch(chat.id, branch.number)
                                                     },
+                                                    enabled = !isLoading && isStateMachineEnabled,
                                                     contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp),
                                                     modifier = Modifier.height(28.dp)
                                                 ) {
@@ -3030,6 +4074,101 @@ private fun AiAgentMainChat(
                     }
                 }
 
+                if (agentModeState.isEnabled) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(8.dp))
+                            .padding(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(
+                            text = "Режим Агент: выберите папку проекта (обязательно для /help)",
+                            style = MaterialTheme.typography.labelMedium
+                        )
+                        OutlinedTextField(
+                            value = agentModeState.projectFolderPath,
+                            onValueChange = {},
+                            modifier = Modifier.fillMaxWidth(),
+                            readOnly = true,
+                            enabled = !isLoading,
+                            placeholder = { Text("Папка проекта не выбрана") },
+                            textStyle = MaterialTheme.typography.labelSmall
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(
+                                onClick = {
+                                    pickProjectDirectory(agentModeState.projectFolderPath)?.let { selectedPath ->
+                                        agentModeState = agentModeState.copy(projectFolderPath = selectedPath)
+                                        saveAppSettingString("agent_project_folder", selectedPath)
+                                    }
+                                },
+                                enabled = !isLoading
+                            ) {
+                                Text("Выбрать папку")
+                            }
+                            if (agentModeState.projectFolderPath.isNotBlank()) {
+                                TextButton(
+                                    onClick = {
+                                        agentModeState = agentModeState.copy(projectFolderPath = "")
+                                        saveAppSettingString("agent_project_folder", "")
+                                    },
+                                    enabled = !isLoading
+                                ) {
+                                    Text("Очистить")
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (agentModeState.isEnabled && isMultiAgentSettingsVisible) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(8.dp))
+                            .padding(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(
+                            text = "Настройки мультиагентности",
+                            style = MaterialTheme.typography.labelMedium
+                        )
+                        if (multiAgentSubagents.isEmpty()) {
+                            Text(
+                                text = "Субагенты не загружены",
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        } else {
+                            multiAgentSubagents.forEach { subagent ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Checkbox(
+                                        checked = subagent.isEnabled,
+                                        onCheckedChange = { checked ->
+                                            updateMultiAgentSubagentEnabled(subagent.key, checked)
+                                        },
+                                        enabled = !isLoading
+                                    )
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = "${subagent.title} (${subagent.key})",
+                                            style = MaterialTheme.typography.labelSmall
+                                        )
+                                        Text(
+                                            text = subagent.description,
+                                            style = MaterialTheme.typography.bodySmall
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Messages
                 LazyColumn(
                     modifier = Modifier.weight(1f).fillMaxWidth(),
@@ -3045,10 +4184,32 @@ private fun AiAgentMainChat(
                             modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
                         )
                     }
-                    items(displayMessages) { message ->
-                        AiAgentBubble(message = message)
+                    if (isTraceChatMode) {
+                        items(items = traceTimeline) { traceItem ->
+                            when (traceItem) {
+                                is MultiAgentTraceTimelineItem.Group -> {
+                                    val groupId = traceItem.group.traceGroupId
+                                    val expanded = traceGroupExpandedById[groupId] ?: false
+                                    MultiAgentTraceSubagentGroupBlock(
+                                        group = traceItem.group,
+                                        expanded = expanded,
+                                        onToggleExpanded = {
+                                            traceGroupExpandedById[groupId] = !expanded
+                                        }
+                                    )
+                                }
+
+                                is MultiAgentTraceTimelineItem.Event -> {
+                                    MultiAgentTraceEventBubble(event = traceItem.event)
+                                }
+                            }
+                        }
+                    } else {
+                        items(displayMessages) { message ->
+                            AiAgentBubble(message = message)
+                        }
                     }
-                    if (agentState == AgentState.Execution && parsedExecutionJson != null) {
+                    if (isStateMachineEnabled && agentState == AgentState.Execution && parsedExecutionJson != null) {
                         item {
                             Box(
                                 modifier = Modifier
@@ -3183,7 +4344,63 @@ private fun AiAgentMainChat(
                 }
 
                 // State machine action area
-                when {
+                if (!isStateMachineEnabled) {
+                    AiAgentMainCommandMenu(
+                        expanded = isAgentCommandMenuExpanded,
+                        suggestions = agentCommandSuggestions,
+                        modifier = Modifier.fillMaxWidth(),
+                        onDismiss = { isAgentCommandMenuExpanded = false },
+                        onSelect = { suggestion ->
+                            val value = "${suggestion.command} "
+                            updateInputText(
+                                TextFieldValue(
+                                    text = value,
+                                    selection = TextRange(value.length)
+                                )
+                            )
+                            inputFocusRequester.requestFocus()
+                            isAgentCommandMenuExpanded = false
+                        }
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.Bottom,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedTextField(
+                            value = inputText,
+                            onValueChange = { updateInputText(it) },
+                            modifier = Modifier
+                                .weight(1f)
+                                .focusRequester(inputFocusRequester)
+                                .onPreviewKeyEvent { keyEvent ->
+                                    if (keyEvent.type != KeyEventType.KeyDown || keyEvent.key != Key.Enter) {
+                                        return@onPreviewKeyEvent false
+                                    }
+                                    if (keyEvent.isAltPressed || keyEvent.isShiftPressed || keyEvent.isCtrlPressed) {
+                                        val start = inputText.selection.min
+                                        val end = inputText.selection.max
+                                        updateInputText(
+                                            inputText.copy(
+                                                text = inputText.text.replaceRange(start, end, "\n"),
+                                                selection = TextRange(start + 1)
+                                            )
+                                        )
+                                        return@onPreviewKeyEvent true
+                                    }
+                                    sendPrimaryInput()
+                                    true
+                                },
+                            enabled = !isLoading,
+                            label = { Text("Сообщение") },
+                            maxLines = 4
+                        )
+                        Button(
+                            onClick = ::sendPrimaryInput,
+                            enabled = inputText.text.isNotBlank() && !isLoading
+                        ) { Text("Отправить") }
+                    }
+                } else when {
                     (agentState == AgentState.Execution || agentState == AgentState.Checking) && isLoading -> {
                         Row(
                             modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp),
@@ -3213,7 +4430,7 @@ private fun AiAgentMainChat(
                             ) {
                                 OutlinedTextField(
                                     value = inputText,
-                                    onValueChange = { inputText = it },
+                                    onValueChange = { updateInputText(it) },
                                     modifier = Modifier
                                         .weight(1f)
                                         .focusRequester(inputFocusRequester)
@@ -3224,9 +4441,11 @@ private fun AiAgentMainChat(
                                             if (keyEvent.isAltPressed || keyEvent.isShiftPressed || keyEvent.isCtrlPressed) {
                                                 val start = inputText.selection.min
                                                 val end = inputText.selection.max
-                                                inputText = inputText.copy(
-                                                    text = inputText.text.replaceRange(start, end, "\n"),
-                                                    selection = TextRange(start + 1)
+                                                updateInputText(
+                                                    inputText.copy(
+                                                        text = inputText.text.replaceRange(start, end, "\n"),
+                                                        selection = TextRange(start + 1)
+                                                    )
                                                 )
                                                 return@onPreviewKeyEvent true
                                             }
@@ -3391,7 +4610,7 @@ private fun AiAgentMainChat(
                         ) {
                             OutlinedTextField(
                                 value = inputText,
-                                onValueChange = { inputText = it },
+                                onValueChange = { updateInputText(it) },
                                 modifier = Modifier
                                     .weight(1f)
                                     .focusRequester(inputFocusRequester)
@@ -3402,13 +4621,15 @@ private fun AiAgentMainChat(
                                         if (keyEvent.isAltPressed || keyEvent.isShiftPressed || keyEvent.isCtrlPressed) {
                                             val start = inputText.selection.min
                                             val end = inputText.selection.max
-                                            inputText = inputText.copy(
-                                                text = inputText.text.replaceRange(start, end, "\n"),
-                                                selection = TextRange(start + 1)
+                                            updateInputText(
+                                                inputText.copy(
+                                                    text = inputText.text.replaceRange(start, end, "\n"),
+                                                    selection = TextRange(start + 1)
+                                                )
                                             )
                                             return@onPreviewKeyEvent true
                                         }
-                                        startPlanningPhase()
+                                        sendPrimaryInput()
                                         true
                                     },
                                 enabled = !isLoading,
@@ -3416,7 +4637,9 @@ private fun AiAgentMainChat(
                                 maxLines = 4
                             )
                             Button(
-                                onClick = ::startPlanningPhase,
+                                onClick = {
+                                    sendPrimaryInput()
+                                },
                                 enabled = inputText.text.isNotBlank() && !isLoading
                             ) { Text("Отправить") }
                         }
@@ -3745,73 +4968,4 @@ private fun AiAgentMainChat(
         }
     }
 }
-
-@Composable
-private fun AiAgentBubble(
-    message: AiAgentMessage
-) {
-    val userBubbleColor = AiAgentMainScreenTheme.userBubble
-    val userTextColor = AiAgentMainScreenTheme.onUserBubble
-    val assistantBubbleColor = AiAgentMainScreenTheme.assistantBubble
-    val assistantTextColor = AiAgentMainScreenTheme.onAssistantBubble
-
-    val parsedElement = remember(message.text) {
-        if (message.isUser) null else tryParseJson(message.text)
-    }
-    var showParsed by remember { mutableStateOf(true) }
-
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = if (message.isUser) Arrangement.Start else Arrangement.End
-    ) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth(0.8f)
-                .background(
-                    color = if (message.isUser) userBubbleColor else assistantBubbleColor,
-                    shape = RoundedCornerShape(16.dp)
-                )
-                .padding(12.dp)
-        ) {
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                if (!message.isUser && parsedElement != null && showParsed) {
-                    SelectionContainer {
-                        JsonTreeView(parsedElement)
-                    }
-                } else {
-                    SelectionContainer {
-                        Text(
-                            text = message.text,
-                            color = if (message.isUser) userTextColor else assistantTextColor
-                        )
-                    }
-                }
-                Text(
-                    text = message.displayParamsInfo(),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (message.isUser) userTextColor.copy(alpha = 0.7f)
-                            else assistantTextColor.copy(alpha = 0.7f)
-                )
-                if (!message.isUser && parsedElement != null) {
-                    TextButton(
-                        onClick = { showParsed = !showParsed },
-                        modifier = Modifier.align(Alignment.End)
-                    ) {
-                        Text(
-                            if (showParsed) "Исходный" else "Дерево",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = assistantTextColor.copy(alpha = 0.7f)
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
-
-
-
-
-
 

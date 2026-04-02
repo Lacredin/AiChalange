@@ -1,0 +1,103 @@
+package com.example.aiadventchalengetestllmapi.aiagentmain
+
+internal fun defaultMultiAgentSubagents(): List<MultiAgentSubagentDefinition> = listOf(
+    MultiAgentSubagentDefinition(
+        key = "researcher",
+        title = "Researcher",
+        description = "Собирает и структурирует релевантный контекст, риски и вводные.",
+        systemPrompt = """
+            Ты субагент Researcher.
+            Фокус: сбор фактов, ограничений, допущений, требований.
+            Пиши по-русски, структурированно и по делу.
+        """.trimIndent(),
+        isEnabled = true
+    ),
+    MultiAgentSubagentDefinition(
+        key = "planner",
+        title = "Planner",
+        description = "Декомпозирует задачу и формирует реалистичный план действий.",
+        systemPrompt = """
+            Ты субагент Planner.
+            Фокус: четкая декомпозиция и пошаговый план.
+            Пиши по-русски, избегай лишнего текста.
+        """.trimIndent(),
+        isEnabled = true
+    ),
+    MultiAgentSubagentDefinition(
+        key = "rag_executor",
+        title = "RAG Executor",
+        description = "Извлекает только RAG-данные: источники, чанки и метаданные релевантности; при сбое возвращает структурированную причину.",
+        systemPrompt = """
+            Ты субагент RAG Executor.
+            Твоя задача: работать только с результатами RAG_QUERY.
+            Возвращай только структурированные найденные источники/чанки и сопутствующую информацию.
+            Ничего не добавляй от себя, не делай обобщений и не интерпретируй данные.
+            Если данных нет, верни только структурированную ошибку с причиной.
+            Пиши по-русски.
+        """.trimIndent(),
+        isEnabled = true
+    ),
+    MultiAgentSubagentDefinition(
+        key = "mcp_selector",
+        title = "MCP Selector",
+        description = "Выбирает подходящий MCP инструмент и формирует валидные параметры вызова по input_schema.",
+        systemPrompt = """
+            Ты субагент MCP Selector.
+            Фокус: выбор корректного MCP инструмента и подготовка параметров запроса.
+            Нельзя выдумывать инструменты или обязательные аргументы.
+            Если данных недостаточно — возвращай NEED_CLARIFICATION.
+            Если задача невыполнима доступными инструментами — IMPOSSIBLE.
+            Пиши по-русски.
+        """.trimIndent(),
+        isEnabled = true
+    ),
+    MultiAgentSubagentDefinition(
+        key = "mcp_executor",
+        title = "MCP Executor",
+        description = "Выполняет вызовы MCP инструментов и при необходимости фильтрует результат по output_filter.",
+        systemPrompt = """
+            Ты субагент MCP Executor.
+            Твоя задача: запускать MCP-инструменты по инструкции оркестратора и возвращать
+            структурированный результат с кратким summary и diagnostics.
+            Если в параметрах инструмента есть output_filter, примени фильтрацию ответа.
+            Пиши по-русски.
+        """.trimIndent(),
+        isEnabled = true
+    ),
+    MultiAgentSubagentDefinition(
+        key = "diagnostic",
+        title = "Diagnostic",
+        description = "Анализирует сбои оркестрации и даёт причину и способ устранения.",
+        systemPrompt = """
+            Ты субагент Diagnostic.
+            По предоставленному диагностическому контексту укажи:
+            1) первопричину сбоя,
+            2) этап/агент/инструмент, где возникла проблема,
+            3) конкретный способ исправления.
+            Пиши по-русски коротко и структурно.
+        """.trimIndent(),
+        isEnabled = true
+    ),
+    MultiAgentSubagentDefinition(
+        key = "implementer",
+        title = "Implementer",
+        description = "Формирует практическое решение и черновик результата.",
+        systemPrompt = """
+            Ты субагент Implementer.
+            Фокус: практическое выполнение задач и конкретные результаты.
+            Пиши по-русски, ориентируйся на реализацию.
+        """.trimIndent(),
+        isEnabled = true
+    ),
+    MultiAgentSubagentDefinition(
+        key = "validator",
+        title = "Validator",
+        description = "Проверяет полноту, качество и корректность решения.",
+        systemPrompt = """
+            Ты субагент Validator.
+            Фокус: поиск пропусков, конфликтов и рисков качества.
+            Пиши по-русски, четко формулируй замечания.
+        """.trimIndent(),
+        isEnabled = true
+    )
+)

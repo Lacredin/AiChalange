@@ -45,6 +45,9 @@ kotlin {
             implementation(libs.slf4j.simple)
             implementation(libs.pdfbox)
         }
+        jvmTest.dependencies {
+            implementation(libs.kotlin.test)
+        }
         jvmMain {
             kotlin.srcDir(layout.buildDirectory.dir("generated/sources/secrets/kotlin/jvmMain"))
         }

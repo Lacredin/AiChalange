@@ -291,3 +291,245 @@ DELETE FROM invariant_entries WHERE id = ?;
 
 deleteAllInvariantEntries:
 DELETE FROM invariant_entries;
+
+CREATE TABLE multi_agent_subagents (
+    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    agent_key TEXT NOT NULL UNIQUE,
+    title TEXT NOT NULL,
+    description TEXT NOT NULL,
+    is_enabled INTEGER NOT NULL,
+    system_prompt TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+selectAllMultiAgentSubagents:
+SELECT *
+FROM multi_agent_subagents
+ORDER BY id ASC;
+
+selectMultiAgentSubagentByKey:
+SELECT *
+FROM multi_agent_subagents
+WHERE agent_key = ?;
+
+insertMultiAgentSubagent:
+INSERT INTO multi_agent_subagents(
+    agent_key,
+    title,
+    description,
+    is_enabled,
+    system_prompt,
+    created_at,
+    updated_at
+)
+VALUES (?, ?, ?, ?, ?, ?, ?);
+
+updateMultiAgentSubagentEnabledByKey:
+UPDATE multi_agent_subagents
+SET
+    is_enabled = ?,
+    updated_at = ?
+WHERE agent_key = ?;
+
+CREATE TABLE multi_agent_runs (
+    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    chat_id INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+    parent_run_id INTEGER REFERENCES multi_agent_runs(id) ON DELETE SET NULL,
+    user_request TEXT NOT NULL,
+    status TEXT NOT NULL,
+    resolution_type TEXT NOT NULL,
+    pending_question TEXT NOT NULL,
+    state_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+insertMultiAgentRun:
+INSERT INTO multi_agent_runs(
+    chat_id,
+    parent_run_id,
+    user_request,
+    status,
+    resolution_type,
+    pending_question,
+    state_json,
+    created_at,
+    updated_at
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+
+selectLastInsertedMultiAgentRunId:
+SELECT last_insert_rowid();
+
+updateMultiAgentRunStatus:
+UPDATE multi_agent_runs
+SET
+    status = ?,
+    resolution_type = ?,
+    pending_question = ?,
+    state_json = ?,
+    updated_at = ?
+WHERE id = ?;
+
+selectMultiAgentRunsByChat:
+SELECT *
+FROM multi_agent_runs
+WHERE chat_id = ?
+ORDER BY id ASC;
+
+selectLatestMultiAgentRunByChat:
+SELECT *
+FROM multi_agent_runs
+WHERE chat_id = ?
+ORDER BY id DESC
+LIMIT 1;
+
+deleteMultiAgentRunsByChat:
+DELETE FROM multi_agent_runs
+WHERE chat_id = ?;
+
+CREATE TABLE multi_agent_steps (
+    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL REFERENCES multi_agent_runs(id) ON DELETE CASCADE,
+    step_index INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    assignee_agent_key TEXT NOT NULL,
+    status TEXT NOT NULL,
+    input_payload TEXT NOT NULL,
+    output_payload TEXT NOT NULL,
+    validation_note TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+insertMultiAgentStep:
+INSERT INTO multi_agent_steps(
+    run_id,
+    step_index,
+    title,
+    assignee_agent_key,
+    status,
+    input_payload,
+    output_payload,
+    validation_note,
+    created_at,
+    updated_at
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+
+updateMultiAgentStepById:
+UPDATE multi_agent_steps
+SET
+    status = ?,
+    output_payload = ?,
+    validation_note = ?,
+    updated_at = ?
+WHERE id = ?;
+
+selectMultiAgentStepsByRun:
+SELECT *
+FROM multi_agent_steps
+WHERE run_id = ?
+ORDER BY step_index ASC, id ASC;
+
+deleteAllMultiAgentSteps:
+DELETE FROM multi_agent_steps;
+
+CREATE TABLE multi_agent_tool_calls (
+    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL REFERENCES multi_agent_runs(id) ON DELETE CASCADE,
+    step_id INTEGER REFERENCES multi_agent_steps(id) ON DELETE SET NULL,
+    tool_kind TEXT NOT NULL,
+    request_payload TEXT NOT NULL,
+    response_payload TEXT NOT NULL,
+    status TEXT NOT NULL,
+    error_code TEXT NOT NULL,
+    error_message TEXT NOT NULL,
+    latency_ms INTEGER NOT NULL,
+    created_at INTEGER NOT NULL
+);
+
+insertMultiAgentToolCall:
+INSERT INTO multi_agent_tool_calls(
+    run_id,
+    step_id,
+    tool_kind,
+    request_payload,
+    response_payload,
+    status,
+    error_code,
+    error_message,
+    latency_ms,
+    created_at
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+
+selectLastInsertedMultiAgentToolCallId:
+SELECT last_insert_rowid();
+
+selectMultiAgentToolCallsByRun:
+SELECT *
+FROM multi_agent_tool_calls
+WHERE run_id = ?
+ORDER BY id ASC;
+
+deleteMultiAgentToolCallsByRun:
+DELETE FROM multi_agent_tool_calls
+WHERE run_id = ?;
+
+deleteMultiAgentToolCallsByChat:
+DELETE FROM multi_agent_tool_calls
+WHERE run_id IN (SELECT id FROM multi_agent_runs WHERE chat_id = ?);
+
+deleteAllMultiAgentToolCalls:
+DELETE FROM multi_agent_tool_calls;
+
+CREATE TABLE multi_agent_events (
+    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER REFERENCES multi_agent_runs(id) ON DELETE CASCADE,
+    chat_id INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+    channel TEXT NOT NULL,
+    actor_type TEXT NOT NULL,
+    actor_key TEXT NOT NULL,
+    role TEXT NOT NULL,
+    message TEXT NOT NULL,
+    metadata_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+
+insertMultiAgentEvent:
+INSERT INTO multi_agent_events(
+    run_id,
+    chat_id,
+    channel,
+    actor_type,
+    actor_key,
+    role,
+    message,
+    metadata_json,
+    created_at
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+
+selectMultiAgentEventsByChat:
+SELECT *
+FROM multi_agent_events
+WHERE chat_id = ?
+ORDER BY id ASC;
+
+selectMultiAgentEventsByRun:
+SELECT *
+FROM multi_agent_events
+WHERE run_id = ?
+ORDER BY id ASC;
+
+deleteMultiAgentEventsByChat:
+DELETE FROM multi_agent_events
+WHERE chat_id = ?;
+
+deleteAllMultiAgentEvents:
+DELETE FROM multi_agent_events;
+
+deleteAllMultiAgentRuns:
+DELETE FROM multi_agent_runs;
