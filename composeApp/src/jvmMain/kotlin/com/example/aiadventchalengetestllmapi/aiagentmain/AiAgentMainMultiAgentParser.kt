@@ -87,6 +87,7 @@ internal object MultiAgentParser {
             toolName = mcpCall?.get("toolName")?.jsonPrimitive?.contentOrNull?.trim()?.ifBlank { null },
             endpoint = mcpCall?.get("endpoint")?.jsonPrimitive?.contentOrNull?.trim()?.ifBlank { null },
             arguments = mcpCall?.objectOrNull("arguments"),
+            outputFilter = mcpCall?.get("output_filter")?.jsonPrimitive?.contentOrNull?.trim()?.ifBlank { null },
             clarificationQuestions = root.arrayOrEmpty("clarification_questions")
                 .mapNotNull { it.jsonPrimitive.contentOrNull?.trim()?.ifBlank { null } }
                 .distinct(),

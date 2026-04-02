@@ -16,7 +16,8 @@ class MultiAgentParserAndOrchestratorTest {
               "mcp_call": {
                 "toolName": "search_docs",
                 "endpoint": "http://localhost",
-                "arguments": null
+                "arguments": null,
+                "output_filter": "keep only important"
               },
               "clarification_questions": null,
               "impossible_reason": null
@@ -28,6 +29,7 @@ class MultiAgentParserAndOrchestratorTest {
         assertEquals(MultiAgentMcpSelectionAction.NEED_CLARIFICATION, parsed.action)
         assertTrue(parsed.clarificationQuestions.isEmpty())
         assertEquals(null, parsed.arguments)
+        assertEquals("keep only important", parsed.outputFilter)
     }
 
     @Test
@@ -51,6 +53,7 @@ class MultiAgentParserAndOrchestratorTest {
         assertEquals(MultiAgentMcpSelectionAction.MCP_CALL, parsed.action)
         assertEquals("search_docs", parsed.toolName)
         assertEquals(null, parsed.arguments)
+        assertEquals(null, parsed.outputFilter)
     }
 
     @Test

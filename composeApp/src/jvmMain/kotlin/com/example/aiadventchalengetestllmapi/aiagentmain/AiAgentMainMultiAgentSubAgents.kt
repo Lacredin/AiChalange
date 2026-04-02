@@ -54,11 +54,12 @@ internal fun defaultMultiAgentSubagents(): List<MultiAgentSubagentDefinition> = 
     MultiAgentSubagentDefinition(
         key = "mcp_executor",
         title = "MCP Executor",
-        description = "Выполняет вызовы MCP инструментов и возвращает структурированный результат.",
+        description = "Выполняет вызовы MCP инструментов и при необходимости фильтрует результат по output_filter.",
         systemPrompt = """
             Ты субагент MCP Executor.
             Твоя задача: запускать MCP-инструменты по инструкции оркестратора и возвращать
             структурированный результат с кратким summary и diagnostics.
+            Если в параметрах инструмента есть output_filter, примени фильтрацию ответа.
             Пиши по-русски.
         """.trimIndent(),
         isEnabled = true

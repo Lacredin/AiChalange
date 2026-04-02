@@ -15,6 +15,7 @@ internal class MultiAgentOrchestrator(
     private val maxReplanAttempts: Int = 2
 ) {
     private val json = Json { ignoreUnknownKeys = true }
+    private val mcpFilterChunkSize = 9_000
 
     suspend fun execute(
         request: MultiAgentRequest,
@@ -432,22 +433,18 @@ internal class MultiAgentOrchestrator(
                 val mcpOutput = if (stepToolOutputs.isEmpty()) {
                     "mcp_executor: инструменты MCP для шага не назначены."
                 } else {
-                    val resultCandidates = stepToolOutputs.mapNotNull { line ->
-                        line.substringAfter(": ", missingDelimiterValue = "")
-                            .trim()
-                            .ifBlank { null }
-                    }.distinct()
-                    val validRefs = stepToolCallRefs.filter { it > 0L }
-                    buildString {
-                        appendLine("summary: MCP шаг выполнен.")
-                        appendLine("tool_call_refs: ${validRefs.joinToString(",")}")
-                        if (resultCandidates.isNotEmpty()) {
-                            appendLine("final_result_candidates:")
-                            resultCandidates.take(3).forEach { appendLine("- $it") }
-                        }
-                        appendLine("diagnostics:")
-                        stepToolOutputs.forEach { appendLine("- $it") }
-                    }.trim()
+                    buildMcpExecutorOutput(
+                        request = request,
+                        step = step,
+                        subagent = subagent,
+                        traceGroupId = traceGroupId,
+                        stepToolResults = stepToolResults,
+                        stepToolOutputs = stepToolOutputs,
+                        stepToolCallRefs = stepToolCallRefs.filter { it > 0L },
+                        callModel = callModel,
+                        onEvent = onEvent,
+                        diagnosticSubagent = diagnosticSubagent
+                    )
                 }
                 val done = MultiAgentStepExecution(
                     step = step,
@@ -867,6 +864,9 @@ internal class MultiAgentOrchestrator(
                         } else {
                             putJsonObject("arguments") { }
                         }
+                        selection.outputFilter?.takeIf { it.isNotBlank() }?.let { filter ->
+                            put("output_filter", filter)
+                        }
                     }
                     rewrittenTools += tool.copy(paramsJson = params.toString())
                 }
@@ -1177,6 +1177,232 @@ internal class MultiAgentOrchestrator(
         }
     }
 
+    private suspend fun buildMcpExecutorOutput(
+        request: MultiAgentRequest,
+        step: MultiAgentPlanStep,
+        subagent: MultiAgentSubagentDefinition,
+        traceGroupId: String,
+        stepToolResults: List<Pair<MultiAgentToolPlanItem, ToolGatewayResult>>,
+        stepToolOutputs: List<String>,
+        stepToolCallRefs: List<Long>,
+        callModel: suspend (MultiAgentModelCall) -> String,
+        onEvent: (MultiAgentEvent) -> Unit,
+        diagnosticSubagent: MultiAgentSubagentDefinition?
+    ): String {
+        val mcpResults = stepToolResults.filter { (tool, _) -> tool.toolKind == MultiAgentToolKind.MCP_CALL }
+        if (mcpResults.isEmpty()) {
+            return "mcp_executor: инструменты MCP для шага не назначены."
+        }
+
+        val filteredPayloads = mutableListOf<String>()
+        val filterDiagnostics = mutableListOf<String>()
+        var hasActiveFilter = false
+
+        mcpResults.forEachIndexed { index, (tool, result) ->
+            if (!result.success) return@forEachIndexed
+            val payload = result.normalizedOutput.trim().ifBlank { result.rawOutput.trim() }
+            if (payload.isBlank()) return@forEachIndexed
+            val outputFilter = extractOutputFilter(tool.paramsJson)
+            if (outputFilter.isNullOrBlank()) {
+                filteredPayloads += payload
+                return@forEachIndexed
+            }
+            hasActiveFilter = true
+            val filtered = applyMcpOutputFilter(
+                request = request,
+                step = step,
+                subagent = subagent,
+                traceGroupId = traceGroupId,
+                toolOrdinal = index + 1,
+                payload = payload,
+                outputFilter = outputFilter,
+                callModel = callModel,
+                onEvent = onEvent,
+                diagnosticSubagent = diagnosticSubagent
+            )
+            if (filtered.data.isNotBlank()) {
+                filteredPayloads += filtered.data
+            }
+            if (filtered.diagnostic.isNotBlank()) {
+                filterDiagnostics += filtered.diagnostic
+            }
+        }
+
+        val resultCandidates = filteredPayloads
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .distinct()
+        return buildString {
+            appendLine("summary: MCP шаг выполнен.")
+            appendLine("tool_call_refs: ${stepToolCallRefs.joinToString(",")}")
+            if (hasActiveFilter) {
+                if (resultCandidates.isNotEmpty()) {
+                    appendLine("filtered_result:")
+                    resultCandidates.take(3).forEach { appendLine("- $it") }
+                } else {
+                    appendLine("filtered_result:")
+                    appendLine("- (пусто)")
+                }
+            } else if (resultCandidates.isNotEmpty()) {
+                appendLine("final_result_candidates:")
+                resultCandidates.take(3).forEach { appendLine("- $it") }
+            }
+            appendLine("diagnostics:")
+            stepToolOutputs.forEach { appendLine("- $it") }
+            filterDiagnostics.forEach { appendLine("- $it") }
+        }.trim()
+    }
+
+    private suspend fun applyMcpOutputFilter(
+        request: MultiAgentRequest,
+        step: MultiAgentPlanStep,
+        subagent: MultiAgentSubagentDefinition,
+        traceGroupId: String,
+        toolOrdinal: Int,
+        payload: String,
+        outputFilter: String,
+        callModel: suspend (MultiAgentModelCall) -> String,
+        onEvent: (MultiAgentEvent) -> Unit,
+        diagnosticSubagent: MultiAgentSubagentDefinition?
+    ): FilteredMcpPayload {
+        return runCatching {
+            val chunks = chunkBySize(payload, mcpFilterChunkSize)
+            emitSubagentTraceEvent(
+                onEvent = onEvent,
+                subagent = subagent,
+                step = step,
+                traceGroupId = traceGroupId,
+                phase = MultiAgentTracePhase.TOOL_SELECTION,
+                message = "mcp_filter_start: tool#$toolOrdinal chunks=${chunks.size} filter=$outputFilter"
+            )
+            val filteredParts = mutableListOf<String>()
+            chunks.forEachIndexed { index, chunk ->
+                val chunkPrompt = MultiAgentPromptFactory.mcpChunkFilterPrompt(
+                    userRequest = request.userRequest,
+                    step = step,
+                    outputFilter = outputFilter,
+                    chunkIndex = index + 1,
+                    totalChunks = chunks.size,
+                    chunkText = chunk
+                )
+                val chunkRaw = callModel(
+                    MultiAgentModelCall(
+                        messages = listOf(
+                            DeepSeekMessage(role = "system", content = subagent.systemPrompt),
+                            DeepSeekMessage(role = "user", content = chunkPrompt)
+                        ),
+                        responseAsJson = false,
+                        temperature = 0.1,
+                        topP = 0.2,
+                        maxTokens = 1400
+                    )
+                ).trim()
+                onEvent(
+                    MultiAgentEvent(
+                        channel = MultiAgentEventChannel.TRACE,
+                        actorType = "subagent",
+                        actorKey = "mcp_filter",
+                        role = "assistant",
+                        message = "MCP_FILTER_CHUNK tool=$toolOrdinal chunk=${index + 1}/${chunks.size}\n$chunkRaw"
+                    )
+                )
+                if (chunkRaw.isNotBlank() && !chunkRaw.equals("NO_MATCH", ignoreCase = true)) {
+                    filteredParts += chunkRaw
+                }
+            }
+            val merged = mergeFilteredChunks(
+                request = request,
+                step = step,
+                subagent = subagent,
+                outputFilter = outputFilter,
+                filteredParts = filteredParts,
+                callModel = callModel
+            )
+            FilteredMcpPayload(
+                data = merged,
+                diagnostic = "mcp_filter_ok tool#$toolOrdinal chunks=${chunks.size} kept_parts=${filteredParts.size}"
+            )
+        }.getOrElse { error ->
+            onEvent(
+                MultiAgentEvent(
+                    channel = MultiAgentEventChannel.TRACE,
+                    actorType = "orchestrator",
+                    actorKey = "mcp_filter_error",
+                    role = "assistant",
+                    message = "mcp_filter_error tool#$toolOrdinal: ${error::class.simpleName}: ${error.message.orEmpty()}"
+                )
+            )
+            runDiagnosticSubagent(
+                request = request,
+                planningDecision = null,
+                steps = emptyList(),
+                error = error,
+                diagnosticSubagent = diagnosticSubagent,
+                callModel = callModel,
+                onEvent = onEvent,
+                extraContext = "phase=mcp_filter toolOrdinal=$toolOrdinal filter=$outputFilter"
+            )
+            FilteredMcpPayload(
+                data = payload,
+                diagnostic = "mcp_filter_failed tool#$toolOrdinal fallback=raw"
+            )
+        }
+    }
+
+    private suspend fun mergeFilteredChunks(
+        request: MultiAgentRequest,
+        step: MultiAgentPlanStep,
+        subagent: MultiAgentSubagentDefinition,
+        outputFilter: String,
+        filteredParts: List<String>,
+        callModel: suspend (MultiAgentModelCall) -> String
+    ): String {
+        if (filteredParts.isEmpty()) return ""
+        if (filteredParts.size == 1) return filteredParts.first()
+        val mergePrompt = MultiAgentPromptFactory.mcpFilteredMergePrompt(
+            userRequest = request.userRequest,
+            step = step,
+            outputFilter = outputFilter,
+            filteredChunks = filteredParts
+        )
+        val merged = runCatching {
+            callModel(
+                MultiAgentModelCall(
+                    messages = listOf(
+                        DeepSeekMessage(role = "system", content = subagent.systemPrompt),
+                        DeepSeekMessage(role = "user", content = mergePrompt)
+                    ),
+                    responseAsJson = false,
+                    temperature = 0.1,
+                    topP = 0.2,
+                    maxTokens = 1600
+                )
+            ).trim()
+        }.getOrDefault("")
+        return merged.ifBlank { filteredParts.joinToString("\n") }
+    }
+
+    private fun extractOutputFilter(paramsJson: String): String? {
+        val raw = paramsJson.trim()
+        if (raw.isBlank()) return null
+        return runCatching {
+            json.parseToJsonElement(raw).jsonObject["output_filter"]?.jsonPrimitive?.contentOrNull?.trim()
+        }.getOrNull()?.ifBlank { null }
+    }
+
+    private fun chunkBySize(text: String, maxChunkSize: Int): List<String> {
+        if (text.isBlank()) return emptyList()
+        if (text.length <= maxChunkSize) return listOf(text)
+        val chunks = mutableListOf<String>()
+        var cursor = 0
+        while (cursor < text.length) {
+            val end = (cursor + maxChunkSize).coerceAtMost(text.length)
+            chunks += text.substring(cursor, end)
+            cursor = end
+        }
+        return chunks
+    }
+
     private suspend fun runDiagnosticSubagent(
         request: MultiAgentRequest,
         planningDecision: MultiAgentPlanningDecision?,
@@ -1325,6 +1551,11 @@ internal class MultiAgentOrchestrator(
             return "$base error=${result.errorCode}:${result.errorMessage}"
         }
     }
+
+    private data class FilteredMcpPayload(
+        val data: String,
+        val diagnostic: String
+    )
 
     private data class PreflightResult(
         val toolPlan: MultiAgentToolPlan?,

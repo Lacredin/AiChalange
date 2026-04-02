@@ -177,7 +177,7 @@ internal object MultiAgentPromptFactory {
         appendLine("Ты субагент выбора MCP инструмента и подготовки параметров вызова.")
         appendLine("Верни только JSON без markdown по контракту:")
         appendLine(
-            """{"action":"MCP_CALL|NEED_CLARIFICATION|IMPOSSIBLE","reason":"...","mcp_call":{"toolName":"...","endpoint":"...","arguments":{}},"clarification_questions":["..."],"impossible_reason":"..."}"""
+            """{"action":"MCP_CALL|NEED_CLARIFICATION|IMPOSSIBLE","reason":"...","mcp_call":{"toolName":"...","endpoint":"...","arguments":{},"output_filter":"optional filter rule"},"clarification_questions":["..."],"impossible_reason":"..."}"""
         )
         appendLine("Правила:")
         appendLine("1) Если выбираешь MCP_CALL, поле mcp_call.toolName обязательно и непустое.")
@@ -210,6 +210,46 @@ internal object MultiAgentPromptFactory {
         appendLine()
         appendLine("Контекст диалога:")
         appendLine(conversationContext.ifBlank { "(пусто)" })
+    }.trim()
+
+    fun mcpChunkFilterPrompt(
+        userRequest: String,
+        step: MultiAgentPlanStep,
+        outputFilter: String,
+        chunkIndex: Int,
+        totalChunks: Int,
+        chunkText: String
+    ): String = buildString {
+        appendLine("Ты обрабатываешь chunk результата MCP-инструмента.")
+        appendLine("Верни только данные, соответствующие фильтру.")
+        appendLine("Если подходящих данных нет, верни ровно: NO_MATCH")
+        appendLine()
+        appendLine("Запрос пользователя: $userRequest")
+        appendLine("Шаг #${step.index}: ${step.title}")
+        appendLine("Фильтр: $outputFilter")
+        appendLine("Chunk: $chunkIndex/$totalChunks")
+        appendLine()
+        appendLine("Данные chunk:")
+        appendLine(chunkText)
+    }.trim()
+
+    fun mcpFilteredMergePrompt(
+        userRequest: String,
+        step: MultiAgentPlanStep,
+        outputFilter: String,
+        filteredChunks: List<String>
+    ): String = buildString {
+        appendLine("Объедини уже отфильтрованные фрагменты и убери дубли.")
+        appendLine("Верни только итоговые отфильтрованные данные без пояснений.")
+        appendLine()
+        appendLine("Запрос пользователя: $userRequest")
+        appendLine("Шаг #${step.index}: ${step.title}")
+        appendLine("Фильтр: $outputFilter")
+        appendLine()
+        filteredChunks.forEachIndexed { index, text ->
+            appendLine("=== FILTERED_PART_${index + 1} ===")
+            appendLine(text)
+        }
     }.trim()
 
     private fun extractCriticalStepHighlights(output: String): List<String> {

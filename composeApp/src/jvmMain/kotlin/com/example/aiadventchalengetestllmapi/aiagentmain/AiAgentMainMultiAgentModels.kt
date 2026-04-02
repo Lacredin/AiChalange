@@ -139,6 +139,7 @@ internal data class MultiAgentMcpSelectionDecision(
     val toolName: String?,
     val endpoint: String?,
     val arguments: JsonObject?,
+    val outputFilter: String?,
     val clarificationQuestions: List<String>,
     val impossibleReason: String?
 )
